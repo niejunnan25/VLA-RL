@@ -1,62 +1,50 @@
 # VLA-RL Architecture
 
-VLA-RL is organized around four replaceable boundaries:
+VLA-RL is a thin bridge package for frozen VLA reference-policy inference. It is
+not the long-term training framework for RLT, PLD, residual RL, or other
+sample-efficient frozen-VLA RL methods. Training loops, replay semantics,
+checkpointing, and experiment recipes should live in `serl_torch` examples.
 
-- `PolicyBackend`: wraps a base VLA policy such as OpenPI or StarVLA.
-- `EnvBackend`: wraps robot environments such as LIBERO.
-- `Algorithm`: implements action selection and learning.
-- `Runner`: coordinates environment rollout, policy features, replay data, and
-  learner updates.
+## Boundaries
 
-The system center is the interface contract, not any specific policy,
-environment, or algorithm.
+The intended boundaries are:
 
-## v0 Scope
+- Model repositories such as OpenPI, StarVLA, and JoyRA expose frozen policy
+  capabilities, for example `predict_action_with_features()`. They do not own
+  RL training.
+- VLA-RL provides small client/server adapters and schema tests for reference
+  actions and VLA features.
+- `serl_torch` owns actor/learner loops, replay buffers, update logic, and
+  benchmark recipes.
 
-The first real implementation target is:
+This keeps VLA dependencies isolated in their own Python environments while
+preserving SERL-style explicit training scripts in the RL repository.
 
-- Policies: OpenPI, StarVLA
-- Environment: LIBERO
-- Algorithms: RLT, PLD, residual SAC
+## Current Bridge Contract
 
-Milestone 1 keeps fake components for deterministic tests, and adds the first
-real boundaries:
-
-- `OpenPIBackend` for Torch OpenPI policies.
-- `LiberoRemoteEnvBackend` for LIBERO over HTTP RPC.
-- `LocalActorLearnerRunner` plus in-memory replay for single-process smoke
-  tests.
-- `RLTAgent` plus `RLTFeatureProcessor` for the first real algorithm path.
-
-The LIBERO server itself remains external for now. `scripts/serve_libero_env.py`
-delegates to the validated server in `serl_torch-rlt-merge`, keeping VLA-RL's
-first version focused on framework contracts rather than environment vendoring.
-
-## Data Flow
+For RLT, a reference-policy server returns:
 
 ```text
-EnvBackend.reset/step
-  -> Observation
-  -> PolicyBackend.sample_actions / extract_features
-  -> optional FeatureProcessor
-  -> Algorithm.act
-  -> ActionChunk
-  -> EnvBackend.step
-  -> Transition
-  -> ReplayBuffer
-  -> Algorithm.update
+Observation
+  -> reference_actions
+  -> features["prefix"]
 ```
 
-All components exchange shared schema objects from `vla_rl.data.schema`.
+The training side turns this into:
 
-## Runtime Levels
+```text
+prefix features -> frozen RLTokenEncoder -> z_rl
+reference_actions -> RLT actor condition and BC target
+```
 
-- `LocalRunner`: minimal one-transition-at-a-time loop for fake smoke tests.
-- `LocalActorLearnerRunner`: local replay-backed loop that executes action
-  chunks through `EnvBackend.step_chunk`, records `Transition.discount` as
-  `gamma ** executed_steps`, updates the algorithm from replay, writes run
-  artifacts, checkpoints algorithm state, and can run synchronous evaluation on
-  a separate environment backend.
+The bridge should stay minimal: it may know how to call OpenPI or another VLA
+provider, but it should not add new generic runners, algorithm registries, or
+replay systems.
 
-Distributed actor/learner, async eval, checkpoint servers, and algorithm-specific
-distributed training loops are intentionally deferred to later milestones.
+## Deprecated Direction
+
+Earlier local experiments added generic `Algorithm`, `Runner`, local
+actor/learner, and Agentlace runtime abstractions inside VLA-RL. Those were useful
+for smoke tests, but they should not continue as the main training stack. New RLT
+and PLD work should be implemented in `serl_torch`, with VLA-RL used only where a
+standalone reference-policy bridge is useful.
