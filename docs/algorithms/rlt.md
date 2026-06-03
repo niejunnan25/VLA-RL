@@ -105,3 +105,6 @@ scripts/launch_agentlace_rlt.sh \
   --actor-gpu 0 \
   --learner-gpu 1
 ```
+
+For the full Agentlace runbook, environment split, port conventions, smoke
+commands, and metrics checks, see `docs/runtime/agentlace_rlt.md`.

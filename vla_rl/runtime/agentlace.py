@@ -23,6 +23,7 @@ class AgentlaceLearnerRuntime(Runner):
     def __init__(
         self,
         algorithm: Algorithm,
+        max_env_steps: int = 0,
         max_update_steps: int = 1000,
         batch_size: int = 1,
         replay_capacity: int = 100_000,
@@ -41,6 +42,7 @@ class AgentlaceLearnerRuntime(Runner):
         request_type: str = "send-stats",
     ) -> None:
         self.algorithm = algorithm
+        self.max_env_steps = int(max_env_steps)
         self.max_update_steps = int(max_update_steps)
         self.batch_size = int(batch_size)
         self.training_starts = int(training_starts)
@@ -58,6 +60,8 @@ class AgentlaceLearnerRuntime(Runner):
         self.request_type = str(request_type)
         self.replay = CompactReplayBuffer(capacity=replay_capacity, seed=replay_seed)
         self._actor_stats: list[dict[str, Any]] = []
+        self._actor_done = False
+        self._actor_done_env_steps = 0
 
     def run(self) -> dict:
         agentlace = _import_agentlace()
@@ -90,7 +94,37 @@ class AgentlaceLearnerRuntime(Runner):
         last_wait_publish_time = time.perf_counter()
         last_update: dict[str, Any] = {}
         try:
-            while update_steps < self.max_update_steps:
+            while not self._should_stop(update_steps, env_steps):
+                env_steps = self._current_env_steps(env_steps)
+                if update_steps >= self.max_update_steps:
+                    now = time.perf_counter()
+                    if now - last_wait_publish_time >= 1.0:
+                        server.publish_network(self.algorithm.policy_state_dict())
+                        last_wait_publish_time = now
+                    if now - last_wait_metric_time >= 1.0:
+                        self._write_metric(
+                            {
+                                "role": "learner",
+                                "event": "waiting_for_actor_env",
+                                "replay_size": len(self.replay),
+                                "target_env_steps": self.max_env_steps,
+                                "update_steps": update_steps,
+                                "env_steps": env_steps,
+                                "actor_done": self._actor_done,
+                                "wall_time_sec": now - start_time,
+                            }
+                        )
+                        last_wait_metric_time = now
+                    if (
+                        self.checkpoints is not None
+                        and self.checkpoint_interval_env_steps > 0
+                        and env_steps >= next_ckpt_env_at
+                    ):
+                        self._save_checkpoint(env_steps, update_steps, episodes, total_reward)
+                        next_ckpt_env_at += self.checkpoint_interval_env_steps
+                    time.sleep(self.update_sleep_sec)
+                    continue
+
                 if len(self.replay) < max(self.batch_size, self.training_starts):
                     now = time.perf_counter()
                     if now - last_wait_publish_time >= 1.0:
@@ -150,6 +184,14 @@ class AgentlaceLearnerRuntime(Runner):
             if callable(stop):
                 stop()
 
+        env_steps = self._current_env_steps(env_steps)
+        if (
+            self.checkpoints is not None
+            and self.checkpoint_interval_env_steps > 0
+            and env_steps >= next_ckpt_env_at
+        ):
+            self._save_checkpoint(env_steps, update_steps, episodes, total_reward)
+
         summary = {
             "role": "learner",
             "env_steps": env_steps,
@@ -168,6 +210,9 @@ class AgentlaceLearnerRuntime(Runner):
             stat = dict(payload or {})
             stat.setdefault("role", "actor")
             self._actor_stats.append(stat)
+            if stat.get("event") == "actor_summary":
+                self._actor_done = True
+                self._actor_done_env_steps = max(self._actor_done_env_steps, int(stat.get("env_steps", 0)))
             self._write_metric(stat)
             return {"ok": True}
         return {"ok": False, "error": f"unsupported request type: {request_type}"}
@@ -223,6 +268,16 @@ class AgentlaceLearnerRuntime(Runner):
         if interval <= 0:
             return 0
         return ((int(current) // int(interval)) + 1) * int(interval)
+
+    def _should_stop(self, update_steps: int, env_steps: int) -> bool:
+        if update_steps < self.max_update_steps:
+            return False
+        if self.max_env_steps <= 0:
+            return True
+        return self._current_env_steps(env_steps) >= self.max_env_steps or self._actor_done
+
+    def _current_env_steps(self, env_steps: int) -> int:
+        return max(int(env_steps), int(self.replay.latest_env_steps), int(self._actor_done_env_steps))
 
 
 class AgentlaceActorRuntime(Runner):
@@ -366,6 +421,10 @@ class AgentlaceActorRuntime(Runner):
                 "received_policy_state": self._has_policy_state,
             }
             self._write_actor_metric({"summary": summary})
+            try:
+                client.request(self.request_type, {"event": "actor_summary", **summary})
+            except Exception:
+                pass
             if self.run_dir is not None:
                 (self.run_dir / "actor_summary.json").write_text(
                     json.dumps(_json_sanitize(summary), indent=2, sort_keys=True) + "\n"

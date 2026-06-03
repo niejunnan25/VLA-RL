@@ -130,3 +130,7 @@ scripts/launch_agentlace_rlt.sh \
 
 The actor sends compact RLT transitions to the learner rather than raw images.
 The learner owns replay, updates, metrics, and checkpoints.
+
+See `docs/runtime/agentlace_rlt.md` for the full runbook, including the
+separate actor/learner Python environments, known dependency requirements, port
+conventions, smoke commands, 1k sanity checks, and how to interpret metrics.
