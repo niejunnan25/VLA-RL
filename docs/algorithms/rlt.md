@@ -8,7 +8,7 @@ checkpoint and trains only the RLT actor/critic.
 
 ```text
 LIBERO Observation
-  -> OpenPIBackend.sample_actions / extract_features
+  -> RLT reference policy predict_action_with_features
   -> RLTFeatureProcessor
   -> agent_obs: z_rl + reference_action + proprio
   -> RLTAgent.act
@@ -18,9 +18,19 @@ LIBERO Observation
   -> RLTAgent.update
 ```
 
-`OpenPIBackend` remains a base VLA adapter. It returns prefix/suffix VLA hidden
-states and reference actions. RLT-specific `z_rl` construction happens in
+The frozen VLA is treated as an RLT reference policy. It returns reference
+actions and prefix VLA hidden states in one call. RLT-specific `z_rl` construction happens in
 `RLTFeatureProcessor`, not inside the OpenPI backend.
+
+The first reference policy implementation wraps OpenPI. The model-side hook is:
+
+```python
+predict_action_with_features(...)
+```
+
+It should return a dict containing `actions` and `features["prefix"]`. Future
+StarVLA/JoyRA integrations should expose the same semantic hook, while RLT
+training continues to consume the common `PolicyFeatures` structure.
 
 ## Algorithm Semantics
 

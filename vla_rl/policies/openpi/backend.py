@@ -83,28 +83,28 @@ class _OpenPIBasePolicy:
 
     @torch.no_grad()
     def infer_features(self, raw_obs: dict[str, Any], num_steps: int = 10) -> _OpenPIFeatureBatch:
-        if not hasattr(self.model, "sample_actions_with_features"):
-            raise RuntimeError(
-                "OpenPI model must expose sample_actions_with_features() for RLT feature inference. "
-                "Use the RLT OpenPI fork with fused action and prefix feature extraction."
-            )
         obs_torch = self.raw_obs_to_torch(raw_obs)
         obs_obj = self.to_observation(obs_torch)
-        result = self.model.sample_actions_with_features(
+        if not hasattr(self.model, "predict_action_with_features"):
+            raise RuntimeError(
+                "OpenPI model does not expose predict_action_with_features(). "
+                "Use the OpenPI RLT branch that returns reference actions and prefix features in one forward pass."
+            )
+        out = self.model.predict_action_with_features(
             device=self.device,
             observation=obs_obj,
             noise=None,
             num_steps=num_steps,
         )
-        if not isinstance(result, dict) or "actions" not in result:
-            raise RuntimeError("sample_actions_with_features() must return a dict containing 'actions'")
-        features = result.get("features")
+        if not isinstance(out, dict) or "actions" not in out or "features" not in out:
+            raise RuntimeError("predict_action_with_features() must return a dict with 'actions' and 'features'")
+        features = out["features"]
         if not isinstance(features, dict) or "prefix" not in features:
-            raise RuntimeError("sample_actions_with_features() must return features['prefix']")
-        ref_actions = result["actions"]
+            raise RuntimeError("predict_action_with_features()['features'] must contain 'prefix'")
+        ref_actions = out["actions"]
         unnorm_actions = self._unnormalize_actions(obs_torch, ref_actions)
         return _OpenPIFeatureBatch(
-            prefix=features["prefix"].to(torch.float32),
+            prefix=torch.as_tensor(features["prefix"], device=self.device).to(torch.float32),
             reference_actions=unnorm_actions,
         )
 
@@ -156,10 +156,9 @@ class OpenPIBackend(PolicyBackend):
         actions: ActionChunk | None = None,
         **kwargs,
     ) -> PolicyFeatures:
-        del actions
         if hasattr(self.policy, "infer_features"):
             openpi_obs = self._to_openpi_observation(obs, task=obs.task)
-            feature_batch = self.policy.infer_features(openpi_obs, **kwargs)
+            feature_batch = self.policy.infer_features(openpi_obs)
             features = PolicyFeatures(
                 reference_actions=self._normalize_reference_actions(feature_batch.reference_actions),
                 embeddings={
@@ -171,21 +170,22 @@ class OpenPIBackend(PolicyBackend):
             features.validate()
             return features
 
-        if not hasattr(self.policy, "sample_actions_with_features"):
+        if not hasattr(self.policy, "predict_action_with_features"):
             raise RuntimeError(
-                "OpenPI policy must expose sample_actions_with_features() for RLT feature inference."
+                "OpenPI policy does not expose predict_action_with_features(). "
+                "Use the OpenPI RLT branch that returns reference actions and prefix features in one call."
             )
 
         openpi_obs = self._to_openpi_observation(obs, task=obs.task)
-        result = self.policy.sample_actions_with_features(openpi_obs, **kwargs)
-        if not isinstance(result, dict) or "actions" not in result:
-            raise RuntimeError("sample_actions_with_features() must return a dict containing 'actions'")
-        feature_dict = result.get("features")
+        del actions
+        out = self.policy.predict_action_with_features(openpi_obs, **kwargs)
+        if not isinstance(out, dict) or "actions" not in out or "features" not in out:
+            raise RuntimeError("predict_action_with_features() must return a dict with 'actions' and 'features'")
+        feature_dict = out["features"]
         if not isinstance(feature_dict, dict) or "prefix" not in feature_dict:
-            raise RuntimeError("sample_actions_with_features() must return features['prefix']")
-        reference_actions = self._normalize_action_array(result["actions"])
+            raise RuntimeError("predict_action_with_features()['features'] must contain 'prefix'")
         features = PolicyFeatures(
-            reference_actions=reference_actions,
+            reference_actions=self._normalize_reference_actions(out["actions"]),
             embeddings={
                 "prefix": self._to_numpy(feature_dict["prefix"]),
             },

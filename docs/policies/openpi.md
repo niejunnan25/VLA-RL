@@ -9,7 +9,7 @@ interface.
 - Load an OpenPI trained policy from `config_name` and `checkpoint_path`.
 - Convert `Observation` into an OpenPI-style observation dict.
 - Return base policy actions as `ActionChunk`.
-- Return OpenPI hidden states as `PolicyFeatures`.
+- Return OpenPI reference actions and prefix hidden states as `PolicyFeatures`.
 
 ## Observation Bridge
 
@@ -39,21 +39,12 @@ RLT-specific encoded features should use `z_rl` later, outside this backend.
 The OpenPI model must expose:
 
 ```python
-sample_actions_with_features(device, observation, noise=None, num_steps=10)
+predict_action_with_features(...)
 ```
 
-The method must return the sampled reference action chunk and the prefix hidden
-states from the same VLA inference call:
-
-```python
-{
-    "actions": actions,
-    "features": {"prefix": prefix_hidden},
-}
-```
-
-Use the RLT OpenPI fork with fused action and prefix feature extraction. The
-first supported real checkpoints are:
+The method must return both normalized reference actions and prefix features
+from the same model pass. Use the `niejunnan25/openpi` RLT branch. The first supported real
+checkpoints are:
 
 ```text
 /vla/users/niejunnan/assets/openpi-assets/checkpoints/pi05_libero_pytorch

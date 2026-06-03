@@ -14,13 +14,38 @@ the learner-side algorithm.
   `/vla/users/niejunnan/codebase/serl_torch-rlt-merge/examples/libero/tools/serve_env.sh`
   wrapper.
 - OpenPI fork: the configured `openpi_root` must expose
-  `PI0Pytorch.sample_actions_with_features()`. The default fork path is
+  `PI0Pytorch.predict_action_with_features()`. The default fork path is
   `/vla/users/niejunnan/codebase/openpi-rlt-github`.
 
 The 234 smoke environment required these packages:
 
 - `serl_torch`: `numpydantic`, `tyro`.
 - OpenPI venv: `agentlace`, `lz4`.
+
+## Reference Policy Server
+
+RLT treats the frozen VLA as a reference policy: it provides the reference
+action chunk and prefix hidden states used by `RLTFeatureProcessor`.
+
+The in-process actor path can load OpenPI directly through `OpenPIBackend`.
+For model isolation, the same contract can be served over the lightweight
+pickle HTTP RPC:
+
+```bash
+python scripts/serve_reference_policy.py \
+  --policy openpi \
+  --policy-root /vla/users/niejunnan/codebase/openpi-rlt-github \
+  --config-name pi0_libero \
+  --checkpoint-path /vla/users/niejunnan/assets/openpi-assets/checkpoints/pi0_libero_pytorch \
+  --device cuda \
+  --host 127.0.0.1 \
+  --port 8899
+```
+
+Training recipes can then point their policy target at
+`vla_rl.algorithms.rlt.ReferencePolicyClient` with `url=http://127.0.0.1:8899`.
+This keeps the RLT actor loop independent of whether the reference policy is
+OpenPI, StarVLA, or another frozen VLA.
 
 ## Launcher Parameters
 
