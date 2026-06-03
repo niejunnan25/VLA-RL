@@ -19,7 +19,7 @@ policy:
   _target_: vla_rl.policies.openpi.OpenPIBackend
   openpi_root: /vla/users/niejunnan/codebase/openpi-rlt-github
   config_name: pi0_libero
-  checkpoint_path: /vla/users/yixin/base_model/openpi-assets/checkpoints/pi0_libero_pytorch
+  checkpoint_path: /vla/users/niejunnan/assets/openpi-assets/checkpoints/pi0_libero_pytorch
   action_dim: 7
   device: cuda
 

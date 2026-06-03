@@ -48,7 +48,7 @@ checkpoints are:
 
 ```text
 /vla/users/niejunnan/assets/openpi-assets/checkpoints/pi05_libero_pytorch
-/vla/users/yixin/base_model/openpi-assets/checkpoints/pi0_libero_pytorch
+/vla/users/niejunnan/assets/openpi-assets/checkpoints/pi0_libero_pytorch
 ```
 
 OpenPI policy loading expects checkpoint-local assets, including
