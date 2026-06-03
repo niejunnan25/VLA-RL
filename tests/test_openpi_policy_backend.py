@@ -8,20 +8,23 @@ from vla_rl.policies.openpi import OpenPIBackend
 class MockOpenPIPolicy:
     def __init__(self):
         self.last_obs = None
-        self.last_actions = None
+        self.feature_calls = 0
 
     def sample_actions(self, obs, **kwargs):
         del kwargs
         self.last_obs = obs
         return np.ones((1, 3, 32), dtype=np.float32)
 
-    def extract_embeddings(self, obs, actions=None, **kwargs):
+    def sample_actions_with_features(self, obs, **kwargs):
         del kwargs
         self.last_obs = obs
-        self.last_actions = actions
-        prefix = np.zeros((1, 5, 8), dtype=np.float32)
-        suffix = np.ones((1, 3, 4), dtype=np.float32)
-        return prefix, suffix
+        self.feature_calls += 1
+        return {
+            "actions": np.ones((1, 3, 32), dtype=np.float32),
+            "features": {
+                "prefix": np.zeros((1, 5, 8), dtype=np.float32),
+            },
+        }
 
 
 class NoFeaturePolicy:
@@ -55,14 +58,12 @@ def test_openpi_sample_actions_returns_action_chunk():
 def test_openpi_extract_features_returns_policy_features():
     policy = MockOpenPIPolicy()
     backend = OpenPIBackend(config_name="pi05_libero", checkpoint_path="/tmp/ckpt", policy=policy)
-    obs = make_obs()
-    chunk = backend.sample_actions(obs)
-    features = backend.extract_features(obs, actions=chunk)
+    features = backend.extract_features(make_obs())
 
     assert features.reference_actions.shape == (3, 32)
     assert features.embeddings["prefix"].shape == (1, 5, 8)
-    assert features.embeddings["suffix"].shape == (1, 3, 4)
-    assert np.array_equal(policy.last_actions, chunk.actions)
+    assert "suffix" not in features.embeddings
+    assert policy.feature_calls == 1
     assert features.metadata["checkpoint_path"] == "/tmp/ckpt"
 
 
@@ -75,7 +76,7 @@ def test_openpi_observation_raw_override():
     assert policy.last_obs == {"custom": True}
 
 
-def test_openpi_missing_extract_embeddings_has_clear_error():
+def test_openpi_missing_sample_actions_with_features_has_clear_error():
     backend = OpenPIBackend(config_name="pi05_libero", checkpoint_path="/tmp/ckpt", policy=NoFeaturePolicy())
-    with pytest.raises(RuntimeError, match="extract_embeddings"):
+    with pytest.raises(RuntimeError, match="sample_actions_with_features"):
         backend.extract_features(make_obs())

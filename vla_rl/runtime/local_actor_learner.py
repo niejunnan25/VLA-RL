@@ -107,8 +107,8 @@ class LocalActorLearnerRunner(Runner):
         while env_steps < self.max_env_steps:
             chunk_start = time.perf_counter()
             if self.feature_processor is None:
-                reference = self.policy.sample_actions(obs, task=obs.task)
-                features = self.policy.extract_features(obs, actions=reference)
+                features = self.policy.extract_features(obs)
+                reference = self._reference_chunk_from_features(features)
             else:
                 features = self.policy.extract_features(obs)
                 reference = self._reference_chunk_from_features(features)
@@ -207,7 +207,7 @@ class LocalActorLearnerRunner(Runner):
 
     def _reference_chunk_from_features(self, features):
         if features.reference_actions is None:
-            raise ValueError("feature_processor path requires PolicyFeatures.reference_actions for warmup/reference actions")
+            raise ValueError("PolicyFeatures.reference_actions is required for warmup/reference actions")
         from vla_rl.data import ActionChunk
 
         reference = ActionChunk(
@@ -270,8 +270,7 @@ class LocalActorLearnerRunner(Runner):
             info: dict[str, Any] = {}
             while not (done or truncated):
                 if self.eval_feature_processor is None:
-                    reference = self.eval_policy.sample_actions(obs, task=obs.task)
-                    features = self.eval_policy.extract_features(obs, actions=reference)
+                    features = self.eval_policy.extract_features(obs)
                     agent_obs = None
                 else:
                     features = self.eval_policy.extract_features(obs)

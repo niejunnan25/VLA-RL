@@ -14,7 +14,7 @@ the learner-side algorithm.
   `/vla/users/niejunnan/codebase/serl_torch-rlt-merge/examples/libero/tools/serve_env.sh`
   wrapper.
 - OpenPI fork: the configured `openpi_root` must expose
-  `PI0Pytorch.extract_embeddings()`. The default fork path is
+  `PI0Pytorch.sample_actions_with_features()`. The default fork path is
   `/vla/users/niejunnan/codebase/openpi-rlt-github`.
 
 The 234 smoke environment required these packages:

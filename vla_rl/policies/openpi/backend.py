@@ -53,7 +53,6 @@ def _patch_python310_datetime_utc() -> None:
 @dataclass(frozen=True)
 class _OpenPIFeatureBatch:
     prefix: torch.Tensor
-    suffix: torch.Tensor
     reference_actions: np.ndarray
 
 
@@ -75,15 +74,6 @@ class _OpenPIBasePolicy:
     def to_observation(self, obs_torch: dict[str, Any]) -> Any:
         return self.observation_cls.from_dict(obs_torch)
 
-    @torch.no_grad()
-    def _sample_model_actions(self, obs_obj: Any, num_steps: int = 10) -> torch.Tensor:
-        return self.model.sample_actions(
-            device=self.device,
-            observation=obs_obj,
-            noise=None,
-            num_steps=num_steps,
-        )
-
     def _unnormalize_actions(self, obs_torch: dict[str, Any], actions: torch.Tensor) -> np.ndarray:
         out = {
             "state": obs_torch["state"].detach().cpu()[0],
@@ -93,19 +83,28 @@ class _OpenPIBasePolicy:
 
     @torch.no_grad()
     def infer_features(self, raw_obs: dict[str, Any], num_steps: int = 10) -> _OpenPIFeatureBatch:
+        if not hasattr(self.model, "sample_actions_with_features"):
+            raise RuntimeError(
+                "OpenPI model must expose sample_actions_with_features() for RLT feature inference. "
+                "Use the RLT OpenPI fork with fused action and prefix feature extraction."
+            )
         obs_torch = self.raw_obs_to_torch(raw_obs)
         obs_obj = self.to_observation(obs_torch)
-        ref_actions = self._sample_model_actions(obs_obj, num_steps=num_steps)
-        if not hasattr(self.model, "extract_embeddings"):
-            raise RuntimeError(
-                "OpenPI model does not expose extract_embeddings(). "
-                "Use the niejunnan25/openpi RLT extractor branch."
-            )
-        prefix, suffix = self.model.extract_embeddings(obs_obj, actions=ref_actions)
+        result = self.model.sample_actions_with_features(
+            device=self.device,
+            observation=obs_obj,
+            noise=None,
+            num_steps=num_steps,
+        )
+        if not isinstance(result, dict) or "actions" not in result:
+            raise RuntimeError("sample_actions_with_features() must return a dict containing 'actions'")
+        features = result.get("features")
+        if not isinstance(features, dict) or "prefix" not in features:
+            raise RuntimeError("sample_actions_with_features() must return features['prefix']")
+        ref_actions = result["actions"]
         unnorm_actions = self._unnormalize_actions(obs_torch, ref_actions)
         return _OpenPIFeatureBatch(
-            prefix=prefix.to(torch.float32),
-            suffix=suffix.to(torch.float32),
+            prefix=features["prefix"].to(torch.float32),
             reference_actions=unnorm_actions,
         )
 
@@ -157,14 +156,14 @@ class OpenPIBackend(PolicyBackend):
         actions: ActionChunk | None = None,
         **kwargs,
     ) -> PolicyFeatures:
+        del actions
         if hasattr(self.policy, "infer_features"):
             openpi_obs = self._to_openpi_observation(obs, task=obs.task)
-            feature_batch = self.policy.infer_features(openpi_obs)
+            feature_batch = self.policy.infer_features(openpi_obs, **kwargs)
             features = PolicyFeatures(
                 reference_actions=self._normalize_reference_actions(feature_batch.reference_actions),
                 embeddings={
                     "prefix": self._to_numpy(feature_batch.prefix),
-                    "suffix": self._to_numpy(feature_batch.suffix),
                 },
                 proprio=obs.proprio.copy() if obs.proprio is not None else None,
                 metadata=self._metadata(),
@@ -172,21 +171,23 @@ class OpenPIBackend(PolicyBackend):
             features.validate()
             return features
 
-        if not hasattr(self.policy, "extract_embeddings"):
+        if not hasattr(self.policy, "sample_actions_with_features"):
             raise RuntimeError(
-                "OpenPI policy does not expose extract_embeddings(). "
-                "Use the niejunnan25/openpi RLT extractor branch."
+                "OpenPI policy must expose sample_actions_with_features() for RLT feature inference."
             )
 
-        if actions is None:
-            actions = self.sample_actions(obs)
         openpi_obs = self._to_openpi_observation(obs, task=obs.task)
-        prefix, suffix = self.policy.extract_embeddings(openpi_obs, actions=actions.actions, **kwargs)
+        result = self.policy.sample_actions_with_features(openpi_obs, **kwargs)
+        if not isinstance(result, dict) or "actions" not in result:
+            raise RuntimeError("sample_actions_with_features() must return a dict containing 'actions'")
+        feature_dict = result.get("features")
+        if not isinstance(feature_dict, dict) or "prefix" not in feature_dict:
+            raise RuntimeError("sample_actions_with_features() must return features['prefix']")
+        reference_actions = self._normalize_action_array(result["actions"])
         features = PolicyFeatures(
-            reference_actions=actions.actions.copy(),
+            reference_actions=reference_actions,
             embeddings={
-                "prefix": self._to_numpy(prefix),
-                "suffix": self._to_numpy(suffix),
+                "prefix": self._to_numpy(feature_dict["prefix"]),
             },
             proprio=obs.proprio.copy() if obs.proprio is not None else None,
             metadata=self._metadata(),

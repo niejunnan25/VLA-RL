@@ -31,7 +31,6 @@ a minimal dict from:
 `extract_features()` returns embeddings with stable keys:
 
 - `prefix`: VLA prefix hidden states.
-- `suffix`: action-side hidden states.
 
 RLT-specific encoded features should use `z_rl` later, outside this backend.
 
@@ -40,11 +39,21 @@ RLT-specific encoded features should use `z_rl` later, outside this backend.
 The OpenPI model must expose:
 
 ```python
-extract_embeddings(observation, actions=None)
+sample_actions_with_features(device, observation, noise=None, num_steps=10)
 ```
 
-Use the `niejunnan25/openpi` RLT extractor branch. The first supported real
-checkpoints are:
+The method must return the sampled reference action chunk and the prefix hidden
+states from the same VLA inference call:
+
+```python
+{
+    "actions": actions,
+    "features": {"prefix": prefix_hidden},
+}
+```
+
+Use the RLT OpenPI fork with fused action and prefix feature extraction. The
+first supported real checkpoints are:
 
 ```text
 /vla/users/niejunnan/assets/openpi-assets/checkpoints/pi05_libero_pytorch
