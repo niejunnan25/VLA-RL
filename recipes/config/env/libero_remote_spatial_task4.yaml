@@ -1,0 +1,15 @@
+_target_: vla_rl.envs.libero.LiberoRemoteEnvBackend
+url: http://127.0.0.1:23000
+task_suite_name: libero_spatial
+task_id: 4
+action_dim: 7
+resolution: 256
+num_steps_wait: 10
+max_episode_steps: null
+benchmark_root: null
+libero_root: /vla/users/niejunnan/codebase/serl_torch/third_party/LIBERO
+libero_config_dir: null
+libero_datasets_root: /vla/users/niejunnan/datasets
+seed: 0
+image_size: 224
+timeout: 120.0

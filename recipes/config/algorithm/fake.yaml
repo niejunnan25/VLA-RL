@@ -1,0 +1,4 @@
+_target_: vla_rl.algorithms.fake.FakeAlgorithm
+action_dim: 7
+chunk_size: 4
+seed: 2

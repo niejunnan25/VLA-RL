@@ -1,0 +1,4 @@
+_target_: vla_rl.runtime.local_runner.LocalRunner
+max_steps: 10
+gamma: 0.99
+metrics_path: outputs/fake_local/metrics.jsonl

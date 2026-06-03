@@ -1,0 +1,6 @@
+_target_: vla_rl.envs.fake.FakeEnvBackend
+action_dim: 7
+proprio_dim: 8
+max_steps: 10
+image_shape: [32, 32, 3]
+seed: 0
