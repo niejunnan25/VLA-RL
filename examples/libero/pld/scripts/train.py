@@ -29,6 +29,15 @@ from vla_rl.runtime.agentlace import import_agentlace, json_sanitize, make_agent
 from vla_rl.runtime.checkpoint import CheckpointManager
 from vla_rl.runtime.wandb import make_wandb_logger
 from vla_rl.runtime.timer import Timer
+from vla_rl.runtime.run_utils import (
+    apply_actor_summary_file,
+    make_jsonl_metric_writer,
+    next_interval,
+    run_dir_from_runtime,
+    runtime_float,
+    save_checkpoint,
+    send_actor_summary,
+)
 
 
 def parse_args() -> argparse.Namespace:
@@ -52,7 +61,7 @@ def run_learner(cfg: DictConfig) -> dict[str, Any]:
     runtime = cfg.runtime
     agent = create_pld_agent(cfg)
     agentlace = import_agentlace()
-    run_dir = _run_dir(runtime)
+    run_dir = run_dir_from_runtime(runtime)
     checkpoints = CheckpointManager(run_dir) if run_dir is not None else None
     replay = ReplayBuffer(capacity=int(runtime.replay_capacity), seed=int(runtime.replay_seed))
     config_snapshot = OmegaConf.to_container(cfg, resolve=True)
@@ -103,7 +112,7 @@ def run_learner(cfg: DictConfig) -> dict[str, Any]:
 
     def apply_actor_summary_file() -> None:
         nonlocal actor_done, actor_done_env_steps
-        actor_done, actor_done_env_steps = _apply_actor_summary_file(run_dir, actor_done, actor_done_env_steps)
+        actor_done, actor_done_env_steps = apply_actor_summary_file(run_dir, actor_done, actor_done_env_steps)
 
     def request_callback(request_type: str, payload: Any) -> Any:
         nonlocal actor_done, actor_done_env_steps
@@ -195,9 +204,9 @@ def run_learner(cfg: DictConfig) -> dict[str, Any]:
                 "update_steps": update_steps,
             }
         )
-        next_publish_at = _next_interval(update_steps, int(runtime.publish_interval_updates))
-        next_ckpt_env_at = _next_interval(env_steps, int(runtime.checkpoint_interval_env_steps))
-        next_ckpt_update_at = _next_interval(update_steps, int(runtime.checkpoint_interval_updates))
+        next_publish_at = next_interval(update_steps, int(runtime.publish_interval_updates))
+        next_ckpt_env_at = next_interval(env_steps, int(runtime.checkpoint_interval_env_steps))
+        next_ckpt_update_at = next_interval(update_steps, int(runtime.checkpoint_interval_updates))
 
         while True:
             apply_actor_summary_file()
@@ -236,10 +245,10 @@ def run_learner(cfg: DictConfig) -> dict[str, Any]:
                         "wall_time_sec": now - start_time,
                     })
                     last_wait_metric_time = now
-                time.sleep(_runtime_float(runtime, "update_sleep_sec", 0.05))
+                time.sleep(runtime_float(runtime, "update_sleep_sec", 0.05))
                 continue
             if update_steps >= int(runtime.max_update_steps):
-                time.sleep(_runtime_float(runtime, "update_sleep_sec", 0.05))
+                time.sleep(runtime_float(runtime, "update_sleep_sec", 0.05))
                 continue
             step_timer = Timer()
             with step_timer.context("mixed_sample"):
@@ -260,12 +269,12 @@ def run_learner(cfg: DictConfig) -> dict[str, Any]:
                 next_publish_at += int(runtime.publish_interval_updates)
             if checkpoints is not None and int(runtime.checkpoint_interval_env_steps) > 0 and env_steps >= next_ckpt_env_at:
                 ckpt_start = time.perf_counter()
-                _save_checkpoint(checkpoints, agent, env_steps, update_steps, episodes, total_reward, config_snapshot)
+                save_checkpoint(checkpoints, agent, env_steps, update_steps, episodes, total_reward, config_snapshot)
                 checkpoint_time_sec += time.perf_counter() - ckpt_start
                 next_ckpt_env_at += int(runtime.checkpoint_interval_env_steps)
             if checkpoints is not None and int(runtime.checkpoint_interval_updates) > 0 and update_steps >= next_ckpt_update_at:
                 ckpt_start = time.perf_counter()
-                _save_checkpoint(checkpoints, agent, env_steps, update_steps, episodes, total_reward, config_snapshot, tag=f"update_{update_steps}.pt")
+                save_checkpoint(checkpoints, agent, env_steps, update_steps, episodes, total_reward, config_snapshot, tag=f"update_{update_steps}.pt")
                 checkpoint_time_sec += time.perf_counter() - ckpt_start
                 next_ckpt_update_at += int(runtime.checkpoint_interval_updates)
 
@@ -313,7 +322,7 @@ def run_learner(cfg: DictConfig) -> dict[str, Any]:
     }
     try:
         if checkpoints is not None:
-            _save_checkpoint(checkpoints, agent, env_steps, update_steps, episodes, total_reward, config_snapshot, tag="final.pt")
+            save_checkpoint(checkpoints, agent, env_steps, update_steps, episodes, total_reward, config_snapshot, tag="final.pt")
         if run_dir is not None:
             (run_dir / "summary.json").write_text(json.dumps(json_sanitize(summary), indent=2, sort_keys=True) + "\n")
         write_metric({"summary": summary})
@@ -329,16 +338,8 @@ def run_actor(cfg: DictConfig) -> dict[str, Any]:
     pld_obs_builder = create_pld_obs_builder(cfg)
     agent = create_pld_agent(cfg)
     agentlace = import_agentlace()
-    run_dir = _run_dir(runtime)
-    if run_dir is not None:
-        run_dir.mkdir(parents=True, exist_ok=True)
-        (run_dir / "actor_metrics.jsonl").write_text("")
-
-    def write_actor_metric(metric: dict[str, Any]) -> None:
-        if run_dir is None:
-            return
-        with (run_dir / "actor_metrics.jsonl").open("a") as f:
-            f.write(json.dumps(json_sanitize(metric), sort_keys=True) + "\n")
+    run_dir = run_dir_from_runtime(runtime)
+    write_actor_metric = make_jsonl_metric_writer(run_dir, "actor_metrics.jsonl")
 
     data_store = agentlace.QueuedDataStore(int(runtime.actor_queue_capacity))
     client = agentlace.TrainerClient(
@@ -360,8 +361,8 @@ def run_actor(cfg: DictConfig) -> dict[str, Any]:
     _wait_for_initial_weights(
         client,
         has_policy_state_fn=lambda: has_policy_state,
-        timeout_sec=_runtime_float(runtime, "initial_weight_timeout_sec", 300.0),
-        sleep_sec=_runtime_float(runtime, "client_update_sleep_sec", 0.1),
+        timeout_sec=runtime_float(runtime, "initial_weight_timeout_sec", 300.0),
+        sleep_sec=runtime_float(runtime, "client_update_sleep_sec", 0.1),
     )
 
     try:
@@ -371,8 +372,8 @@ def run_actor(cfg: DictConfig) -> dict[str, Any]:
         successes = 0
         total_reward = 0.0
         episode_return = 0.0
-        next_weight_update_at = _next_interval(env_steps, int(runtime.weight_update_interval_steps))
-        next_stats_at = _next_interval(env_steps, int(runtime.stats_interval_env_steps))
+        next_weight_update_at = next_interval(env_steps, int(runtime.weight_update_interval_steps))
+        next_stats_at = next_interval(env_steps, int(runtime.stats_interval_env_steps))
         start_time = time.perf_counter()
         active_rollout_time_sec = 0.0
         episode_success = False
@@ -495,7 +496,7 @@ def run_actor(cfg: DictConfig) -> dict[str, Any]:
             "total_reward": total_reward,
             "received_policy_state": has_policy_state,
         }
-        summary = _send_actor_summary(client, str(runtime.request_type), summary, run_dir, write_actor_metric)
+        summary = send_actor_summary(client, str(runtime.request_type), summary, run_dir, write_actor_metric)
         write_actor_metric({"summary": summary})
         return summary
     finally:
@@ -532,93 +533,6 @@ def _load_offline_replay(runtime: DictConfig) -> tuple[ReplayBuffer | None, dict
     return replay, stats
 
 
-def _runtime_float(runtime: DictConfig, key: str, default: float) -> float:
-    return float(runtime.get(key, default))
-
-
-def _run_dir(runtime: DictConfig) -> Path | None:
-    value = runtime.get("run_dir", None)
-    return Path(value) if value else None
-
-
-
-def _write_actor_summary(run_dir: Path | None, summary: dict[str, Any]) -> None:
-    if run_dir is None:
-        return
-    (run_dir / "actor_summary.json").write_text(json.dumps(json_sanitize(summary), indent=2, sort_keys=True) + "\n")
-
-
-def _read_actor_summary(run_dir: Path | None) -> dict[str, Any] | None:
-    if run_dir is None:
-        return None
-    path = run_dir / "actor_summary.json"
-    try:
-        if not path.exists():
-            return None
-        payload = json.loads(path.read_text())
-    except (OSError, json.JSONDecodeError):
-        return None
-    return payload if isinstance(payload, dict) else None
-
-
-def _apply_actor_summary_file(run_dir: Path | None, actor_done: bool, actor_done_env_steps: int) -> tuple[bool, int]:
-    summary = _read_actor_summary(run_dir)
-    if summary is None:
-        return actor_done, actor_done_env_steps
-    return True, max(int(actor_done_env_steps), int(summary.get("env_steps", 0)))
-
-
-def _send_actor_summary(client: Any, request_type: str, summary: dict[str, Any], run_dir: Path | None, write_metric) -> dict[str, Any]:
-    final_summary = dict(summary)
-    final_summary["actor_summary_notified"] = False
-    _write_actor_summary(run_dir, final_summary)
-    try:
-        client.request(str(request_type), {"event": "actor_summary", **final_summary})
-    except Exception as exc:
-        metric = {
-            "role": final_summary.get("role", "actor"),
-            "event": "actor_summary_send_failed",
-            "env_steps": int(final_summary.get("env_steps", 0)),
-            "error_type": type(exc).__name__,
-            "error": str(exc),
-        }
-        if "algorithm" in final_summary:
-            metric["algorithm"] = final_summary["algorithm"]
-        write_metric(metric)
-    else:
-        final_summary["actor_summary_notified"] = True
-        metric = {
-            "role": final_summary.get("role", "actor"),
-            "event": "actor_summary_sent",
-            "env_steps": int(final_summary.get("env_steps", 0)),
-        }
-        if "algorithm" in final_summary:
-            metric["algorithm"] = final_summary["algorithm"]
-        write_metric(metric)
-    _write_actor_summary(run_dir, final_summary)
-    return final_summary
-
-def _save_checkpoint(
-    checkpoints: CheckpointManager,
-    algorithm,
-    env_steps: int,
-    update_steps: int,
-    episodes: int,
-    total_reward: float,
-    config: dict[str, Any],
-    tag: str | None = None,
-) -> None:
-    checkpoints.save(
-        algorithm,
-        env_steps=env_steps,
-        update_steps=update_steps,
-        episodes=episodes,
-        total_reward=total_reward,
-        config=config,
-        tag=tag,
-    )
-
-
 def _wait_for_initial_weights(client: Any, *, has_policy_state_fn, timeout_sec: float, sleep_sec: float) -> None:
     deadline = time.perf_counter() + timeout_sec
     while not has_policy_state_fn():
@@ -635,11 +549,6 @@ def _learner_should_stop(update_steps: int, env_steps: int, max_update_steps: in
         return True
     return env_steps >= max_env_steps or actor_done
 
-
-def _next_interval(current: int, interval: int) -> int:
-    if interval <= 0:
-        return 0
-    return ((int(current) // int(interval)) + 1) * int(interval)
 
 
 if __name__ == "__main__":
