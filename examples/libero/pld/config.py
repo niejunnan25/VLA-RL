@@ -11,6 +11,16 @@ from vla_rl.envs import FakeEnvBackend, LiberoRemoteEnvBackend
 from vla_rl.policies import FakePolicyBackend, ReferencePolicyClient
 
 
+def load_config(path: str, overrides: list[str]) -> DictConfig:
+    dotlist = list(overrides)
+    if dotlist and dotlist[0] == "--":
+        dotlist = dotlist[1:]
+    cfg = OmegaConf.load(path)
+    if dotlist:
+        cfg = OmegaConf.merge(cfg, OmegaConf.from_dotlist(dotlist))
+    return cfg
+
+
 def create_env(cfg: DictConfig):
     return _create_from_section(
         cfg.env,

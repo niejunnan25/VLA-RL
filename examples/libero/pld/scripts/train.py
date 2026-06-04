@@ -20,6 +20,7 @@ from examples.libero.pld.config import (
     create_pld_agent,
     create_pld_obs_builder,
     create_reference_policy,
+    load_config,
     predict_base_actions,
     validate_pld_cfg,
 )
@@ -50,7 +51,7 @@ def parse_args() -> argparse.Namespace:
 
 def main() -> None:
     args = parse_args()
-    cfg = _load_config(args.config, args.overrides)
+    cfg = load_config(args.config, args.overrides)
     cfg.runtime.role = args.role
     validate_pld_cfg(cfg)
     summary = run_learner(cfg) if args.role == "learner" else run_actor(cfg)
@@ -503,16 +504,6 @@ def run_actor(cfg: DictConfig) -> dict[str, Any]:
         client.stop()
         env.close()
         reference_policy.close()
-
-
-def _load_config(path: str, overrides: list[str]) -> DictConfig:
-    dotlist = list(overrides)
-    if dotlist and dotlist[0] == "--":
-        dotlist = dotlist[1:]
-    cfg = OmegaConf.load(Path(path))
-    if dotlist:
-        cfg = OmegaConf.merge(cfg, OmegaConf.from_dotlist(dotlist))
-    return cfg
 
 
 def _load_offline_replay(runtime: DictConfig) -> tuple[ReplayBuffer | None, dict[str, Any]]:
