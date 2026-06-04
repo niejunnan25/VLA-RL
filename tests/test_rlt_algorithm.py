@@ -11,7 +11,7 @@ from vla_rl.data import Observation, PolicyFeatures, RolloutBatch, Transition
 from vla_rl.envs.fake import FakeEnvBackend
 from vla_rl.policies.fake import FakePolicyBackend
 from examples.fake_debug.local_actor_learner import LocalActorLearnerRunner
-from examples.libero_rlt import train as rlt_train
+from examples.libero.rlt.scripts import train as rlt_train
 
 
 def make_agent() -> RLTAgent:
@@ -101,7 +101,7 @@ def test_rlt_state_builder_outputs_rlt_state():
 def test_rlt_config_uses_chunk_size_without_execute_horizon():
     repo_root = Path(__file__).resolve().parents[1]
 
-    cfg = OmegaConf.load(repo_root / "examples/libero_rlt/configs/libero_spatial_task4_openpi_rlt.yaml")
+    cfg = OmegaConf.load(repo_root / "examples/libero/rlt/configs/libero_spatial_task4_openpi_rlt.yaml")
     assert "rlt" in cfg
     assert int(cfg.rlt.chunk_size) == 10
     assert "execute_horizon" not in cfg.runtime

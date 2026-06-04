@@ -1,6 +1,0 @@
-_target_: vla_rl.policies.ReferencePolicyClient
-url: http://127.0.0.1:8899
-action_dim: 7
-timeout: 120.0
-retries: 3
-retry_sleep: 1.0

@@ -7,3 +7,5 @@ outputs/
 wandb/
 swanlab/
 *.log
+examples/agibot_real/service/vendor/
+examples/agibot_real/service/robot_service/forwarder/

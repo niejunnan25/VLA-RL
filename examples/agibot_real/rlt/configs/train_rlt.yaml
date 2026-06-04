@@ -1,0 +1,111 @@
+global_seed: 42
+
+task:
+  name: office_setting
+  prompt: The right arm picks up the white mouse from the desk and places the mouse on the black mouse pad
+  control_mode: camera_position
+  hz: 30.0
+  max_episode_steps: 300
+  reset_hook: null
+  success_hook: null
+
+robot:
+  assets_root: null
+  retargeter_urdf_path: null
+  retargeter_camera_extrinsic_path: null
+
+controller:
+  enabled: true
+  interface: terminal
+  poll_interval_sec: 0.05
+  terminal_grace_sec: 0.15
+  keys:
+    ready: g
+    pause: p
+    reset: r
+    success: s
+    fail: f
+    help: h
+    critical: c
+
+critical_phase:
+  enabled: true
+  handover_label_lookahead: 15
+  handover_labels_path: null
+  classifier_path: null
+  classifier_device: cuda
+  handover_threshold: 0.5
+
+env:
+  backend: fake
+  arm_layout: right_arm
+  action_dim: 7
+  robot_action_dim: 14
+  image_mode: policy
+  image_keys: [image_rgb_0, image_rgb_1, image_rgb_2]
+  fake_seed: 0
+
+policy:
+  type: reference_client
+  url: http://127.0.0.1:8899
+  action_dim: 7
+  timeout: 120.0
+
+feature:
+  encoder_path: /vla/users/yixin/openpi/checkpoints/rlt_stage1_single_cos_l6/checkpoint_12000.pt
+  device: cuda
+  input_dim: 2048
+  rl_token_dim: 2048
+  num_encoder_layers: 4
+  num_heads: 8
+  ff_dim: 2048
+  dropout: 0.0
+  max_tokens: 512
+
+algorithm:
+  z_rl_dim: 2048
+  proprio_dim: 18
+  action_dim: 7
+  chunk_size: 15
+  actor_hidden_dims: [512, 512, 512]
+  critic_hidden_dims: [512, 512, 512]
+  actor_std: 0.005
+  num_critics: 2
+  actor_lr: 3.0e-4
+  critic_lr: 3.0e-4
+  discount: 0.99
+  tau: 0.005
+  bc_reg_coeff: 400.0
+  ref_dropout: 0.5
+  clip_grad_norm: 10.0
+  policy_update_freq: 2
+  utd_ratio: 5
+  device: cuda
+
+runtime:
+  role: actor
+  trainer_ip: 127.0.0.1
+  trainer_port: 6688
+  broadcast_port: 6689
+  request_type: send-stats
+  store_name: transitions
+  actor_name: actor
+  actor_queue_capacity: 2000
+  replay_capacity: 100000
+  replay_seed: 0
+  batch_size: 128
+  training_starts: 128
+  max_env_steps: 100000
+  max_update_steps: 100000
+  execute_horizon: 15
+  rlt_warmup_steps: 5000
+  gamma: 0.99
+  publish_interval_updates: 100
+  weight_update_interval_steps: 100
+  checkpoint_interval_updates: 2000
+  run_dir: outputs/agibot_real/rlt
+
+wandb:
+  project: agibot_rlt
+  name: agibot_rlt_default
+  mode: online

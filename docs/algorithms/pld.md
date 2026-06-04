@@ -35,8 +35,8 @@ Start the LIBERO env server, then collect successful base-policy rollouts:
 cd /vla/users/niejunnan/codebase/VLA-RL
 
 /vla/users/niejunnan/codebase/openpi-modified/.venv/bin/python3 \
-  examples/libero_pld/collect_base_success_replay.py \
-  --config examples/libero_pld/configs/libero_spatial_task4_openpi_pld.yaml \
+  examples/libero/pld/scripts/collect_base_success_replay.py \
+  --config examples/libero/pld/configs/libero_spatial_task4_openpi_pld.yaml \
   --target-successes 50
 ```
 
@@ -55,7 +55,7 @@ The PLD loader expects this VLA-RL Transition replay format. It does not load ol
 
 ## Training
 
-PLD training lives in `examples/libero_pld/train.py`. The actor and learner
+PLD training lives in `examples/libero/pld/scripts/train.py`. The actor and learner
 loops make base warmup, offline/online replay mixing, Cal-QL-style critic
 pretraining, residual action selection, checkpointing, and replay
 transport visible in the PLD example itself.

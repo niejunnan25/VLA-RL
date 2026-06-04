@@ -1,0 +1,111 @@
+global_seed: 42
+
+task:
+  name: office_setting
+  prompt: The right arm picks up the white mouse from the desk and places the mouse on the black mouse pad
+  control_mode: camera_position
+  hz: 30.0
+  max_episode_steps: 300
+  reset_hook: null
+  success_hook: null
+
+robot:
+  assets_root: null
+  retargeter_urdf_path: null
+  retargeter_camera_extrinsic_path: null
+
+controller:
+  enabled: true
+  interface: terminal
+  poll_interval_sec: 0.05
+  terminal_grace_sec: 0.15
+  keys:
+    ready: g
+    pause: p
+    reset: r
+    success: s
+    fail: f
+    help: h
+
+env:
+  backend: fake
+  arm_layout: dual_arm
+  action_dim: 14
+  robot_action_dim: 14
+  image_mode: residual
+  image_keys: [image_rgb_0, image_rgb_1, image_rgb_2]
+  fake_seed: 0
+
+policy:
+  type: reference_client
+  url: http://127.0.0.1:8898
+  action_dim: 14
+  timeout: 120.0
+
+pld_observation:
+  image_keys: [image_rgb_0, image_rgb_1, image_rgb_2]
+  action_dim: 14
+  chunk_horizon: 30
+  alpha: 0.005
+
+algorithm:
+  image_keys: [image_rgb_0, image_rgb_1, image_rgb_2]
+  proprio_dim: 14
+  action_dim: 14
+  chunk_horizon: 30
+  alpha: 0.005
+  action_mask: [true, true, true, true, true, true, true, true, true, true, true, true, true, true]
+  action_limits: [1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0]
+  clip_gripper: true
+  image_encoder_type: small
+  image_feature_dim: 64
+  vector_latent_dim: 64
+  encoder_hidden_dim: 256
+  actor_hidden_dims: [256, 256, 256]
+  critic_hidden_dims: [256, 256, 256]
+  actor_lr: 3.0e-4
+  critic_lr: 3.0e-4
+  temperature_lr: 3.0e-4
+  discount: 0.99
+  tau: 0.005
+  init_temperature: 0.01
+  backup_entropy: true
+  utd_ratio: 4
+  critic_actor_ratio: 4
+  clip_grad_norm: 1.0
+  cql_n_actions: 10
+  cql_temperature: 1.0
+  device: cuda
+
+runtime:
+  role: actor
+  trainer_ip: 127.0.0.1
+  trainer_port: 6788
+  broadcast_port: 6789
+  request_type: send-stats
+  store_name: transitions
+  actor_name: actor
+  actor_queue_capacity: 2000
+  replay_capacity: 250000
+  replay_seed: 0
+  offline_replay_path: null
+  offline_capacity: 50000
+  offline_ratio: 0.5
+  calql_pretrain_steps: 0
+  calql_alpha: 1.0
+  batch_size: 128
+  training_starts: 1000
+  max_env_steps: 300000
+  max_update_steps: 300000
+  base_warmup_steps: 0
+  execute_horizon: 30
+  gamma: 0.99
+  publish_interval_updates: 100
+  weight_update_interval_steps: 100
+  checkpoint_interval_updates: 2000
+  run_dir: outputs/agibot_real/pld
+
+wandb:
+  project: agibot_pld
+  name: agibot_pld_default
+  mode: online

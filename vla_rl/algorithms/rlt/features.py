@@ -8,10 +8,9 @@ import torch
 
 from vla_rl.algorithms.rlt.modeling import RLTokenEncoder
 from vla_rl.data import Observation, PolicyFeatures
-from vla_rl.features import FeatureProcessor
 
 
-class RLTStateBuilder(FeatureProcessor):
+class RLTStateBuilder:
     def __init__(
         self,
         encoder_path: str | None = None,

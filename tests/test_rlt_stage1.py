@@ -3,7 +3,7 @@ from pathlib import Path
 from omegaconf import OmegaConf
 import torch
 
-from examples.libero_rlt.train_stage1 import _build_modules, checkpoint_payload
+from examples.libero.rlt.scripts.train_stage1 import _build_modules, checkpoint_payload
 from vla_rl.algorithms.rlt.features import load_frozen_rlt_encoder
 
 

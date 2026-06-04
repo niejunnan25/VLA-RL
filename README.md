@@ -46,13 +46,13 @@ Real algorithm entrypoints live under their own examples.
 ## RLT Stage 2 SERL-Style Run
 
 The default real-training path is the LIBERO RLT example. The actor and learner
-loops live directly in `examples/libero_rlt/train.py`; Agentlace is used only as
+loops live directly in `examples/libero/rlt/scripts/train.py`; Agentlace is used only as
 transport for RLT transitions and actor-weight broadcasts. The helper
 starts a LIBERO env server, OpenPI reference-policy server, learner, and actor in
 one tmux session:
 
 ```bash
-examples/libero_rlt/tools/launch_rlt.sh \
+examples/libero/rlt/tools/launch_rlt.sh \
   --session vlarl_rlt_task4 \
   --actor-gpu 0 \
   --learner-gpu 1 \
@@ -66,7 +66,7 @@ examples/libero_rlt/tools/launch_rlt.sh \
 For a short smoke, pass overrides after `--`:
 
 ```bash
-examples/libero_rlt/tools/launch_rlt.sh \
+examples/libero/rlt/tools/launch_rlt.sh \
   --session vlarl_rlt_task4_smoke \
   --actor-gpu 0 \
   --learner-gpu 1 \
@@ -107,15 +107,15 @@ out of scope for this milestone.
 Collect successful base-policy replay:
 
 ```bash
-examples/libero_pld/collect_base_success_replay.py \
-  --config examples/libero_pld/configs/libero_spatial_task4_openpi_pld.yaml \
+examples/libero/pld/scripts/collect_base_success_replay.py \
+  --config examples/libero/pld/configs/libero_spatial_task4_openpi_pld.yaml \
   --target-successes 50
 ```
 
 Run PLD through its example-local launcher:
 
 ```bash
-examples/libero_pld/tools/launch_pld.sh \
+examples/libero/pld/tools/launch_pld.sh \
   --session vlarl_pld_task4_smoke \
   --actor-gpu 0 \
   --learner-gpu 1 \
@@ -136,8 +136,8 @@ a frozen HuggingFace ResNet-18 image encoder, not torchvision.
 RLT and PLD keep evaluation local to their examples:
 
 ```bash
-python examples/libero_rlt/eval.py --config <config> --checkpoint <checkpoint> --episodes 10 --output-dir <dir>
-python examples/libero_pld/eval.py --config <config> --checkpoint <checkpoint> --episodes 10 --output-dir <dir>
+python examples/libero/rlt/scripts/eval.py --config <config> --checkpoint <checkpoint> --episodes 10 --output-dir <dir>
+python examples/libero/pld/scripts/eval.py --config <config> --checkpoint <checkpoint> --episodes 10 --output-dir <dir>
 ```
 
-PLD formal runs can use `examples/libero_pld/tools/launch_pld_after_collect.sh` to collect base-success replay before starting actor/learner training.
+PLD formal runs can use `examples/libero/pld/tools/launch_pld_after_collect.sh` to collect base-success replay before starting actor/learner training.

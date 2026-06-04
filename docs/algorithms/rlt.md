@@ -20,7 +20,7 @@ LIBERO Observation
   -> RLTAgent.update
 ```
 
-The canonical `examples/libero_rlt` path builds RLT observations explicitly in
+The canonical `examples/libero/rlt` path builds RLT observations explicitly in
 the actor loop. `RLTStateBuilder` is kept only for fake/debug local runners.
 The reference-policy client/server lives under `vla_rl.policies`, while
 trainable actor/critic code lives under `vla_rl.algorithms.rlt`.
@@ -51,9 +51,9 @@ keep the frozen reference policy separate from the trainable actor/critic.
 The canonical LIBERO RLT path is centered at:
 
 ```text
-examples/libero_rlt/train.py
-examples/libero_rlt/configs/libero_spatial_task4_openpi_rlt.yaml
-examples/libero_rlt/tools/launch_rlt.sh
+examples/libero/rlt/scripts/train.py
+examples/libero/rlt/configs/libero_spatial_task4_openpi_rlt.yaml
+examples/libero/rlt/tools/launch_rlt.sh
 ```
 
 A 1000-step smoke run is:
@@ -61,7 +61,7 @@ A 1000-step smoke run is:
 ```bash
 cd /vla/users/niejunnan/codebase/VLA-RL
 
-bash examples/libero_rlt/tools/launch_rlt.sh \
+bash examples/libero/rlt/tools/launch_rlt.sh \
   --session vlarl_rlt_task4_smoke \
   --actor-gpu 0 \
   --learner-gpu 1 \

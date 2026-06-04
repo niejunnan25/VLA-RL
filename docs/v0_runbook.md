@@ -55,7 +55,7 @@ obs
   -> RLTAgent.update(batch)
 ```
 
-The example owns the actor and learner loops in `examples/libero_rlt/train.py`.
+The example owns the actor and learner loops in `examples/libero/rlt/scripts/train.py`.
 `vla_rl.algorithms.rlt` owns the trainable heads and update logic.
 `RLTStateBuilder` remains only for fake/debug local runners; the formal LIBERO
 path uses the explicit `encode_rlt_obs` flow above.
@@ -66,7 +66,7 @@ PLD Stage 1 trains a residual policy on top of a frozen VLA reference action.
 
 ```text
 obs
-  -> ReferencePolicyClient.extract_features(obs) -> base_actions
+  -> ReferencePolicyClient.sample_actions(obs) -> base_actions
   -> PLDObservationBuilder(obs, base_actions, alpha) -> pld_obs
   -> PLDSACAgent.sample_action(pld_obs) -> final_actions
   -> final_actions = base_actions + alpha * residual_actions
@@ -78,7 +78,7 @@ obs
 
 Formal PLD uses successful base-policy replay for offline replay and
 Cal-QL-style critic pretraining. The example owns this sequence in
-`examples/libero_pld/train.py`; the public PLD package owns only the residual
+`examples/libero/pld/scripts/train.py`; the public PLD package owns only the residual
 agent, networks, feature construction, and offline replay helpers.
 
 ## Formal Runs vs Connectivity Smokes

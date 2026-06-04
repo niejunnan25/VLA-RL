@@ -11,7 +11,6 @@ from omegaconf import OmegaConf
 from vla_rl.algorithms import Algorithm
 from vla_rl.data import ReplayBuffer, Transition
 from vla_rl.envs import EnvBackend
-from vla_rl.features import FeatureProcessor
 from vla_rl.policies import PolicyBackend
 from vla_rl.runtime.checkpoint import CheckpointManager
 
@@ -33,14 +32,14 @@ class LocalActorLearnerRunner:
         gamma: float = 0.99,
         metrics_path: str | None = None,
         replay_seed: int = 0,
-        feature_processor: FeatureProcessor | None = None,
+        feature_processor: Any | None = None,
         run_dir: str | None = None,
         checkpoint_interval_env_steps: int = 0,
         resume_from: str | None = None,
         config_snapshot: dict[str, Any] | None = None,
         eval_env: EnvBackend | None = None,
         eval_policy: PolicyBackend | None = None,
-        eval_feature_processor: FeatureProcessor | None = None,
+        eval_feature_processor: Any | None = None,
         eval_enabled: bool = False,
         eval_interval_env_steps: int = 0,
         eval_episodes: int = 0,

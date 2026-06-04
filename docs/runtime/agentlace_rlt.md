@@ -4,8 +4,8 @@ This runbook covers the RLT Stage-2 actor/learner split in VLA-RL. The training
 loop is intentionally owned by the LIBERO example:
 
 ```text
-examples/libero_rlt/train.py
-examples/libero_rlt/tools/launch_rlt.sh
+examples/libero/rlt/scripts/train.py
+examples/libero/rlt/tools/launch_rlt.sh
 ```
 
 `vla_rl.runtime.agentlace` is only the transport layer: it imports Agentlace,
@@ -55,7 +55,7 @@ cd /vla/users/niejunnan/codebase/VLA-RL
 
 rm -rf /tmp/vlarl_rlt_task4_smoke
 
-bash examples/libero_rlt/tools/launch_rlt.sh \
+bash examples/libero/rlt/tools/launch_rlt.sh \
   --session vlarl_rlt_task4_smoke \
   --actor-gpu 0 \
   --learner-gpu 1 \

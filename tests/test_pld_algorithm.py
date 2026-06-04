@@ -9,8 +9,8 @@ from vla_rl.algorithms.pld.replay import load_pld_offline_replay, write_pld_offl
 from vla_rl.data import MixedReplaySampler, Observation, PolicyFeatures, ReplayBuffer, RolloutBatch, Transition
 from vla_rl.envs.fake import FakeEnvBackend
 from vla_rl.policies.fake import FakePolicyBackend
-from examples.libero_pld import common as pld_common
-from examples.libero_pld import train as pld_train
+from examples.libero.pld import config as pld_config
+from examples.libero.pld.scripts import train as pld_train
 from omegaconf import OmegaConf
 
 
@@ -160,22 +160,22 @@ def test_pld_agent_act_update_calql_and_terminal_no_bootstrap():
 
 
 def test_pld_train_config_uses_explicit_builders():
-    cfg = OmegaConf.load("examples/libero_pld/configs/fake_pld_smoke.yaml")
+    cfg = OmegaConf.load("examples/libero/pld/configs/fake_pld_smoke.yaml")
 
-    pld_common.validate_pld_cfg(cfg)
-    agent = pld_common.create_pld_agent(cfg)
-    builder = pld_common.create_pld_obs_builder(cfg)
+    pld_config.validate_pld_cfg(cfg)
+    agent = pld_config.create_pld_agent(cfg)
+    builder = pld_config.create_pld_obs_builder(cfg)
 
     assert isinstance(agent, PLDSACAgent)
     assert isinstance(builder, PLDObservationBuilder)
 
 
 def test_pld_config_validation_rejects_horizon_mismatch():
-    cfg = OmegaConf.load("examples/libero_pld/configs/fake_pld_smoke.yaml")
+    cfg = OmegaConf.load("examples/libero/pld/configs/fake_pld_smoke.yaml")
     cfg.runtime.execute_horizon = 2
 
     with pytest.raises(ValueError, match="chunk_horizon must match runtime.execute_horizon"):
-        pld_common.validate_pld_cfg(cfg)
+        pld_config.validate_pld_cfg(cfg)
 
 def test_pld_agent_actor_updates_after_configured_critic_steps():
     agent = make_agent()
@@ -207,7 +207,7 @@ def test_libero_pld_train_helpers_validate_config():
             "runtime": {"execute_horizon": 1},
         }
     )
-    pld_common.validate_pld_cfg(cfg)
+    pld_config.validate_pld_cfg(cfg)
 
 
 def test_libero_pld_train_offline_replay_optional():

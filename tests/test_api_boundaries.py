@@ -56,16 +56,13 @@ def test_algorithms_root_exports_algorithm_entrypoints_without_runners():
         """
 import vla_rl.algorithms as algorithms
 
-assert sorted(algorithms.__all__) == [
-    "Algorithm",
-    "FakeAlgorithm",
+assert sorted(algorithms.__all__) == ["Algorithm", "FakeAlgorithm"]
+for name in (
     "PLDObservationBuilder",
     "PLDSACAgent",
+    "ResidualActionSpec",
     "RLTAgent",
     "RLTStateBuilder",
-    "ResidualActionSpec",
-]
-for name in (
     "RLTFeatureProcessor",
     "LocalRunner",
     "LocalActorLearnerRunner",
