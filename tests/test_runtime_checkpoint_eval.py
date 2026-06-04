@@ -5,7 +5,6 @@ import numpy as np
 
 from vla_rl.algorithms.fake import FakeAlgorithm
 from vla_rl.algorithms.rlt import RLTAgent
-from vla_rl.data import Observation
 from vla_rl.envs.fake import FakeEnvBackend
 from vla_rl.policies.fake import FakePolicyBackend
 from examples.fake_debug.local_actor_learner import LocalActorLearnerRunner
@@ -16,24 +15,22 @@ def test_rlt_state_dict_roundtrip_deterministic_action():
     agent = RLTAgent(
         z_rl_dim=16,
         action_dim=2,
-        chunk_size=4,
         execute_horizon=2,
         actor_hidden_dims=(32, 32),
         critic_hidden_dims=(32, 32),
         num_critics=2,
         device="cpu",
     )
-    agent_obs = {
+    rlt_state = {
         "z_rl": np.ones((16,), dtype=np.float32),
-        "reference_action": np.zeros((8,), dtype=np.float32),
+        "reference_action": np.zeros((4,), dtype=np.float32),
         "proprio": np.zeros((3,), dtype=np.float32),
     }
-    expected = agent.act(Observation(), agent_obs=agent_obs, deterministic=True).actions
+    expected = agent.sample_action(rlt_state, deterministic=True)
 
     restored = RLTAgent(
         z_rl_dim=16,
         action_dim=2,
-        chunk_size=4,
         execute_horizon=2,
         actor_hidden_dims=(32, 32),
         critic_hidden_dims=(32, 32),
@@ -41,7 +38,7 @@ def test_rlt_state_dict_roundtrip_deterministic_action():
         device="cpu",
     )
     restored.load_state_dict(agent.state_dict())
-    actual = restored.act(Observation(), agent_obs=agent_obs, deterministic=True).actions
+    actual = restored.sample_action(rlt_state, deterministic=True)
 
     np.testing.assert_allclose(actual, expected)
 
@@ -50,24 +47,22 @@ def test_rlt_policy_state_dict_roundtrip_deterministic_action():
     agent = RLTAgent(
         z_rl_dim=16,
         action_dim=2,
-        chunk_size=4,
         execute_horizon=2,
         actor_hidden_dims=(32, 32),
         critic_hidden_dims=(32, 32),
         num_critics=2,
         device="cpu",
     )
-    agent_obs = {
+    rlt_state = {
         "z_rl": np.ones((16,), dtype=np.float32),
-        "reference_action": np.zeros((8,), dtype=np.float32),
+        "reference_action": np.zeros((4,), dtype=np.float32),
         "proprio": np.zeros((3,), dtype=np.float32),
     }
-    expected = agent.act(Observation(), agent_obs=agent_obs, deterministic=True).actions
+    expected = agent.sample_action(rlt_state, deterministic=True)
 
     restored = RLTAgent(
         z_rl_dim=16,
         action_dim=2,
-        chunk_size=4,
         execute_horizon=2,
         actor_hidden_dims=(32, 32),
         critic_hidden_dims=(32, 32),
@@ -75,7 +70,7 @@ def test_rlt_policy_state_dict_roundtrip_deterministic_action():
         device="cpu",
     )
     restored.load_policy_state_dict(agent.policy_state_dict())
-    actual = restored.act(Observation(), agent_obs=agent_obs, deterministic=True).actions
+    actual = restored.sample_action(rlt_state, deterministic=True)
 
     np.testing.assert_allclose(actual, expected)
 

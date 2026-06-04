@@ -28,7 +28,7 @@ class PLDFeatureProcessor(FeatureProcessor):
             raise ValueError("action_dim and chunk_horizon must be positive")
 
     def process(self, obs: Observation, features: PolicyFeatures) -> dict[str, np.ndarray]:
-        base = np.asarray(features.reference_actions, dtype=np.float32)
+        base = self._base_actions(features)
         proprio = np.asarray(obs.proprio, dtype=np.float32).reshape(-1)
         result: dict[str, np.ndarray] = {
             "proprio": proprio,
@@ -38,6 +38,16 @@ class PLDFeatureProcessor(FeatureProcessor):
         for key in self.image_keys:
             result[f"image_{key}"] = _image_to_chw_float(obs.images[key])
         return result
+
+    def build(self, obs: Observation, features: PolicyFeatures) -> tuple[np.ndarray, dict[str, np.ndarray]]:
+        base = self._base_actions(features)
+        return base[: self.chunk_horizon, : self.action_dim].astype(np.float32, copy=False), self.process(obs, features)
+
+    @staticmethod
+    def _base_actions(features: PolicyFeatures) -> np.ndarray:
+        if features.reference_actions is None:
+            raise ValueError("PLDFeatureProcessor requires PolicyFeatures.reference_actions")
+        return np.asarray(features.reference_actions, dtype=np.float32)
 
 
 def _image_to_chw_float(image: np.ndarray) -> np.ndarray:

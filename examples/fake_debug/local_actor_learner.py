@@ -9,15 +9,15 @@ import numpy as np
 from omegaconf import OmegaConf
 
 from vla_rl.algorithms import Algorithm
-from vla_rl.data import Transition
-from vla_rl.data.replay import ReplayBuffer
+from vla_rl.data import ReplayBuffer, Transition
 from vla_rl.envs import EnvBackend
 from vla_rl.features import FeatureProcessor
 from vla_rl.policies import PolicyBackend
+from vla_rl.runtime.base import Runner
 from vla_rl.runtime.checkpoint import CheckpointManager
 
 
-class LocalActorLearnerRunner:
+class LocalActorLearnerRunner(Runner):
     """Single-process actor-learner loop for interface integration tests."""
 
     def __init__(
@@ -107,18 +107,21 @@ class LocalActorLearnerRunner:
         while env_steps < self.max_env_steps:
             chunk_start = time.perf_counter()
             if self.feature_processor is None:
-                reference = self.policy.sample_actions(obs, task=obs.task)
-                features = self.policy.extract_features(obs, actions=reference)
+                reference_actions = self.policy.sample_actions(obs, task=obs.task)
+                features = self.policy.extract_features(obs, actions=reference_actions)
             else:
                 features = self.policy.extract_features(obs)
-                reference = self._reference_chunk_from_features(features)
-            agent_obs = self._process_features(obs, features)
+                reference_actions = self._reference_actions_from_features(features)
+            algorithm_state = self._process_features(obs, features)
             if env_steps < self.warmup_steps:
-                action_chunk = reference
+                actions = reference_actions
+            elif algorithm_state is not None:
+                actions = self.algorithm.sample_action(algorithm_state)
             else:
-                action_chunk = self.algorithm.act(obs, features=features, agent_obs=agent_obs)
+                actions = self.algorithm.sample_action(obs, features=features)
 
-            execute_actions = action_chunk.actions[: self.execute_horizon]
+            actions = np.asarray(actions, dtype=np.float32)
+            execute_actions = actions[: self.execute_horizon]
             next_obs, reward, done, truncated, info = self.env.step_chunk(execute_actions)
             executed_steps = int(info.get("executed_steps", len(execute_actions)))
             env_steps += executed_steps
@@ -130,13 +133,13 @@ class LocalActorLearnerRunner:
                 next_agent_obs = self._process_features(next_obs, next_features)
             transition = Transition(
                 obs=obs,
-                action=np.asarray(action_chunk.actions, dtype=np.float32).reshape(-1),
+                action=actions.reshape(-1),
                 reward=float(reward),
                 next_obs=next_obs,
                 done=bool(done),
                 truncated=bool(truncated),
                 discount=0.0 if terminal else self.gamma**executed_steps,
-                agent_obs=agent_obs,
+                agent_obs=algorithm_state,
                 next_agent_obs=next_agent_obs,
                 info={**info, "executed_steps": executed_steps},
             )
@@ -205,18 +208,10 @@ class LocalActorLearnerRunner:
             return None
         return self.feature_processor.process(obs, features)
 
-    def _reference_chunk_from_features(self, features):
+    def _reference_actions_from_features(self, features) -> np.ndarray:
         if features.reference_actions is None:
             raise ValueError("feature_processor path requires PolicyFeatures.reference_actions for warmup/reference actions")
-        from vla_rl.data import ActionChunk
-
-        reference = ActionChunk(
-            actions=np.asarray(features.reference_actions, dtype=np.float32),
-            horizon=int(features.reference_actions.shape[0]),
-            metadata={"source": "policy_features.reference_actions"},
-        )
-        reference.validate()
-        return reference
+        return np.asarray(features.reference_actions, dtype=np.float32)
 
     def _prepare_outputs(self) -> None:
         if self.run_dir is None:
@@ -272,17 +267,15 @@ class LocalActorLearnerRunner:
                 if self.eval_feature_processor is None:
                     reference = self.eval_policy.sample_actions(obs, task=obs.task)
                     features = self.eval_policy.extract_features(obs, actions=reference)
-                    agent_obs = None
+                    algorithm_state = None
                 else:
                     features = self.eval_policy.extract_features(obs)
-                    agent_obs = self.eval_feature_processor.process(obs, features)
-                action_chunk = self.algorithm.act(
-                    obs,
-                    features=features,
-                    agent_obs=agent_obs,
-                    deterministic=self.eval_deterministic,
-                )
-                execute_actions = action_chunk.actions[: self.execute_horizon]
+                    algorithm_state = self.eval_feature_processor.process(obs, features)
+                if algorithm_state is not None:
+                    actions = self.algorithm.sample_action(algorithm_state, deterministic=self.eval_deterministic)
+                else:
+                    actions = self.algorithm.sample_action(obs, features=features, deterministic=self.eval_deterministic)
+                execute_actions = np.asarray(actions, dtype=np.float32)[: self.execute_horizon]
                 obs, reward, done, truncated, info = self.eval_env.step_chunk(execute_actions)
                 executed_steps = int(info.get("executed_steps", len(execute_actions)))
                 episode_return += float(reward)

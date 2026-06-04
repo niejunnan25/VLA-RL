@@ -1,5 +1,5 @@
 from vla_rl.algorithms.rlt.agent import RLTAgent
-from vla_rl.algorithms.rlt.features import RLTFeatureProcessor
+from vla_rl.algorithms.rlt.features import RLTStateBuilder
 from vla_rl.algorithms.rlt.modeling import MLP, RLTActor, RLTCritic, RLTokenDecoder, RLTokenEncoder
 
 __all__ = [
@@ -7,7 +7,7 @@ __all__ = [
     "RLTActor",
     "RLTCritic",
     "RLTAgent",
-    "RLTFeatureProcessor",
+    "RLTStateBuilder",
     "RLTokenDecoder",
     "RLTokenEncoder",
 ]

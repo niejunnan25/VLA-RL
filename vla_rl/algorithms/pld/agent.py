@@ -10,7 +10,7 @@ import torch.nn.functional as F
 from vla_rl.algorithms.base import Algorithm
 from vla_rl.algorithms.pld.action import ResidualActionSpec
 from vla_rl.algorithms.pld.modeling import GaussianResidualActor, PLDCritic, PLDObsEncoder, soft_update
-from vla_rl.data import ActionChunk, Observation, PolicyFeatures, RolloutBatch, Transition
+from vla_rl.data import Observation, PolicyFeatures, RolloutBatch, Transition
 
 
 class PLDSACAgent(Algorithm):
@@ -135,25 +135,15 @@ class PLDSACAgent(Algorithm):
         self.target_entropy = float(target_entropy) if target_entropy is not None else -float(self.residual_spec.policy_action_dim)
 
     @torch.no_grad()
-    def act(
+    def sample_action(
         self,
-        obs: Observation,
-        features: PolicyFeatures | None = None,
-        agent_obs: dict[str, Any] | None = None,
+        pld_state: dict[str, Any],
         deterministic: bool = False,
-    ) -> ActionChunk:
-        del obs, features
-        if agent_obs is None:
-            raise ValueError("PLDSACAgent.act requires agent_obs from PLDFeatureProcessor")
-        batch = self._agent_obs_to_torch([agent_obs])
+    ) -> np.ndarray:
+        batch = self._agent_obs_to_torch([pld_state])
         residual = self.actor.deterministic(batch) if deterministic else self.actor.sample(batch)[0]
         base = batch["base_action_chunk"]
-        final = self.residual_spec.compose_chunk_torch(base, residual).squeeze(0).detach().cpu().numpy().astype(np.float32)
-        return ActionChunk(
-            actions=final,
-            horizon=self.chunk_horizon,
-            metadata={"algorithm": "pld"},
-        )
+        return self.residual_spec.compose_chunk_torch(base, residual).squeeze(0).detach().cpu().numpy().astype(np.float32)
 
     def update(self, batch: RolloutBatch) -> dict:
         fb = self._convert_batch(batch)

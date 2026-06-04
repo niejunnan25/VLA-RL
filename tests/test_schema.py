@@ -1,8 +1,7 @@
 import numpy as np
 import pytest
 
-from vla_rl.data import ActionChunk, ActionSpec, Observation, PolicyFeatures, RolloutBatch, Transition
-from vla_rl.data.replay import ReplayBuffer
+from vla_rl.data import ActionSpec, Observation, PolicyFeatures, ReplayBuffer, RolloutBatch, Transition
 
 
 def test_schema_validates_basic_objects():
@@ -12,9 +11,6 @@ def test_schema_validates_basic_objects():
         task="task",
     )
     obs.validate()
-
-    chunk = ActionChunk(actions=np.zeros((3, 2), dtype=np.float32), horizon=2)
-    chunk.validate()
 
     features = PolicyFeatures(
         reference_actions=np.zeros((3, 2), dtype=np.float32),
@@ -34,12 +30,6 @@ def test_schema_validates_basic_objects():
     )
     RolloutBatch(transitions=[transition]).validate()
     assert transition.truncated is False
-
-
-def test_action_chunk_rejects_invalid_horizon():
-    chunk = ActionChunk(actions=np.zeros((2, 3), dtype=np.float32), horizon=3)
-    with pytest.raises(ValueError, match="exceeds"):
-        chunk.validate()
 
 
 def test_action_spec_rejects_invalid_bounds():

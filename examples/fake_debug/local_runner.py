@@ -3,13 +3,16 @@ from __future__ import annotations
 import json
 from pathlib import Path
 
+import numpy as np
+
 from vla_rl.algorithms import Algorithm
 from vla_rl.data import RolloutBatch, Transition
 from vla_rl.envs import EnvBackend
 from vla_rl.policies import PolicyBackend
+from vla_rl.runtime.base import Runner
 
 
-class LocalRunner:
+class LocalRunner(Runner):
     def __init__(
         self,
         env: EnvBackend,
@@ -39,8 +42,8 @@ class LocalRunner:
         for step in range(self.max_steps):
             reference = self.policy.sample_actions(obs, task=obs.task)
             features = self.policy.extract_features(obs, actions=reference)
-            action_chunk = self.algorithm.act(obs, features=features)
-            action = action_chunk.actions[0]
+            actions = np.asarray(self.algorithm.sample_action(obs, features=features), dtype=np.float32)
+            action = actions[0]
             next_obs, reward, done, truncated, info = self.env.step(action)
             transition = Transition(
                 obs=obs,

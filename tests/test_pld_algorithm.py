@@ -143,8 +143,8 @@ def test_compact_replay_preserves_pld_image_shapes_and_mixed_sampling(tmp_path: 
 
 def test_pld_agent_act_update_calql_and_terminal_no_bootstrap():
     agent = make_agent()
-    action = agent.act(Observation(), agent_obs=make_agent_obs(), deterministic=True)
-    assert action.actions.shape == (1, 4)
+    action = agent.sample_action(make_agent_obs(), deterministic=True)
+    assert action.shape == (1, 4)
 
     batch = RolloutBatch(transitions=[make_transition(False) for _ in range(2)])
     metrics = agent.update(batch)
@@ -175,19 +175,14 @@ def test_pld_actor_weight_sync_roundtrip():
     clone = make_agent()
     clone.load_policy_state_dict(agent.policy_state_dict())
 
-    a = agent.act(Observation(), agent_obs=make_agent_obs(), deterministic=True).actions
-    b = clone.act(Observation(), agent_obs=make_agent_obs(), deterministic=True).actions
+    a = agent.sample_action(make_agent_obs(), deterministic=True)
+    b = clone.sample_action(make_agent_obs(), deterministic=True)
     np.testing.assert_allclose(a, b, atol=1e-6)
 
 
-def test_libero_pld_train_helpers_validate_config_and_reference_chunk():
+def test_libero_pld_train_helpers_validate_config():
     cfg = OmegaConf.create({"algorithm": {"chunk_horizon": 1}, "runtime": {"execute_horizon": 1}})
     pld_train._validate_pld_cfg(cfg)
-
-    reference = pld_train._reference_chunk_from_features(make_features(chunk_size=2, action_dim=4))
-
-    assert reference.actions.shape == (2, 4)
-    assert reference.horizon == 2
 
 
 def test_libero_pld_train_offline_replay_optional():

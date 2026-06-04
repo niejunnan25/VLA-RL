@@ -3,7 +3,7 @@ from __future__ import annotations
 import numpy as np
 
 from vla_rl.algorithms.base import Algorithm
-from vla_rl.data import ActionChunk, Observation, PolicyFeatures, RolloutBatch
+from vla_rl.data import Observation, PolicyFeatures, RolloutBatch
 
 
 class FakeAlgorithm(Algorithm):
@@ -13,23 +13,18 @@ class FakeAlgorithm(Algorithm):
         self._rng = np.random.default_rng(seed)
         self.update_count = 0
 
-    def act(
+    def sample_action(
         self,
         obs: Observation,
         features: PolicyFeatures | None = None,
-        agent_obs: dict | None = None,
         deterministic: bool = False,
-    ) -> ActionChunk:
-        del obs, agent_obs
+    ) -> np.ndarray:
+        del obs
         if features is not None and features.reference_actions is not None:
-            actions = features.reference_actions[: self.chunk_size, : self.action_dim].astype(np.float32, copy=True)
+            return features.reference_actions[: self.chunk_size, : self.action_dim].astype(np.float32, copy=True)
         elif deterministic:
-            actions = np.zeros((self.chunk_size, self.action_dim), dtype=np.float32)
-        else:
-            actions = self._rng.uniform(-0.25, 0.25, size=(self.chunk_size, self.action_dim)).astype(np.float32)
-        chunk = ActionChunk(actions=actions, horizon=min(self.chunk_size, actions.shape[0]), metadata={"source": "fake_algorithm"})
-        chunk.validate()
-        return chunk
+            return np.zeros((self.chunk_size, self.action_dim), dtype=np.float32)
+        return self._rng.uniform(-0.25, 0.25, size=(self.chunk_size, self.action_dim)).astype(np.float32)
 
     def update(self, batch: RolloutBatch) -> dict:
         batch.validate()

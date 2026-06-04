@@ -11,7 +11,7 @@ from vla_rl.data import Observation, PolicyFeatures
 from vla_rl.features import FeatureProcessor
 
 
-class RLTFeatureProcessor(FeatureProcessor):
+class RLTStateBuilder(FeatureProcessor):
     def __init__(
         self,
         encoder_path: str | None = None,
@@ -24,12 +24,26 @@ class RLTFeatureProcessor(FeatureProcessor):
         dropout: float = 0.0,
         max_tokens: int | None = 512,
         chunk_size: int = 10,
+        execute_horizon: int | None = None,
         action_dim: int = 7,
         encoder: RLTokenEncoder | None = None,
     ) -> None:
         self.device = torch.device(device)
         self.chunk_size = int(chunk_size)
+        if execute_horizon is None:
+            raise ValueError("RLTStateBuilder requires explicit execute_horizon")
+        self.execute_horizon = int(execute_horizon)
         self.action_dim = int(action_dim)
+        if self.chunk_size <= 0:
+            raise ValueError(f"chunk_size must be positive, got {chunk_size}")
+        if self.execute_horizon <= 0:
+            raise ValueError(f"execute_horizon must be positive, got {execute_horizon}")
+        if self.execute_horizon > self.chunk_size:
+            raise ValueError(
+                f"execute_horizon={self.execute_horizon} must be <= chunk_size={self.chunk_size}"
+            )
+        if self.action_dim <= 0:
+            raise ValueError(f"action_dim must be positive, got {action_dim}")
         self.max_tokens = _normalize_max_tokens(max_tokens)
         if encoder is None:
             if encoder_path is None:
@@ -53,12 +67,16 @@ class RLTFeatureProcessor(FeatureProcessor):
             self.encoder.max_tokens = self.max_tokens
 
     @torch.no_grad()
+    def build(self, obs: Observation, features: PolicyFeatures) -> tuple[np.ndarray, dict[str, np.ndarray]]:
+        base_actions = self._base_actions(features)
+        return base_actions, self.process(obs, features)
+
+    @torch.no_grad()
     def process(self, obs: Observation, features: PolicyFeatures) -> dict[str, np.ndarray]:
         del obs
         if "prefix" not in features.embeddings:
-            raise ValueError("RLTFeatureProcessor requires features.embeddings['prefix']")
-        if features.reference_actions is None:
-            raise ValueError("RLTFeatureProcessor requires PolicyFeatures.reference_actions")
+            raise ValueError("RLTStateBuilder requires features.embeddings['prefix']")
+        base_actions = self._base_actions(features)
         z_vla = torch.as_tensor(features.embeddings["prefix"], dtype=torch.float32, device=self.device)
         if z_vla.dim() == 2:
             z_vla = z_vla.unsqueeze(0)
@@ -68,8 +86,7 @@ class RLTFeatureProcessor(FeatureProcessor):
         if max_tokens is not None:
             z_vla = z_vla[:, : int(max_tokens), :]
         z_rl = self.encoder(z_vla).squeeze(0).detach().cpu().numpy().astype(np.float32)
-        reference = np.asarray(features.reference_actions, dtype=np.float32)
-        reference = reference[: self.chunk_size, : self.action_dim].reshape(-1).astype(np.float32)
+        reference = base_actions[: self.execute_horizon, : self.action_dim].reshape(-1).astype(np.float32)
         proprio = features.proprio
         if proprio is None:
             proprio = np.zeros((0,), dtype=np.float32)
@@ -78,6 +95,11 @@ class RLTFeatureProcessor(FeatureProcessor):
             "reference_action": reference,
             "proprio": np.asarray(proprio, dtype=np.float32).reshape(-1),
         }
+
+    def _base_actions(self, features: PolicyFeatures) -> np.ndarray:
+        if features.reference_actions is None:
+            raise ValueError("RLTStateBuilder requires PolicyFeatures.reference_actions")
+        return np.asarray(features.reference_actions, dtype=np.float32)
 
 
 def load_frozen_rlt_encoder(

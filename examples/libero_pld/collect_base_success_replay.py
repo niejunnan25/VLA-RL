@@ -60,10 +60,10 @@ def main() -> None:
             episode_success = False
             while True:
                 features = policy.extract_features(obs)
-                action_chunk = _reference_chunk(features.reference_actions)
-                agent_obs = feature_processor.process(obs, features)
-                next_obs, reward, done, truncated, info = env.step_chunk(action_chunk.actions[:execute_horizon])
-                executed_steps = int(info.get("executed_steps", min(execute_horizon, len(action_chunk.actions))))
+                base_actions, agent_obs = feature_processor.build(obs, features)
+                execute_actions = base_actions[:execute_horizon]
+                next_obs, reward, done, truncated, info = env.step_chunk(execute_actions)
+                executed_steps = int(info.get("executed_steps", min(execute_horizon, len(base_actions))))
                 terminal = bool(done or truncated)
                 episode_success = bool(episode_success or info.get("success", False) or info.get("env_done", False))
                 next_agent_obs = None
@@ -74,7 +74,7 @@ def main() -> None:
                     CompactTransition(
                         agent_obs=agent_obs,
                         next_agent_obs=next_agent_obs,
-                        action=np.asarray(action_chunk.actions[:execute_horizon], dtype=np.float32).reshape(-1),
+                        action=np.asarray(execute_actions, dtype=np.float32).reshape(-1),
                         reward=float(reward),
                         done=bool(done),
                         truncated=bool(truncated),
@@ -118,17 +118,6 @@ def main() -> None:
     }
     (output_dir / "summary.json").write_text(json.dumps(summary, indent=2, sort_keys=True) + "\n")
     print(json.dumps(summary, sort_keys=True))
-
-
-def _reference_chunk(reference_actions: np.ndarray | None):
-    from vla_rl.data import ActionChunk
-
-    if reference_actions is None:
-        raise ValueError("base success collection requires PolicyFeatures.reference_actions")
-    actions = np.asarray(reference_actions, dtype=np.float32)
-    chunk = ActionChunk(actions=actions, horizon=actions.shape[0], metadata={"source": "base_policy"})
-    chunk.validate()
-    return chunk
 
 
 def _attach_mc_returns(transitions: list[CompactTransition], gamma: float) -> None:

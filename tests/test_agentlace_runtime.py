@@ -18,7 +18,7 @@ class FakeAgentlace:
 def make_agent_obs(value: float = 0.0) -> dict[str, np.ndarray]:
     return {
         "z_rl": np.full((16,), value, dtype=np.float32),
-        "reference_action": np.zeros((8,), dtype=np.float32),
+        "reference_action": np.zeros((4,), dtype=np.float32),
         "proprio": np.zeros((3,), dtype=np.float32),
     }
 
@@ -29,7 +29,7 @@ def test_compact_transition_replay_samples_rlt_batch():
         CompactTransition(
             agent_obs=make_agent_obs(0.0),
             next_agent_obs=make_agent_obs(1.0),
-            action=np.zeros((8,), dtype=np.float32),
+            action=np.zeros((4,), dtype=np.float32),
             reward=1.0,
             done=False,
             truncated=False,
@@ -55,7 +55,7 @@ def test_compact_terminal_transition_has_no_next_agent_obs():
     compact = CompactTransition(
         agent_obs=make_agent_obs(0.0),
         next_agent_obs=None,
-        action=np.zeros((8,), dtype=np.float32),
+        action=np.zeros((4,), dtype=np.float32),
         reward=1.0,
         done=True,
         truncated=False,
@@ -77,7 +77,7 @@ def test_agentlace_replay_store_helper_inserts_into_replay():
     transition = CompactTransition(
         agent_obs=make_agent_obs(0.0),
         next_agent_obs=make_agent_obs(1.0),
-        action=np.zeros((8,), dtype=np.float32),
+        action=np.zeros((4,), dtype=np.float32),
         reward=1.0,
         done=False,
         truncated=False,

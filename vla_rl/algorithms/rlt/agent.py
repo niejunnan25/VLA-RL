@@ -9,7 +9,7 @@ import torch.nn.functional as F
 
 from vla_rl.algorithms.base import Algorithm
 from vla_rl.algorithms.rlt.modeling import RLTActor, RLTCritic
-from vla_rl.data import ActionChunk, Observation, PolicyFeatures, RolloutBatch
+from vla_rl.data import RolloutBatch
 
 
 class RLTAgent(Algorithm):
@@ -18,7 +18,6 @@ class RLTAgent(Algorithm):
         z_rl_dim: int = 2048,
         proprio_dim: int = 8,
         action_dim: int = 7,
-        chunk_size: int = 10,
         execute_horizon: int = 5,
         actor_hidden_dims: tuple[int, ...] = (512, 512, 512),
         critic_hidden_dims: tuple[int, ...] = (512, 512, 512),
@@ -36,14 +35,11 @@ class RLTAgent(Algorithm):
         device: str = "cpu",
     ) -> None:
         del proprio_dim
-        if execute_horizon <= 0 or execute_horizon > chunk_size:
-            raise ValueError(
-                f"execute_horizon must be in [1, chunk_size], got execute_horizon={execute_horizon}, chunk_size={chunk_size}"
-            )
+        if execute_horizon <= 0:
+            raise ValueError(f"execute_horizon must be positive, got {execute_horizon}")
         self.device = torch.device(device)
         self.z_rl_dim = int(z_rl_dim)
         self.action_dim = int(action_dim)
-        self.chunk_size = int(chunk_size)
         self.execute_horizon = int(execute_horizon)
         self.actor_hidden_dims = tuple(int(dim) for dim in actor_hidden_dims)
         self.critic_hidden_dims = tuple(int(dim) for dim in critic_hidden_dims)
@@ -61,7 +57,7 @@ class RLTAgent(Algorithm):
         self.update_count = 0
         self._critic_step_count = 0
 
-        action_chunk_dim = self.chunk_size * self.action_dim
+        action_chunk_dim = self.execute_horizon * self.action_dim
         self.actor = RLTActor(
             state_dim=self.z_rl_dim,
             action_chunk_dim=action_chunk_dim,
@@ -78,27 +74,19 @@ class RLTAgent(Algorithm):
         self.critic_optimizer = torch.optim.Adam(self.critics.parameters(), lr=float(critic_lr))
 
     @torch.no_grad()
-    def act(
+    def sample_action(
         self,
-        obs: Observation,
-        features: PolicyFeatures | None = None,
-        agent_obs: dict[str, Any] | None = None,
+        rlt_state: dict[str, Any],
         deterministic: bool = False,
-    ) -> ActionChunk:
-        del obs, features
-        if agent_obs is None:
-            raise ValueError("RLTAgent.act requires agent_obs from RLTFeatureProcessor")
-        z_rl = torch.as_tensor(agent_obs["z_rl"], dtype=torch.float32, device=self.device).reshape(1, -1)
-        ref = torch.as_tensor(agent_obs["reference_action"], dtype=torch.float32, device=self.device).reshape(1, -1)
+    ) -> np.ndarray:
+        z_rl = torch.as_tensor(rlt_state["z_rl"], dtype=torch.float32, device=self.device).reshape(1, -1)
+        ref = torch.as_tensor(rlt_state["reference_action"], dtype=torch.float32, device=self.device).reshape(1, -1)
         if deterministic:
             action = self.actor(z_rl, ref)
         else:
             action, _ = self.actor.sample(z_rl, ref)
         action_np = action.squeeze(0).detach().cpu().numpy().astype(np.float32)
-        actions = action_np.reshape(self.chunk_size, self.action_dim)
-        chunk = ActionChunk(actions=actions, horizon=self.chunk_size, metadata={"algorithm": "rlt"})
-        chunk.validate()
-        return chunk
+        return action_np.reshape(self.execute_horizon, self.action_dim)
 
     def update(self, batch: RolloutBatch) -> dict:
         batch.validate()
@@ -223,7 +211,6 @@ class RLTAgent(Algorithm):
             "config": {
                 "z_rl_dim": self.z_rl_dim,
                 "action_dim": self.action_dim,
-                "chunk_size": self.chunk_size,
                 "execute_horizon": self.execute_horizon,
                 "actor_hidden_dims": self.actor_hidden_dims,
                 "critic_hidden_dims": self.critic_hidden_dims,

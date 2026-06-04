@@ -23,8 +23,7 @@ policy:
   retries: 3
   retry_sleep: 1.0
 
-feature:
-  _target_: vla_rl.algorithms.rlt.RLTFeatureProcessor
+rlt_observation:
   encoder_path: /vla/users/yixin/openpi/checkpoints/rlt_stage1_single_cos_l6/checkpoint_12000.pt
   device: cuda
   input_dim: 2048
@@ -34,15 +33,12 @@ feature:
   ff_dim: 2048
   dropout: 0.0
   max_tokens: 512
-  chunk_size: 10
-  action_dim: 7
 
 algorithm:
   _target_: vla_rl.algorithms.rlt.RLTAgent
   z_rl_dim: 2048
   proprio_dim: 8
   action_dim: 7
-  chunk_size: 10
   execute_horizon: 5
   actor_hidden_dims: [512, 512, 512]
   critic_hidden_dims: [512, 512, 512]

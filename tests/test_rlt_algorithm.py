@@ -1,9 +1,11 @@
 from pathlib import Path
 
 import numpy as np
+import pytest
 import torch
+from omegaconf import OmegaConf
 
-from vla_rl.algorithms.rlt import RLTAgent, RLTFeatureProcessor, RLTokenEncoder
+from vla_rl.algorithms.rlt import RLTAgent, RLTStateBuilder, RLTokenEncoder
 from vla_rl.algorithms.rlt.features import load_frozen_rlt_encoder
 from vla_rl.data import Observation, PolicyFeatures, RolloutBatch, Transition
 from vla_rl.envs.fake import FakeEnvBackend
@@ -17,7 +19,6 @@ def make_agent() -> RLTAgent:
         z_rl_dim=16,
         proprio_dim=3,
         action_dim=2,
-        chunk_size=4,
         execute_horizon=2,
         actor_hidden_dims=(32, 32),
         critic_hidden_dims=(32, 32),
@@ -28,10 +29,10 @@ def make_agent() -> RLTAgent:
     )
 
 
-def make_agent_obs(value: float = 0.0) -> dict[str, np.ndarray]:
+def make_rlt_state(value: float = 0.0) -> dict[str, np.ndarray]:
     return {
         "z_rl": np.full((16,), value, dtype=np.float32),
-        "reference_action": np.zeros((8,), dtype=np.float32),
+        "reference_action": np.zeros((4,), dtype=np.float32),
         "proprio": np.zeros((3,), dtype=np.float32),
     }
 
@@ -40,14 +41,14 @@ def make_transition(done: bool = False, discount: float = 0.25) -> Transition:
     obs = Observation(proprio=np.zeros((3,), dtype=np.float32))
     return Transition(
         obs=obs,
-        action=np.zeros((8,), dtype=np.float32),
+        action=np.zeros((4,), dtype=np.float32),
         reward=1.0,
         next_obs=obs,
         done=done,
         truncated=False,
         discount=discount,
-        agent_obs=make_agent_obs(0.0),
-        next_agent_obs=None if done else make_agent_obs(1.0),
+        agent_obs=make_rlt_state(0.0),
+        next_agent_obs=None if done else make_rlt_state(1.0),
     )
 
 
@@ -75,11 +76,12 @@ def test_rlt_encoder_checkpoint_loading_and_max_tokens(tmp_path: Path):
     assert loaded(torch.zeros(1, 3, 8)).shape == (1, 8)
 
 
-def test_rlt_feature_processor_outputs_agent_obs():
+def test_rlt_state_builder_outputs_rlt_state():
     encoder = RLTokenEncoder(input_dim=8, rl_token_dim=8, num_layers=1, num_heads=2, ff_dim=16)
-    processor = RLTFeatureProcessor(
+    state_builder = RLTStateBuilder(
         device="cpu",
         chunk_size=4,
+        execute_horizon=2,
         action_dim=2,
         max_tokens=3,
         encoder=encoder,
@@ -90,18 +92,73 @@ def test_rlt_feature_processor_outputs_agent_obs():
         proprio=np.ones((3,), dtype=np.float32),
     )
 
-    agent_obs = processor.process(Observation(), features)
+    rlt_state = state_builder.process(Observation(), features)
 
-    assert agent_obs["z_rl"].shape == (8,)
-    assert agent_obs["reference_action"].shape == (8,)
-    assert agent_obs["proprio"].shape == (3,)
+    assert rlt_state["z_rl"].shape == (8,)
+    assert rlt_state["reference_action"].shape == (4,)
+    assert rlt_state["proprio"].shape == (3,)
+
+
+def test_rlt_state_builder_requires_execute_horizon():
+    encoder = RLTokenEncoder(input_dim=8, rl_token_dim=8, num_layers=1, num_heads=2, ff_dim=16)
+
+    with pytest.raises(ValueError, match="execute_horizon"):
+        RLTStateBuilder(
+            device="cpu",
+            chunk_size=4,
+            action_dim=2,
+            max_tokens=3,
+            encoder=encoder,
+        )
+
+
+def test_rlt_configs_match_execute_horizon_semantics():
+    repo_root = Path(__file__).resolve().parents[1]
+
+    formal_cfg = OmegaConf.load(repo_root / "examples/libero_rlt/configs/libero_spatial_task4_openpi_rlt.yaml")
+    assert "rlt_observation" in formal_cfg
+    assert "_target_" not in formal_cfg.rlt_observation
+    agent_cfg = dict(OmegaConf.to_container(formal_cfg.algorithm, resolve=True))
+    agent_cfg.pop("_target_", None)
+    agent_cfg["device"] = "cpu"
+    agent = RLTAgent(**agent_cfg)
+    assert agent.execute_horizon == formal_cfg.runtime.execute_horizon
+
+    recipe_agent_cfg = dict(
+        OmegaConf.to_container(OmegaConf.load(repo_root / "recipes/config/algorithm/rlt.yaml"), resolve=True)
+    )
+    recipe_agent_cfg.pop("_target_", None)
+    recipe_agent_cfg["device"] = "cpu"
+    recipe_agent = RLTAgent(**recipe_agent_cfg)
+    assert recipe_agent.execute_horizon == 5
+
+    recipe_feature_cfg = OmegaConf.load(repo_root / "recipes/config/feature/rlt_encoder.yaml")
+    builder = RLTStateBuilder(
+        device="cpu",
+        chunk_size=int(recipe_feature_cfg.chunk_size),
+        execute_horizon=int(recipe_feature_cfg.execute_horizon),
+        action_dim=int(recipe_feature_cfg.action_dim),
+        max_tokens=3,
+        encoder=RLTokenEncoder(input_dim=8, rl_token_dim=8, num_layers=1, num_heads=2, ff_dim=16),
+    )
+    features = PolicyFeatures(
+        reference_actions=np.ones(
+            (int(recipe_feature_cfg.chunk_size), int(recipe_feature_cfg.action_dim)),
+            dtype=np.float32,
+        ),
+        embeddings={"prefix": np.zeros((1, 6, 8), dtype=np.float32)},
+    )
+    rlt_state = builder.process(Observation(), features)
+    assert rlt_state["reference_action"].shape == (
+        int(recipe_feature_cfg.execute_horizon) * int(recipe_feature_cfg.action_dim),
+    )
 
 
 def test_rlt_agent_act_and_update():
     agent = make_agent()
-    action_chunk = agent.act(Observation(), agent_obs=make_agent_obs(), deterministic=True)
+    actions = agent.sample_action(make_rlt_state(), deterministic=True)
 
-    assert action_chunk.actions.shape == (4, 2)
+    assert actions.shape == (2, 2)
 
     metrics = agent.update(RolloutBatch(transitions=[make_transition() for _ in range(4)]))
 
@@ -120,14 +177,13 @@ def test_rlt_agent_uses_transition_discount_and_terminal_no_bootstrap():
 
 def test_local_actor_learner_with_rlt_cpu_small_model(tmp_path: Path):
     encoder = RLTokenEncoder(input_dim=16, rl_token_dim=16, num_layers=1, num_heads=4, ff_dim=32)
-    processor = RLTFeatureProcessor(device="cpu", chunk_size=4, action_dim=7, max_tokens=3, encoder=encoder)
+    processor = RLTStateBuilder(device="cpu", chunk_size=4, execute_horizon=2, action_dim=7, max_tokens=3, encoder=encoder)
     env = FakeEnvBackend(action_dim=7, proprio_dim=8, max_steps=20)
     policy = FakePolicyBackend(action_dim=7, chunk_size=4, embedding_dim=16)
     agent = RLTAgent(
         z_rl_dim=16,
         proprio_dim=8,
         action_dim=7,
-        chunk_size=4,
         execute_horizon=2,
         actor_hidden_dims=(32, 32),
         critic_hidden_dims=(32, 32),

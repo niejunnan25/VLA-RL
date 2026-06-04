@@ -39,15 +39,12 @@ def make_obs():
     )
 
 
-def test_openpi_sample_actions_returns_action_chunk():
+def test_openpi_sample_actions_returns_actions():
     policy = MockOpenPIPolicy()
     backend = OpenPIBackend(config_name="pi05_libero", checkpoint_path="/tmp/ckpt", policy=policy)
-    chunk = backend.sample_actions(make_obs())
+    actions = backend.sample_actions(make_obs())
 
-    assert chunk.actions.shape == (3, 32)
-    assert chunk.horizon == 3
-    assert chunk.metadata["policy"] == "openpi"
-    assert chunk.metadata["config_name"] == "pi05_libero"
+    assert actions.shape == (3, 32)
     assert policy.last_obs["prompt"] == "open drawer"
     assert "image/front" in policy.last_obs
     assert "state" in policy.last_obs
@@ -57,12 +54,14 @@ def test_openpi_extract_features_returns_policy_features():
     policy = MockOpenPIPolicy()
     backend = OpenPIBackend(config_name="pi05_libero", checkpoint_path="/tmp/ckpt", policy=policy)
     obs = make_obs()
-    chunk = backend.sample_actions(obs)
-    features = backend.extract_features(obs, actions=chunk)
+    actions = backend.sample_actions(obs)
+    features = backend.extract_features(obs, actions=actions)
 
     assert features.reference_actions.shape == (3, 32)
     assert features.embeddings["prefix"].shape == (1, 5, 8)
     assert "suffix" not in features.embeddings
+    assert features.metadata["policy"] == "openpi"
+    assert features.metadata["config_name"] == "pi05_libero"
     assert features.metadata["checkpoint_path"] == "/tmp/ckpt"
 
 

@@ -1,11 +1,13 @@
 from __future__ import annotations
 
+from dataclasses import dataclass
 from typing import Any, Protocol
 
 import numpy as np
 
-from vla_rl.data import ActionChunk, ActionSpec, Observation, PolicyFeatures
+from vla_rl.data import ActionSpec, Observation, PolicyFeatures
 from vla_rl.policies.base import PolicyBackend
+from vla_rl.policies.openpi import OpenPIBackend
 from vla_rl.runtime.remote_http import RemoteHttpRpcClient
 
 
@@ -18,18 +20,25 @@ class ReferencePolicy(Protocol):
     def predict_action_with_features(self, obs: Observation, **kwargs: Any) -> PolicyFeatures:
         ...
 
+    def predict_actions_and_prefix(self, obs: Observation, **kwargs: Any) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
+        ...
 
-class _ReferencePolicyAdapter:
-    """RLT-facing wrapper around a service-side policy adapter."""
 
-    def __init__(self, policy: Any) -> None:
-        self.policy = policy
+@dataclass(slots=True)
+class OpenPIReferencePolicy:
+    """RLT-facing wrapper around the OpenPI policy adapter."""
+
+    policy: OpenPIBackend
 
     def action_spec(self) -> ActionSpec:
         return self.policy.action_spec()
 
     def predict_action_with_features(self, obs: Observation, **kwargs: Any) -> PolicyFeatures:
         return self.policy.extract_features(obs, **kwargs)
+
+    def predict_actions_and_prefix(self, obs: Observation, **kwargs: Any) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
+        features = self.predict_action_with_features(obs, **kwargs)
+        return _actions_prefix_proprio(features)
 
 
 class ReferencePolicyClient(PolicyBackend):
@@ -72,7 +81,11 @@ class ReferencePolicyClient(PolicyBackend):
         result.validate()
         return result
 
-    def sample_actions(self, obs: Observation, task: str | None = None, **kwargs: Any) -> ActionChunk:
+    def predict_actions_and_prefix(self, obs: Observation, **kwargs: Any) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
+        features = self.predict_action_with_features(obs, **kwargs)
+        return _actions_prefix_proprio(features)
+
+    def sample_actions(self, obs: Observation, task: str | None = None, **kwargs: Any) -> np.ndarray:
         if task is not None:
             obs = Observation(
                 images=obs.images,
@@ -83,15 +96,12 @@ class ReferencePolicyClient(PolicyBackend):
         features = self.predict_action_with_features(obs, **kwargs)
         if features.reference_actions is None:
             raise RuntimeError("reference-policy server returned no reference_actions")
-        actions = np.asarray(features.reference_actions, dtype=np.float32)
-        chunk = ActionChunk(actions=actions, horizon=actions.shape[0], metadata=dict(features.metadata))
-        chunk.validate()
-        return chunk
+        return np.asarray(features.reference_actions, dtype=np.float32)
 
     def extract_features(
         self,
         obs: Observation,
-        actions: ActionChunk | None = None,
+        actions: np.ndarray | None = None,
         **kwargs: Any,
     ) -> PolicyFeatures:
         del actions
@@ -103,8 +113,6 @@ class ReferencePolicyClient(PolicyBackend):
 
 def create_reference_policy(name: str, **kwargs: Any) -> ReferencePolicy:
     if name == "openpi":
-        from vla_rl.policies.openpi import OpenPIBackend
-
         policy = OpenPIBackend(
             openpi_root=kwargs.get("policy_root") or kwargs.get("openpi_root"),
             config_name=kwargs.get("config_name", "pi0_libero"),
@@ -112,7 +120,22 @@ def create_reference_policy(name: str, **kwargs: Any) -> ReferencePolicy:
             action_dim=int(kwargs.get("action_dim", 32)),
             device=kwargs.get("device", "cuda"),
         )
-        return _ReferencePolicyAdapter(policy=policy)
+        return OpenPIReferencePolicy(policy=policy)
     if name == "starvla":
         raise NotImplementedError("StarVLAReferencePolicy is not implemented yet")
     raise ValueError(f"unsupported reference policy: {name}")
+
+
+def _actions_prefix_proprio(features: PolicyFeatures) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
+    if features.reference_actions is None:
+        raise RuntimeError("reference policy returned no reference_actions")
+    if "prefix" not in features.embeddings:
+        raise RuntimeError("reference policy returned no prefix embeddings")
+    proprio = features.proprio
+    if proprio is None:
+        proprio = np.zeros((0,), dtype=np.float32)
+    return (
+        np.asarray(features.reference_actions, dtype=np.float32),
+        np.asarray(features.embeddings["prefix"], dtype=np.float32),
+        np.asarray(proprio, dtype=np.float32).reshape(-1),
+    )

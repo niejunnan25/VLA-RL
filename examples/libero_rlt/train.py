@@ -10,13 +10,17 @@ from typing import Any
 
 import numpy as np
 from omegaconf import DictConfig, OmegaConf
+import torch
 
 PROJECT_ROOT = Path(__file__).resolve().parents[2]
 if str(PROJECT_ROOT) not in sys.path:
     sys.path.insert(0, str(PROJECT_ROOT))
 
-from vla_rl.config import instantiate
-from vla_rl.data import ActionChunk, CompactReplayBuffer, CompactTransition
+from vla_rl.algorithms.rlt import RLTAgent, RLTokenEncoder
+from vla_rl.algorithms.rlt.features import load_frozen_rlt_encoder
+from vla_rl.data import CompactReplayBuffer, CompactTransition
+from vla_rl.envs.libero import LiberoRemoteEnvBackend
+from vla_rl.policies import ReferencePolicyClient
 from vla_rl.runtime.agentlace import (
     import_agentlace,
     json_sanitize,
@@ -24,6 +28,7 @@ from vla_rl.runtime.agentlace import (
     make_trainer_config,
 )
 from vla_rl.runtime.checkpoint import CheckpointManager
+from vla_rl.runtime.timer import Timer
 
 
 def parse_args() -> argparse.Namespace:
@@ -56,7 +61,7 @@ def run_learner(cfg: DictConfig) -> dict[str, Any]:
     """
 
     runtime = cfg.runtime
-    algorithm = instantiate(cfg.algorithm)
+    agent = create_rlt_agent(cfg)
     agentlace = import_agentlace()
     run_dir = _run_dir(runtime)
     checkpoints = CheckpointManager(run_dir) if run_dir is not None else None
@@ -76,7 +81,7 @@ def run_learner(cfg: DictConfig) -> dict[str, Any]:
     episodes = 0
     total_reward = 0.0
     if runtime.get("resume_from", None):
-        payload = checkpoints.load(runtime.resume_from, algorithm) if checkpoints is not None else {}
+        payload = checkpoints.load(runtime.resume_from, agent) if checkpoints is not None else {}
         update_steps = int(payload.get("update_steps", 0))
         env_steps = int(payload.get("env_steps", 0))
         episodes = int(payload.get("episodes", 0))
@@ -116,12 +121,13 @@ def run_learner(cfg: DictConfig) -> dict[str, Any]:
     )
     server.register_data_store(str(runtime.store_name), make_agentlace_replay_store(agentlace, replay))
     server.start(threaded=True)
-    server.publish_network(algorithm.policy_state_dict())
+    server.publish_network(agent.policy_state_dict())
 
     next_publish_at = _next_interval(update_steps, int(runtime.publish_interval_updates))
     next_ckpt_env_at = _next_interval(env_steps, int(runtime.checkpoint_interval_env_steps))
     next_ckpt_update_at = _next_interval(update_steps, int(runtime.checkpoint_interval_updates))
     start_time = time.perf_counter()
+    active_update_time_sec = 0.0
     last_wait_metric_time = 0.0
     last_wait_publish_time = time.perf_counter()
     last_update: dict[str, Any] = {}
@@ -142,7 +148,7 @@ def run_learner(cfg: DictConfig) -> dict[str, Any]:
             if update_steps >= int(runtime.max_update_steps):
                 now = time.perf_counter()
                 if now - last_wait_publish_time >= 1.0:
-                    server.publish_network(algorithm.policy_state_dict())
+                    server.publish_network(agent.policy_state_dict())
                     last_wait_publish_time = now
                 if now - last_wait_metric_time >= 1.0:
                     write_metric(
@@ -159,7 +165,7 @@ def run_learner(cfg: DictConfig) -> dict[str, Any]:
                     )
                     last_wait_metric_time = now
                 if checkpoints is not None and int(runtime.checkpoint_interval_env_steps) > 0 and env_steps >= next_ckpt_env_at:
-                    _save_checkpoint(checkpoints, algorithm, env_steps, update_steps, episodes, total_reward, config_snapshot)
+                    _save_checkpoint(checkpoints, agent, env_steps, update_steps, episodes, total_reward, config_snapshot)
                     next_ckpt_env_at += int(runtime.checkpoint_interval_env_steps)
                 time.sleep(_runtime_float(runtime, "update_sleep_sec", 0.05))
                 continue
@@ -182,7 +188,7 @@ def run_learner(cfg: DictConfig) -> dict[str, Any]:
                     )
                     break
                 if now - last_wait_publish_time >= 1.0:
-                    server.publish_network(algorithm.policy_state_dict())
+                    server.publish_network(agent.policy_state_dict())
                     last_wait_publish_time = now
                 if now - last_wait_metric_time >= 1.0:
                     write_metric(
@@ -200,32 +206,33 @@ def run_learner(cfg: DictConfig) -> dict[str, Any]:
                 time.sleep(_runtime_float(runtime, "update_sleep_sec", 0.05))
                 continue
 
-            step_start = time.perf_counter()
-            last_update = algorithm.update(replay.sample(int(runtime.batch_size)))
+            step_timer = Timer()
+            with step_timer.context("sample_replay"):
+                batch = replay.sample(int(runtime.batch_size))
+            with step_timer.context("algorithm_update"):
+                last_update = agent.update(batch)
+            timing = step_timer.get_average_times(reset=False, prefix="time/", suffix="_sec")
+            active_update_time_sec += sum(step_timer.get_total_times(reset=False).values())
             update_steps += 1
             env_steps = current_env_steps(env_steps)
-            write_metric(
-                {
-                    "role": "learner",
-                    "env_steps": env_steps,
-                    "update_steps": update_steps,
-                    "replay_size": len(replay),
-                    "update_time_sec": time.perf_counter() - step_start,
-                    "wall_time_sec": time.perf_counter() - start_time,
-                    **{f"train/{key}": value for key, value in last_update.items()},
-                }
-            )
 
+            publish_time_sec = 0.0
+            checkpoint_time_sec = 0.0
             if int(runtime.publish_interval_updates) > 0 and update_steps >= next_publish_at:
-                server.publish_network(algorithm.policy_state_dict())
+                publish_start = time.perf_counter()
+                server.publish_network(agent.policy_state_dict())
+                publish_time_sec += time.perf_counter() - publish_start
                 next_publish_at += int(runtime.publish_interval_updates)
             if checkpoints is not None and int(runtime.checkpoint_interval_env_steps) > 0 and env_steps >= next_ckpt_env_at:
-                _save_checkpoint(checkpoints, algorithm, env_steps, update_steps, episodes, total_reward, config_snapshot)
+                ckpt_start = time.perf_counter()
+                _save_checkpoint(checkpoints, agent, env_steps, update_steps, episodes, total_reward, config_snapshot)
+                checkpoint_time_sec += time.perf_counter() - ckpt_start
                 next_ckpt_env_at += int(runtime.checkpoint_interval_env_steps)
             if checkpoints is not None and int(runtime.checkpoint_interval_updates) > 0 and update_steps >= next_ckpt_update_at:
+                ckpt_start = time.perf_counter()
                 _save_checkpoint(
                     checkpoints,
-                    algorithm,
+                    agent,
                     env_steps,
                     update_steps,
                     episodes,
@@ -233,7 +240,27 @@ def run_learner(cfg: DictConfig) -> dict[str, Any]:
                     config_snapshot,
                     tag=f"update_{update_steps}.pt",
                 )
+                checkpoint_time_sec += time.perf_counter() - ckpt_start
                 next_ckpt_update_at += int(runtime.checkpoint_interval_updates)
+
+            wall_time_sec = time.perf_counter() - start_time
+            write_metric(
+                {
+                    "role": "learner",
+                    "env_steps": env_steps,
+                    "update_steps": update_steps,
+                    "replay_size": len(replay),
+                    "update_time_sec": timing.get("time/sample_replay_sec", 0.0)
+                    + timing.get("time/algorithm_update_sec", 0.0),
+                    "time/publish_network_sec": publish_time_sec,
+                    "time/save_checkpoint_sec": checkpoint_time_sec,
+                    "speed/learner_wall_updates_per_sec": update_steps / max(wall_time_sec, 1e-9),
+                    "speed/learner_active_updates_per_sec": update_steps / max(active_update_time_sec, 1e-9),
+                    "wall_time_sec": wall_time_sec,
+                    **timing,
+                    **{f"train/{key}": value for key, value in last_update.items()},
+                }
+            )
     finally:
         stop = getattr(server, "stop", None)
         if callable(stop):
@@ -249,8 +276,8 @@ def run_learner(cfg: DictConfig) -> dict[str, Any]:
     }
     if checkpoints is not None:
         if int(runtime.checkpoint_interval_env_steps) > 0 and env_steps >= next_ckpt_env_at:
-            _save_checkpoint(checkpoints, algorithm, env_steps, update_steps, episodes, total_reward, config_snapshot)
-        _save_checkpoint(checkpoints, algorithm, env_steps, update_steps, episodes, total_reward, config_snapshot, tag="final.pt")
+            _save_checkpoint(checkpoints, agent, env_steps, update_steps, episodes, total_reward, config_snapshot)
+        _save_checkpoint(checkpoints, agent, env_steps, update_steps, episodes, total_reward, config_snapshot, tag="final.pt")
     if run_dir is not None:
         (run_dir / "summary.json").write_text(json.dumps(json_sanitize(summary), indent=2, sort_keys=True) + "\n")
     write_metric({"summary": summary})
@@ -260,27 +287,19 @@ def run_learner(cfg: DictConfig) -> dict[str, Any]:
 def run_actor(cfg: DictConfig) -> dict[str, Any]:
     """SERL-style RLT actor loop.
 
-    The actor makes the data path explicit: observation -> VLA reference-policy
-    features -> RL token feature processor -> RLT actor/reference action -> env
-    chunk step -> compact transition streamed to the learner.
+    The actor keeps the RLT data path explicit:
+    observation -> frozen VLA output -> base action + RLT observation ->
+    RLT actor/reference action -> env chunk step -> compact learner transition.
     """
 
     runtime = cfg.runtime
-    env = instantiate(cfg.env)
-    policy = instantiate(cfg.policy)
-    feature_processor = instantiate(cfg.feature)
-    algorithm = instantiate(cfg.algorithm)
+    env = create_env(cfg)
+    reference_policy = build_reference_policy(cfg)
+    rl_token_encoder = load_rl_token_encoder(cfg)
+    agent = create_rlt_agent(cfg)
     agentlace = import_agentlace()
     run_dir = _run_dir(runtime)
-    if run_dir is not None:
-        run_dir.mkdir(parents=True, exist_ok=True)
-        (run_dir / "actor_metrics.jsonl").write_text("")
-
-    def write_actor_metric(metric: dict[str, Any]) -> None:
-        if run_dir is None:
-            return
-        with (run_dir / "actor_metrics.jsonl").open("a") as f:
-            f.write(json.dumps(json_sanitize(metric), sort_keys=True) + "\n")
+    write_actor_metric = _make_actor_metric_writer(run_dir)
 
     data_store = agentlace.QueuedDataStore(int(runtime.actor_queue_capacity))
     client = agentlace.TrainerClient(
@@ -295,7 +314,7 @@ def run_actor(cfg: DictConfig) -> dict[str, Any]:
     def network_callback(payload: dict[str, Any]) -> None:
         nonlocal has_policy_state
         if payload is not None:
-            algorithm.load_policy_state_dict(payload)
+            agent.load_policy_state_dict(payload)
             has_policy_state = True
 
     client.recv_network_callback(network_callback)
@@ -311,40 +330,68 @@ def run_actor(cfg: DictConfig) -> dict[str, Any]:
         env_steps = 0
         episodes = 0
         total_reward = 0.0
+        active_rollout_time_sec = 0.0
         next_weight_update_at = _next_interval(env_steps, int(runtime.weight_update_interval_steps))
         next_stats_at = _next_interval(env_steps, int(runtime.stats_interval_env_steps))
         start_time = time.perf_counter()
+        timer = Timer()
+        execute_horizon = int(runtime.execute_horizon)
 
         while env_steps < int(runtime.max_env_steps):
+            timer.tick("total")
             chunk_start = time.perf_counter()
-            features = policy.extract_features(obs)
-            reference = _reference_chunk_from_features(features)
-            agent_obs = feature_processor.process(obs, features)
-            if env_steps < int(runtime.warmup_steps):
-                action_chunk = reference
-            else:
-                action_chunk = algorithm.act(obs, features=features, agent_obs=agent_obs)
 
-            action_chunk.validate()
-            if action_chunk.actions.shape[0] < int(runtime.execute_horizon):
-                raise ValueError(
-                    f"action chunk length {action_chunk.actions.shape[0]} is shorter than execute_horizon={int(runtime.execute_horizon)}"
+            with timer.context("reference_policy"):
+                base_actions, prefix_tokens, proprio = reference_policy.predict_actions_and_prefix(obs)
+                base_actions = np.asarray(base_actions, dtype=np.float32)[:execute_horizon]
+
+            with timer.context("encode_rlt_obs"):
+                rlt_obs = encode_rlt_obs(
+                    prefix_tokens,
+                    base_actions,
+                    proprio,
+                    rl_token_encoder=rl_token_encoder,
                 )
-            execute_actions = action_chunk.actions[: int(runtime.execute_horizon)]
-            next_obs, reward, done, truncated, info = env.step_chunk(execute_actions)
-            executed_steps = int(info.get("executed_steps", len(execute_actions)))
+
+            with timer.context("sample_actions"):
+                if env_steps < int(runtime.warmup_steps):
+                    actions = base_actions
+                else:
+                    actions = agent.sample_action(rlt_obs)
+
+            actions = np.asarray(actions, dtype=np.float32)
+            if actions.shape[0] != execute_horizon:
+                raise ValueError(
+                    f"action chunk length {actions.shape[0]} must match execute_horizon={execute_horizon}"
+                )
+
+            with timer.context("step_env"):
+                next_obs, reward, done, truncated, info = env.step_chunk(actions)
+
+            executed_steps = int(info.get("executed_steps", len(actions)))
             env_steps += executed_steps
             total_reward += float(reward)
             terminal = bool(done or truncated)
-            next_agent_obs = None
+
+            next_rlt_state = None
             if not terminal:
-                next_features = policy.extract_features(next_obs)
-                next_agent_obs = feature_processor.process(next_obs, next_features)
+                with timer.context("reference_policy"):
+                    next_base_actions, next_prefix_tokens, next_proprio = reference_policy.predict_actions_and_prefix(
+                        next_obs
+                    )
+                    next_base_actions = np.asarray(next_base_actions, dtype=np.float32)[:execute_horizon]
+                with timer.context("encode_rlt_obs"):
+                    next_rlt_state = encode_rlt_obs(
+                        next_prefix_tokens,
+                        next_base_actions,
+                        next_proprio,
+                        rl_token_encoder=rl_token_encoder,
+                    )
 
             transition = CompactTransition(
-                agent_obs=agent_obs,
-                next_agent_obs=next_agent_obs,
-                action=np.asarray(action_chunk.actions, dtype=np.float32).reshape(-1),
+                agent_obs=rlt_obs,
+                next_agent_obs=next_rlt_state,
+                action=actions.reshape(-1),
                 reward=float(reward),
                 done=bool(done),
                 truncated=bool(truncated),
@@ -353,33 +400,53 @@ def run_actor(cfg: DictConfig) -> dict[str, Any]:
                 env_steps=env_steps,
                 info=info,
             )
-            data_store.insert(transition.to_payload())
-            client.update()
+            with timer.context("send_transition"):
+                data_store.insert(transition.to_payload())
+                client.update()
 
+            metric_episode = episodes
+            chunk_time_sec = time.perf_counter() - chunk_start
+            active_rollout_time_sec += chunk_time_sec
+            reset_time_sec = 0.0
+            if terminal:
+                episodes += 1
+                reset_start = time.perf_counter()
+                with timer.context("reset_env"):
+                    obs = env.reset()
+                reset_time_sec = time.perf_counter() - reset_start
+            else:
+                obs = next_obs
+
+            wall_time_sec = time.perf_counter() - start_time
+            timer.tock("total")
             metric = {
                 "role": "actor",
                 "env_steps": env_steps,
-                "episode": episodes,
+                "episode": metric_episode,
                 "reward": float(reward),
                 "done": bool(done),
                 "truncated": bool(truncated),
                 "executed_steps": executed_steps,
-                "wall_time_sec": time.perf_counter() - start_time,
-                "chunk_time_sec": time.perf_counter() - chunk_start,
+                "wall_time_sec": wall_time_sec,
+                "chunk_time_sec": chunk_time_sec,
+                "time/reset_env_sec": reset_time_sec,
             }
+
             write_actor_metric(metric)
             if int(runtime.stats_interval_env_steps) > 0 and env_steps >= next_stats_at:
-                client.request(str(runtime.request_type), metric)
+                actor_stats = {
+                    "env_steps": env_steps,
+                    "episodes": episodes,
+                    "total_reward": total_reward,
+                    "wall_time_sec": wall_time_sec,
+                    "active_env_steps_per_sec": env_steps / max(active_rollout_time_sec, 1e-9),
+                    "wall_env_steps_per_sec": env_steps / max(wall_time_sec, 1e-9),
+                }
+                client.request(str(runtime.request_type), {"timer": timer.get_average_times(), "actor": actor_stats})
                 next_stats_at += int(runtime.stats_interval_env_steps)
             if int(runtime.weight_update_interval_steps) > 0 and env_steps >= next_weight_update_at:
                 client.update()
                 next_weight_update_at += int(runtime.weight_update_interval_steps)
-
-            if terminal:
-                episodes += 1
-                obs = env.reset()
-            else:
-                obs = next_obs
 
         summary = {
             "role": "actor",
@@ -398,9 +465,23 @@ def run_actor(cfg: DictConfig) -> dict[str, Any]:
         close = getattr(env, "close", None)
         if callable(close):
             close()
-        close = getattr(policy, "close", None)
+        close = getattr(reference_policy, "close", None)
         if callable(close):
             close()
+
+
+def _make_actor_metric_writer(run_dir: Path | None):
+    if run_dir is not None:
+        run_dir.mkdir(parents=True, exist_ok=True)
+        (run_dir / "actor_metrics.jsonl").write_text("")
+
+    def write_actor_metric(metric: dict[str, Any]) -> None:
+        if run_dir is None:
+            return
+        with (run_dir / "actor_metrics.jsonl").open("a") as f:
+            f.write(json.dumps(json_sanitize(metric), sort_keys=True) + "\n")
+
+    return write_actor_metric
 
 
 def _load_config(path: str, overrides: list[str]) -> DictConfig:
@@ -413,23 +494,115 @@ def _load_config(path: str, overrides: list[str]) -> DictConfig:
     return cfg
 
 
-def _validate_rlt_cfg(cfg: DictConfig) -> None:
-    if int(cfg.algorithm.execute_horizon) != int(cfg.runtime.execute_horizon):
-        raise ValueError("algorithm.execute_horizon must match runtime.execute_horizon")
-    if int(cfg.algorithm.execute_horizon) > int(cfg.algorithm.chunk_size):
-        raise ValueError("execute_horizon must be <= chunk_size")
-
-
-def _reference_chunk_from_features(features) -> ActionChunk:
-    if features.reference_actions is None:
-        raise ValueError("RLT actor requires PolicyFeatures.reference_actions")
-    reference = ActionChunk(
-        actions=np.asarray(features.reference_actions, dtype=np.float32),
-        horizon=int(features.reference_actions.shape[0]),
-        metadata={"source": "policy_features.reference_actions"},
+def create_env(cfg: DictConfig) -> LiberoRemoteEnvBackend:
+    return LiberoRemoteEnvBackend(
+        **_section_kwargs(
+            _cfg_section(cfg, "env"),
+            expected_target="vla_rl.envs.libero.LiberoRemoteEnvBackend",
+        )
     )
-    reference.validate()
-    return reference
+
+
+def build_reference_policy(cfg: DictConfig) -> ReferencePolicyClient:
+    return ReferencePolicyClient(
+        **_section_kwargs(
+            _cfg_section(cfg, "reference_policy", "policy"),
+            expected_target="vla_rl.policies.ReferencePolicyClient",
+        )
+    )
+
+
+def load_rl_token_encoder(cfg: DictConfig) -> RLTokenEncoder:
+    rlt_cfg = _rlt_encoder_cfg(cfg)
+    encoder = load_frozen_rlt_encoder(
+        str(rlt_cfg.encoder_path),
+        device=str(rlt_cfg.get("device", "cpu")),
+        input_dim=int(rlt_cfg.get("input_dim", 2048)),
+        rl_token_dim=int(rlt_cfg.get("rl_token_dim", 2048)),
+        num_encoder_layers=int(rlt_cfg.get("num_encoder_layers", 4)),
+        num_heads=int(rlt_cfg.get("num_heads", 8)),
+        ff_dim=int(rlt_cfg.get("ff_dim", 2048)),
+        dropout=float(rlt_cfg.get("dropout", 0.0)),
+        max_tokens=_normalize_max_tokens(rlt_cfg.get("max_tokens", 512)),
+    )
+    encoder.eval()
+    encoder.requires_grad_(False)
+    return encoder
+
+
+@torch.no_grad()
+def encode_rlt_obs(
+    prefix_tokens: np.ndarray,
+    base_actions: np.ndarray,
+    proprio: np.ndarray,
+    *,
+    rl_token_encoder: RLTokenEncoder,
+) -> dict[str, np.ndarray]:
+    z_vla = torch.as_tensor(
+        prefix_tokens,
+        dtype=torch.float32,
+        device=next(rl_token_encoder.parameters()).device,
+    )
+    if z_vla.dim() == 2:
+        z_vla = z_vla.unsqueeze(0)
+    if z_vla.dim() != 3:
+        raise ValueError(f"prefix embeddings must be [B, T, D] or [T, D], got {tuple(z_vla.shape)}")
+
+    max_tokens = getattr(rl_token_encoder, "max_tokens", None)
+    if max_tokens is not None:
+        z_vla = z_vla[:, : int(max_tokens), :]
+
+    z_rl = rl_token_encoder(z_vla).squeeze(0).detach().cpu().numpy().astype(np.float32)
+
+    reference_action = np.asarray(base_actions, dtype=np.float32).reshape(-1)
+    return {
+        "z_rl": z_rl,
+        "reference_action": reference_action,
+        "proprio": np.asarray(proprio, dtype=np.float32).reshape(-1),
+    }
+
+
+def create_rlt_agent(cfg: DictConfig) -> RLTAgent:
+    return RLTAgent(
+        **_section_kwargs(
+            _cfg_section(cfg, "agent", "algorithm"),
+            expected_target="vla_rl.algorithms.rlt.RLTAgent",
+        )
+    )
+
+
+def _validate_rlt_cfg(cfg: DictConfig) -> None:
+    agent_cfg = _cfg_section(cfg, "agent", "algorithm")
+    if int(agent_cfg.execute_horizon) != int(cfg.runtime.execute_horizon):
+        raise ValueError("agent.execute_horizon must match runtime.execute_horizon")
+
+
+def _rlt_encoder_cfg(cfg: DictConfig) -> DictConfig:
+    return _cfg_section(cfg, "rlt_observation", "feature")
+
+
+def _cfg_section(cfg: DictConfig, *names: str) -> DictConfig:
+    for name in names:
+        if name in cfg:
+            return cfg[name]
+    raise ValueError(f"config is missing one of: {', '.join(names)}")
+
+
+def _section_kwargs(section: DictConfig, *, expected_target: str) -> dict[str, Any]:
+    payload = OmegaConf.to_container(section, resolve=True)
+    if not isinstance(payload, dict):
+        raise TypeError(f"expected mapping config section, got {type(payload).__name__}")
+    target = payload.pop("_target_", None)
+    if target is not None and str(target) != expected_target:
+        raise ValueError(f"expected {expected_target}, got {target}")
+    return payload
+
+
+def _normalize_max_tokens(value: Any) -> int | None:
+    if value is None:
+        return None
+    max_tokens = int(value)
+    return max_tokens if max_tokens > 0 else None
 
 
 def _runtime_float(runtime: DictConfig, key: str, default: float) -> float:

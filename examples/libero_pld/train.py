@@ -17,9 +17,10 @@ if str(PROJECT_ROOT) not in sys.path:
 
 from vla_rl.algorithms.pld import load_pld_offline_replay
 from vla_rl.config import instantiate
-from vla_rl.data import ActionChunk, CompactReplayBuffer, CompactTransition, MixedReplaySampler
+from vla_rl.data import CompactReplayBuffer, CompactTransition, MixedReplaySampler
 from vla_rl.runtime.agentlace import import_agentlace, json_sanitize, make_agentlace_replay_store, make_trainer_config
 from vla_rl.runtime.checkpoint import CheckpointManager
+from vla_rl.runtime.timer import Timer
 
 
 def parse_args() -> argparse.Namespace:
@@ -47,7 +48,9 @@ def run_learner(cfg: DictConfig) -> dict[str, Any]:
     checkpoints = CheckpointManager(run_dir) if run_dir is not None else None
     replay = CompactReplayBuffer(capacity=int(runtime.replay_capacity), seed=int(runtime.replay_seed))
     config_snapshot = OmegaConf.to_container(cfg, resolve=True)
+    offline_load_start = time.perf_counter()
     offline_replay, offline_stats = _load_offline_replay(runtime)
+    offline_load_time_sec = time.perf_counter() - offline_load_start
 
     if run_dir is not None:
         run_dir.mkdir(parents=True, exist_ok=True)
@@ -108,33 +111,71 @@ def run_learner(cfg: DictConfig) -> dict[str, Any]:
         offline_ratio=0.0 if offline_replay is None else float(runtime.offline_ratio),
     )
     start_time = time.perf_counter()
+    active_update_time_sec = 0.0
     last_wait_metric_time = 0.0
     last_wait_publish_time = time.perf_counter()
     last_update: dict[str, Any] = {}
     calql_steps_done = 0
 
+    write_metric(
+        {
+            "role": "learner",
+            "algorithm": "pld",
+            "event": "offline_replay_loaded",
+            "offline_replay_size": 0 if offline_replay is None else len(offline_replay),
+            "offline_load_time_sec": offline_load_time_sec,
+            "offline_stats": offline_stats,
+        }
+    )
+
     try:
         while calql_steps_done < int(runtime.calql_pretrain_steps) and update_steps < int(runtime.max_update_steps):
             if offline_replay is None or len(offline_replay) == 0:
                 break
-            last_update = algorithm.update_critics_calql(
-                offline_replay.sample(int(runtime.batch_size)),
-                calql_alpha=float(runtime.calql_alpha),
-                calql_n_actions=int(runtime.calql_n_actions),
-                calql_temperature=float(runtime.calql_temperature),
-            )
+            step_timer = Timer()
+            with step_timer.context("offline_sample"):
+                batch = offline_replay.sample(int(runtime.batch_size))
+            with step_timer.context("calql_update"):
+                last_update = algorithm.update_critics_calql(
+                    batch,
+                    calql_alpha=float(runtime.calql_alpha),
+                    calql_n_actions=int(runtime.calql_n_actions),
+                    calql_temperature=float(runtime.calql_temperature),
+                )
+            timing = step_timer.get_average_times(reset=False, prefix="time/", suffix="_sec")
+            active_update_time_sec += sum(step_timer.get_total_times(reset=False).values())
             update_steps += 1
             calql_steps_done += 1
-            write_metric({
-                "role": "learner",
-                "phase": "calql_pretrain",
-                "update_steps": update_steps,
-                "calql_pretrain_steps": calql_steps_done,
-                "offline_replay_size": 0 if offline_replay is None else len(offline_replay),
-                **{f"train/{key}": value for key, value in last_update.items()},
-            })
+            wall_time_sec = time.perf_counter() - start_time
+            write_metric(
+                {
+                    "role": "learner",
+                    "phase": "calql_pretrain",
+                    "update_steps": update_steps,
+                    "calql_pretrain_steps": calql_steps_done,
+                    "offline_replay_size": 0 if offline_replay is None else len(offline_replay),
+                    "update_time_sec": timing.get("time/offline_sample_sec", 0.0)
+                    + timing.get("time/calql_update_sec", 0.0),
+                    "speed/learner_wall_updates_per_sec": update_steps / max(wall_time_sec, 1e-9),
+                    "speed/learner_active_updates_per_sec": update_steps / max(active_update_time_sec, 1e-9),
+                    "wall_time_sec": wall_time_sec,
+                    **timing,
+                    **{f"train/{key}": value for key, value in last_update.items()},
+                }
+            )
 
+        publish_start = time.perf_counter()
         server.publish_network(algorithm.policy_state_dict())
+        initial_publish_time_sec = time.perf_counter() - publish_start
+        write_metric(
+            {
+                "role": "learner",
+                "algorithm": "pld",
+                "event": "initial_policy_published",
+                "time/publish_network_sec": initial_publish_time_sec,
+                "update_steps": update_steps,
+            }
+        )
         next_publish_at = _next_interval(update_steps, int(runtime.publish_interval_updates))
         next_ckpt_env_at = _next_interval(env_steps, int(runtime.checkpoint_interval_env_steps))
         next_ckpt_update_at = _next_interval(update_steps, int(runtime.checkpoint_interval_updates))
@@ -181,34 +222,57 @@ def run_learner(cfg: DictConfig) -> dict[str, Any]:
             if update_steps >= int(runtime.max_update_steps):
                 time.sleep(_runtime_float(runtime, "update_sleep_sec", 0.05))
                 continue
-            step_start = time.perf_counter()
-            mixed = sampler.sample(int(runtime.batch_size))
-            last_update = algorithm.update(mixed.batch)
+            step_timer = Timer()
+            with step_timer.context("mixed_sample"):
+                mixed = sampler.sample(int(runtime.batch_size))
+            with step_timer.context("algorithm_update"):
+                last_update = algorithm.update(mixed.batch)
+            timing = step_timer.get_average_times(reset=False, prefix="time/", suffix="_sec")
+            active_update_time_sec += sum(step_timer.get_total_times(reset=False).values())
             update_steps += 1
             env_steps = current_env_steps(env_steps)
-            write_metric({
-                "role": "learner",
-                "phase": "online",
-                "env_steps": env_steps,
-                "update_steps": update_steps,
-                "online_update_steps": max(0, update_steps - calql_steps_done),
-                "calql_pretrain_steps": calql_steps_done,
-                "replay_size": len(replay),
-                "offline_replay_size": 0 if offline_replay is None else len(offline_replay),
-                "batch_mix": mixed.mix,
-                "update_time_sec": time.perf_counter() - step_start,
-                "wall_time_sec": time.perf_counter() - start_time,
-                **{f"train/{key}": value for key, value in last_update.items()},
-            })
+
+            publish_time_sec = 0.0
+            checkpoint_time_sec = 0.0
             if int(runtime.publish_interval_updates) > 0 and update_steps >= next_publish_at:
+                publish_start = time.perf_counter()
                 server.publish_network(algorithm.policy_state_dict())
+                publish_time_sec += time.perf_counter() - publish_start
                 next_publish_at += int(runtime.publish_interval_updates)
             if checkpoints is not None and int(runtime.checkpoint_interval_env_steps) > 0 and env_steps >= next_ckpt_env_at:
+                ckpt_start = time.perf_counter()
                 _save_checkpoint(checkpoints, algorithm, env_steps, update_steps, episodes, total_reward, config_snapshot)
+                checkpoint_time_sec += time.perf_counter() - ckpt_start
                 next_ckpt_env_at += int(runtime.checkpoint_interval_env_steps)
             if checkpoints is not None and int(runtime.checkpoint_interval_updates) > 0 and update_steps >= next_ckpt_update_at:
+                ckpt_start = time.perf_counter()
                 _save_checkpoint(checkpoints, algorithm, env_steps, update_steps, episodes, total_reward, config_snapshot, tag=f"update_{update_steps}.pt")
+                checkpoint_time_sec += time.perf_counter() - ckpt_start
                 next_ckpt_update_at += int(runtime.checkpoint_interval_updates)
+
+            wall_time_sec = time.perf_counter() - start_time
+            write_metric(
+                {
+                    "role": "learner",
+                    "phase": "online",
+                    "env_steps": env_steps,
+                    "update_steps": update_steps,
+                    "online_update_steps": max(0, update_steps - calql_steps_done),
+                    "calql_pretrain_steps": calql_steps_done,
+                    "replay_size": len(replay),
+                    "offline_replay_size": 0 if offline_replay is None else len(offline_replay),
+                    "batch_mix": mixed.mix,
+                    "update_time_sec": timing.get("time/mixed_sample_sec", 0.0)
+                    + timing.get("time/algorithm_update_sec", 0.0),
+                    "time/publish_network_sec": publish_time_sec,
+                    "time/save_checkpoint_sec": checkpoint_time_sec,
+                    "speed/learner_wall_updates_per_sec": update_steps / max(wall_time_sec, 1e-9),
+                    "speed/learner_active_updates_per_sec": update_steps / max(active_update_time_sec, 1e-9),
+                    "wall_time_sec": wall_time_sec,
+                    **timing,
+                    **{f"train/{key}": value for key, value in last_update.items()},
+                }
+            )
     finally:
         stop = getattr(server, "stop", None)
         if callable(stop):
@@ -286,33 +350,43 @@ def run_actor(cfg: DictConfig) -> dict[str, Any]:
         next_weight_update_at = _next_interval(env_steps, int(runtime.weight_update_interval_steps))
         next_stats_at = _next_interval(env_steps, int(runtime.stats_interval_env_steps))
         start_time = time.perf_counter()
+        active_rollout_time_sec = 0.0
         episode_success = False
         while env_steps < int(runtime.max_env_steps):
             chunk_start = time.perf_counter()
-            features = policy.extract_features(obs)
-            reference = _reference_chunk_from_features(features)
-            agent_obs = feature_processor.process(obs, features)
+            chunk_timer = Timer()
+            with chunk_timer.context("policy_extract_features"):
+                features = policy.extract_features(obs)
+            with chunk_timer.context("feature_process"):
+                base_actions, pld_state = feature_processor.build(obs, features)
             base_warmup = episodes < int(runtime.base_warmup_episodes)
-            action_chunk = reference if base_warmup else algorithm.act(obs, features=features, agent_obs=agent_obs)
-            action_chunk.validate()
-            if action_chunk.actions.shape[0] < int(runtime.execute_horizon):
+            if base_warmup:
+                actions = base_actions
+            else:
+                with chunk_timer.context("sample_action"):
+                    actions = algorithm.sample_action(pld_state)
+            actions = np.asarray(actions, dtype=np.float32)
+            if actions.shape[0] < int(runtime.execute_horizon):
                 raise ValueError(
-                    f"action chunk length {action_chunk.actions.shape[0]} is shorter than execute_horizon={int(runtime.execute_horizon)}"
+                    f"action chunk length {actions.shape[0]} is shorter than execute_horizon={int(runtime.execute_horizon)}"
                 )
-            execute_actions = action_chunk.actions[: int(runtime.execute_horizon)]
-            next_obs, reward, done, truncated, info = env.step_chunk(execute_actions)
+            execute_actions = actions[: int(runtime.execute_horizon)]
+            with chunk_timer.context("env_step_chunk"):
+                next_obs, reward, done, truncated, info = env.step_chunk(execute_actions)
             executed_steps = int(info.get("executed_steps", len(execute_actions)))
             env_steps += executed_steps
             total_reward += float(reward)
             terminal = bool(done or truncated)
             episode_success = bool(episode_success or info.get("success", False) or info.get("env_done", False))
-            next_agent_obs = None
+            next_pld_state = None
             if not terminal:
-                next_features = policy.extract_features(next_obs)
-                next_agent_obs = feature_processor.process(next_obs, next_features)
+                with chunk_timer.context("next_policy_extract_features"):
+                    next_features = policy.extract_features(next_obs)
+                with chunk_timer.context("next_feature_process"):
+                    next_pld_state = feature_processor.process(next_obs, next_features)
             transition = CompactTransition(
-                agent_obs=agent_obs,
-                next_agent_obs=next_agent_obs,
+                agent_obs=pld_state,
+                next_agent_obs=next_pld_state,
                 action=np.asarray(execute_actions, dtype=np.float32).reshape(-1),
                 reward=float(reward),
                 done=bool(done),
@@ -322,20 +396,40 @@ def run_actor(cfg: DictConfig) -> dict[str, Any]:
                 env_steps=env_steps,
                 info={**info, "base_warmup": bool(base_warmup)},
             )
-            data_store.insert(transition.to_payload())
-            client.update()
+            with chunk_timer.context("send_transition"):
+                data_store.insert(transition.to_payload())
+                client.update()
+            metric_episode = episodes
+            chunk_time_sec = time.perf_counter() - chunk_start
+            active_rollout_time_sec += chunk_time_sec
+            reset_time_sec = 0.0
+            if terminal:
+                episodes += 1
+                successes += int(episode_success)
+                episode_success = False
+                reset_start = time.perf_counter()
+                obs = env.reset()
+                reset_time_sec = time.perf_counter() - reset_start
+            else:
+                obs = next_obs
+            timing = chunk_timer.get_average_times(reset=False, prefix="time/", suffix="_sec")
+            wall_time_sec = time.perf_counter() - start_time
             metric = {
                 "role": "actor",
                 "algorithm": "pld",
                 "env_steps": env_steps,
-                "episode": episodes,
+                "episode": metric_episode,
                 "reward": float(reward),
                 "done": bool(done),
                 "truncated": bool(truncated),
                 "executed_steps": executed_steps,
                 "base_warmup": bool(base_warmup),
-                "wall_time_sec": time.perf_counter() - start_time,
-                "chunk_time_sec": time.perf_counter() - chunk_start,
+                "wall_time_sec": wall_time_sec,
+                "chunk_time_sec": chunk_time_sec,
+                "time/reset_env_sec": reset_time_sec,
+                "speed/actor_wall_env_steps_per_sec": env_steps / max(wall_time_sec, 1e-9),
+                "speed/actor_active_env_steps_per_sec": env_steps / max(active_rollout_time_sec, 1e-9),
+                **timing,
             }
             write_actor_metric(metric)
             if int(runtime.stats_interval_env_steps) > 0 and env_steps >= next_stats_at:
@@ -344,13 +438,6 @@ def run_actor(cfg: DictConfig) -> dict[str, Any]:
             if int(runtime.weight_update_interval_steps) > 0 and env_steps >= next_weight_update_at:
                 client.update()
                 next_weight_update_at += int(runtime.weight_update_interval_steps)
-            if terminal:
-                episodes += 1
-                successes += int(episode_success)
-                episode_success = False
-                obs = env.reset()
-            else:
-                obs = next_obs
         summary = {
             "role": "actor",
             "algorithm": "pld",
@@ -408,18 +495,6 @@ def _load_offline_replay(runtime: DictConfig) -> tuple[CompactReplayBuffer | Non
     if bool(runtime.require_offline) and len(replay) == 0:
         raise RuntimeError(f"PLD offline replay is empty: {path}")
     return replay, stats
-
-
-def _reference_chunk_from_features(features) -> ActionChunk:
-    if features.reference_actions is None:
-        raise ValueError("PLD actor requires PolicyFeatures.reference_actions")
-    reference = ActionChunk(
-        actions=np.asarray(features.reference_actions, dtype=np.float32),
-        horizon=int(features.reference_actions.shape[0]),
-        metadata={"source": "policy_features.reference_actions"},
-    )
-    reference.validate()
-    return reference
 
 
 def _runtime_float(runtime: DictConfig, key: str, default: float) -> float:

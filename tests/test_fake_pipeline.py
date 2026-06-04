@@ -19,11 +19,11 @@ def test_fake_components_individually():
     obs = env.reset("pick")
     reference = policy.sample_actions(obs)
     features = policy.extract_features(obs, reference)
-    action_chunk = algorithm.act(obs, features)
-    next_obs, reward, done, truncated, info = env.step(action_chunk.actions[0])
+    actions = algorithm.sample_action(obs, features)
+    next_obs, reward, done, truncated, info = env.step(actions[0])
 
-    assert reference.actions.shape == (4, 7)
-    assert action_chunk.actions.shape == (4, 7)
+    assert reference.shape == (4, 7)
+    assert actions.shape == (4, 7)
     assert isinstance(reward, float)
     assert done is False
     assert truncated is False

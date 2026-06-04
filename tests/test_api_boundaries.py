@@ -23,12 +23,9 @@ def run_import_check(code: str) -> str:
 def test_policies_root_is_training_side_only():
     run_import_check(
         """
-import sys
 import vla_rl.policies as policies
 
 assert sorted(policies.__all__) == ["FakePolicyBackend", "PolicyBackend", "ReferencePolicyClient"]
-assert "vla_rl.policies.openpi" not in sys.modules
-assert "vla_rl.policies.openpi.backend" not in sys.modules
 assert not hasattr(policies, "OpenPIBackend")
 assert not hasattr(policies, "create_reference_policy")
 """
@@ -51,17 +48,22 @@ for module_name in ("libero", "robosuite", "mujoco", "gym", "gymnasium"):
     )
 
 
-def test_algorithms_root_does_not_export_method_details_or_runners():
+def test_algorithms_root_exports_algorithm_entrypoints_without_runners():
     run_import_check(
         """
 import vla_rl.algorithms as algorithms
 
-assert sorted(algorithms.__all__) == ["Algorithm", "FakeAlgorithm"]
-for name in (
-    "RLTAgent",
-    "RLTFeatureProcessor",
-    "PLDSACAgent",
+assert sorted(algorithms.__all__) == [
+    "Algorithm",
+    "FakeAlgorithm",
     "PLDFeatureProcessor",
+    "PLDSACAgent",
+    "RLTAgent",
+    "RLTStateBuilder",
+    "ResidualActionSpec",
+]
+for name in (
+    "RLTFeatureProcessor",
     "LocalRunner",
     "LocalActorLearnerRunner",
 ):

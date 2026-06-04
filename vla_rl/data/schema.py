@@ -65,20 +65,6 @@ class Observation:
 
 
 @dataclass(slots=True)
-class ActionChunk:
-    actions: np.ndarray
-    horizon: int
-    metadata: dict[str, Any] = field(default_factory=dict)
-
-    def validate(self) -> None:
-        self.actions = _as_float_array("actions", self.actions, ndim=2)
-        if self.horizon <= 0:
-            raise ValueError(f"horizon must be positive, got {self.horizon}")
-        if self.horizon > self.actions.shape[0]:
-            raise ValueError(f"horizon {self.horizon} exceeds action chunk length {self.actions.shape[0]}")
-
-
-@dataclass(slots=True)
 class PolicyFeatures:
     reference_actions: np.ndarray | None = None
     embeddings: dict[str, np.ndarray] = field(default_factory=dict)

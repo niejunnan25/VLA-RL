@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import numpy as np
 
-from vla_rl.data import ActionChunk, ActionSpec, Observation, PolicyFeatures
+from vla_rl.data import ActionSpec, Observation, PolicyFeatures
 from vla_rl.policies.base import PolicyBackend
 
 
@@ -24,17 +24,14 @@ class FakePolicyBackend(PolicyBackend):
         spec.validate()
         return spec
 
-    def sample_actions(self, obs: Observation, task: str | None = None, **kwargs) -> ActionChunk:
+    def sample_actions(self, obs: Observation, task: str | None = None, **kwargs) -> np.ndarray:
         del obs, task, kwargs
-        actions = self._rng.uniform(-0.5, 0.5, size=(self.chunk_size, self.action_dim)).astype(np.float32)
-        chunk = ActionChunk(actions=actions, horizon=self.chunk_size, metadata={"source": "fake_policy"})
-        chunk.validate()
-        return chunk
+        return self._rng.uniform(-0.5, 0.5, size=(self.chunk_size, self.action_dim)).astype(np.float32)
 
     def extract_features(
         self,
         obs: Observation,
-        actions: ActionChunk | None = None,
+        actions: np.ndarray | None = None,
         **kwargs,
     ) -> PolicyFeatures:
         del kwargs
@@ -42,7 +39,7 @@ class FakePolicyBackend(PolicyBackend):
             actions = self.sample_actions(obs)
         proprio = obs.proprio.copy() if obs.proprio is not None else None
         features = PolicyFeatures(
-            reference_actions=actions.actions.copy(),
+            reference_actions=np.asarray(actions, dtype=np.float32).copy(),
             embeddings={
                 "fake_embedding": self._rng.normal(size=(self.embedding_dim,)).astype(np.float32),
                 "prefix": self._rng.normal(size=(1, self.chunk_size, self.embedding_dim)).astype(np.float32),

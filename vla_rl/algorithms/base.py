@@ -3,18 +3,14 @@ from __future__ import annotations
 from abc import ABC, abstractmethod
 from typing import Any
 
-from vla_rl.data import ActionChunk, Observation, PolicyFeatures, RolloutBatch
+import numpy as np
+
+from vla_rl.data import RolloutBatch
 
 
 class Algorithm(ABC):
     @abstractmethod
-    def act(
-        self,
-        obs: Observation,
-        features: PolicyFeatures | None = None,
-        agent_obs: dict[str, Any] | None = None,
-        deterministic: bool = False,
-    ) -> ActionChunk:
+    def sample_action(self, *args: Any, deterministic: bool = False, **kwargs: Any) -> np.ndarray:
         raise NotImplementedError
 
     @abstractmethod

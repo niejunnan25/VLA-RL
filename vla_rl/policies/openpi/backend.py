@@ -10,7 +10,7 @@ from typing import Any
 import numpy as np
 import torch
 
-from vla_rl.data import ActionChunk, ActionSpec, Observation, PolicyFeatures
+from vla_rl.data import ActionSpec, Observation, PolicyFeatures
 from vla_rl.policies.base import PolicyBackend
 
 
@@ -142,18 +142,15 @@ class OpenPIBackend(PolicyBackend):
         spec.validate()
         return spec
 
-    def sample_actions(self, obs: Observation, task: str | None = None, **kwargs) -> ActionChunk:
+    def sample_actions(self, obs: Observation, task: str | None = None, **kwargs) -> np.ndarray:
         openpi_obs = self._to_openpi_observation(obs, task=task)
         raw_actions = self._call_sample_actions(openpi_obs, **kwargs)
-        actions = self._normalize_action_array(raw_actions)
-        chunk = ActionChunk(actions=actions, horizon=actions.shape[0], metadata=self._metadata())
-        chunk.validate()
-        return chunk
+        return self._normalize_action_array(raw_actions)
 
     def extract_features(
         self,
         obs: Observation,
-        actions: ActionChunk | None = None,
+        actions: np.ndarray | None = None,
         **kwargs,
     ) -> PolicyFeatures:
         if hasattr(self.policy, "infer_features"):
