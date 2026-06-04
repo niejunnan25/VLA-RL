@@ -63,7 +63,8 @@ For full Stage 1 runs, cache every dataset row's frozen OpenPI prefix embedding 
 cd /vla/users/niejunnan/codebase/VLA-RL
 
 CUDA_VISIBLE_DEVICES=0,1,2,3,4,5,6,7 \
-/vla/users/niejunnan/codebase/openpi-modified/.venv/bin/torchrun \
+/vla/users/niejunnan/codebase/openpi-modified/.venv/bin/python3 \
+  -m torch.distributed.run \
   --standalone \
   --nproc_per_node=8 \
   examples/libero/rlt/scripts/cache_stage1_embeddings.py \
