@@ -1,5 +1,0 @@
-_target_: vla_rl.policies.fake.FakePolicyBackend
-action_dim: 7
-chunk_size: 4
-embedding_dim: 16
-seed: 1

@@ -1,7 +1,8 @@
 import numpy as np
 import pytest
 
-from vla_rl.data import ActionChunk, ActionSpec, Observation, PolicyFeatures, ReplayBuffer, RolloutBatch, Transition
+from vla_rl.data import ActionChunk, ActionSpec, Observation, PolicyFeatures, RolloutBatch, Transition
+from vla_rl.data.replay import ReplayBuffer
 
 
 def test_schema_validates_basic_objects():

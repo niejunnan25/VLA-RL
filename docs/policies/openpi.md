@@ -1,7 +1,8 @@
 # OpenPI Policy Backend
 
-`OpenPIBackend` adapts a Torch OpenPI policy to the VLA-RL `PolicyBackend`
-interface.
+`OpenPIBackend` is a service-side adapter used by `scripts/serve_reference_policy.py`
+to load a Torch OpenPI policy. It is not the RLT/PLD training-process mainline;
+training examples should connect through `ReferencePolicyClient`.
 
 ## Responsibilities
 

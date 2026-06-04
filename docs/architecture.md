@@ -11,20 +11,22 @@ such as OpenPI, StarVLA, and JoyRA expose only inference hooks.
 
 ## Boundaries
 
-- Model repositories expose frozen policy capabilities such as
-  `predict_action_with_features()`. They do not own replay, actor/learner loops,
+- Model side: OpenPI, StarVLA, JoyRA, and other VLA repositories run as frozen
+  reference-policy services. They expose inference hooks such as
+  `predict_action_with_features()` and do not own replay, actor/learner loops,
   checkpoints, or RL losses.
-- `vla_rl.policies` contains reference-policy clients and lightweight wrappers
-  around those external VLA providers. This is the boundary between model
-  environments and the RL framework.
-- `vla_rl.algorithms` contains only trainable algorithm logic: small actors,
-  critics, feature processors, and update rules.
-- `vla_rl.data`, `vla_rl.envs`, and `vla_rl.runtime` provide stable primitives
-  for replay records, environment adapters, transport, and checkpoints. Runtime
-  helpers are support code, not a universal runner abstraction.
-- `examples/` contains the real experiment recipes. Each algorithm gets a
-  self-contained example whose training flow can be read without chasing a
-  generic framework stack.
+- Environment side: LIBERO, RobotWin, and real robot stacks live behind env
+  services or thin env clients. VLA-RL consumes `Observation` and `step_chunk()`
+  semantics instead of importing simulator internals into training loops.
+- Algorithm side: `vla_rl.algorithms.*` contains trainable small heads, feature
+  processors, critics, and update rules. Algorithm subpackages are imported
+  directly; the root algorithm package intentionally exposes only stable base
+  utilities.
+- Example side: `examples/` owns experiment entrypoints and visible training
+  loops. RLT, PLD, and future methods should each have their own example-local
+  actor/learner loop instead of sharing a universal runner.
+- Runtime side: `vla_rl.runtime` provides transport, checkpoint, and RPC helpers
+  only. It is support code, not an orchestration framework.
 
 ## RLT Mainline
 

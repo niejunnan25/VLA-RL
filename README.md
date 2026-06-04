@@ -19,7 +19,7 @@ example lines rather than variants hidden behind a universal runner.
 
 - `vla_rl.data`: shared schemas passed between environments, policies,
   algorithms, replay, and runtime.
-- `vla_rl.policies`: policy backend interfaces, fake policy, and OpenPI adapter.
+- `vla_rl.policies`: policy backend interfaces, fake policy, reference-policy client, and service-side reference-policy factory.
 - `vla_rl.envs`: environment backend interfaces, fake environment, and LIBERO
   remote client.
 - `vla_rl.algorithms`: algorithm interface and fake algorithm.
@@ -29,7 +29,7 @@ example lines rather than variants hidden behind a universal runner.
   observation processing, SAC updates, Cal-QL-style critic pretraining, and
   offline/online replay mixing.
 - `vla_rl.runtime`: thin transport helpers, checkpointing, and HTTP/RPC utilities. Algorithm training loops live in examples.
-- `examples/*/configs`: example-owned configuration files.
+- `examples/*/configs`: example-owned configuration files. Root `recipes/` is intentionally not a public entrypoint.
 
 ## Debug Smoke
 

@@ -9,15 +9,15 @@ import numpy as np
 from omegaconf import OmegaConf
 
 from vla_rl.algorithms import Algorithm
-from vla_rl.data import ReplayBuffer, Transition
+from vla_rl.data import Transition
+from vla_rl.data.replay import ReplayBuffer
 from vla_rl.envs import EnvBackend
 from vla_rl.features import FeatureProcessor
 from vla_rl.policies import PolicyBackend
-from vla_rl.runtime.base import Runner
 from vla_rl.runtime.checkpoint import CheckpointManager
 
 
-class LocalActorLearnerRunner(Runner):
+class LocalActorLearnerRunner:
     """Single-process actor-learner loop for interface integration tests."""
 
     def __init__(
