@@ -1,6 +1,9 @@
 from __future__ import annotations
 
 from http.server import ThreadingHTTPServer
+from pathlib import Path
+import subprocess
+import sys
 import threading
 
 import numpy as np
@@ -8,6 +11,28 @@ import numpy as np
 from vla_rl.policies.reference import ReferencePolicyClient
 from vla_rl.data import Observation, PolicyFeatures
 from vla_rl.runtime.remote_http import make_pickle_rpc_handler
+
+
+
+def test_policies_root_import_does_not_load_openpi_backend():
+    code = """
+import sys
+import vla_rl.policies
+from vla_rl.policies import FakePolicyBackend, PolicyBackend, ReferencePolicyClient
+assert FakePolicyBackend is not None
+assert PolicyBackend is not None
+assert ReferencePolicyClient is not None
+assert "vla_rl.policies.openpi" not in sys.modules
+assert "vla_rl.policies.openpi.backend" not in sys.modules
+"""
+    result = subprocess.run(
+        [sys.executable, "-c", code],
+        cwd=Path(__file__).resolve().parents[1],
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+    assert result.returncode == 0, result.stderr or result.stdout
 
 
 def make_obs() -> Observation:

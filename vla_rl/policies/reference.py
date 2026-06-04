@@ -1,13 +1,11 @@
 from __future__ import annotations
 
-from dataclasses import dataclass
 from typing import Any, Protocol
 
 import numpy as np
 
 from vla_rl.data import ActionChunk, ActionSpec, Observation, PolicyFeatures
 from vla_rl.policies.base import PolicyBackend
-from vla_rl.policies.openpi import OpenPIBackend
 from vla_rl.runtime.remote_http import RemoteHttpRpcClient
 
 
@@ -21,11 +19,11 @@ class ReferencePolicy(Protocol):
         ...
 
 
-@dataclass(slots=True)
-class OpenPIReferencePolicy:
-    """RLT-facing wrapper around the OpenPI policy adapter."""
+class _ReferencePolicyAdapter:
+    """RLT-facing wrapper around a service-side policy adapter."""
 
-    policy: OpenPIBackend
+    def __init__(self, policy: Any) -> None:
+        self.policy = policy
 
     def action_spec(self) -> ActionSpec:
         return self.policy.action_spec()
@@ -105,6 +103,8 @@ class ReferencePolicyClient(PolicyBackend):
 
 def create_reference_policy(name: str, **kwargs: Any) -> ReferencePolicy:
     if name == "openpi":
+        from vla_rl.policies.openpi import OpenPIBackend
+
         policy = OpenPIBackend(
             openpi_root=kwargs.get("policy_root") or kwargs.get("openpi_root"),
             config_name=kwargs.get("config_name", "pi0_libero"),
@@ -112,7 +112,7 @@ def create_reference_policy(name: str, **kwargs: Any) -> ReferencePolicy:
             action_dim=int(kwargs.get("action_dim", 32)),
             device=kwargs.get("device", "cuda"),
         )
-        return OpenPIReferencePolicy(policy=policy)
+        return _ReferencePolicyAdapter(policy=policy)
     if name == "starvla":
         raise NotImplementedError("StarVLAReferencePolicy is not implemented yet")
     raise ValueError(f"unsupported reference policy: {name}")

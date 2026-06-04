@@ -19,7 +19,7 @@ example lines rather than variants hidden behind a universal runner.
 
 - `vla_rl.data`: shared schemas passed between environments, policies,
   algorithms, replay, and runtime.
-- `vla_rl.policies`: policy backend interfaces, fake policy, reference-policy client, and service-side reference-policy factory.
+- `vla_rl.policies`: stable training-side policy interfaces, fake policy, and reference-policy client. Service-side factories live in submodules and are not imported by the root package.
 - `vla_rl.envs`: environment backend interfaces, fake environment, and LIBERO
   remote client.
 - `vla_rl.algorithms`: algorithm interface and fake algorithm.
@@ -88,15 +88,22 @@ VLA-RL implements PLD Stage 1 only: residual RL on top of a frozen OpenPI base
 policy. Stage 2 hybrid data collection and Stage 3 VLA SFT are intentionally
 out of scope for this milestone.
 
-Collect successful base-policy replay:
+Formal PLD runs require successful base-policy replay first:
 
 ```bash
 examples/libero_pld/collect_base_success_replay.py \
   --config examples/libero_pld/configs/libero_spatial_task4_openpi_pld.yaml \
   --target-successes 50
+
+examples/libero_pld/tools/launch_pld.sh \
+  --session vlarl_pld_task4 \
+  --actor-gpu 0 \
+  --learner-gpu 1 \
+  --run-dir outputs/libero_spatial_task4_openpi_pld
 ```
 
-Run PLD through its example-local launcher:
+For a connectivity smoke that only checks env, reference-policy, actor, and
+learner wiring, disable the offline replay requirement and Cal-QL pretraining:
 
 ```bash
 examples/libero_pld/tools/launch_pld.sh \
@@ -107,8 +114,12 @@ examples/libero_pld/tools/launch_pld.sh \
   -- \
   runtime.max_env_steps=200 \
   runtime.max_update_steps=200 \
-  runtime.calql_pretrain_steps=10 \
-  runtime.training_starts=10
+  runtime.base_warmup_episodes=0 \
+  runtime.require_offline=false \
+  runtime.offline_replay_path=null \
+  runtime.calql_pretrain_steps=0 \
+  runtime.training_starts=1 \
+  runtime.batch_size=1
 ```
 
 See `docs/algorithms/pld.md` for the PLD Stage 1 runbook and scope boundary.
