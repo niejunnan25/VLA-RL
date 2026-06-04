@@ -56,12 +56,10 @@ runtime:
   replay_seed: 0
   gamma: 0.99
   training_starts: 1
-  publish_interval_updates: 1
-  weight_update_interval_steps: 1
+  steps_per_update: 1
+  log_period: 1
+  checkpoint_period: 0
   actor_queue_capacity: 128
-  stats_interval_env_steps: 1
-  checkpoint_interval_env_steps: 10
-  checkpoint_interval_updates: 0
   resume_from: null
   run_dir: /tmp/vlarl_fake_pld_smoke
   offline_replay_path: null

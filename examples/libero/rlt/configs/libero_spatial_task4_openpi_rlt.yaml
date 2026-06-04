@@ -75,12 +75,10 @@ runtime:
   replay_seed: 0
   gamma: 0.99
   training_starts: 40
-  publish_interval_updates: 30
-  weight_update_interval_steps: 30
+  steps_per_update: 30
+  log_period: 50
+  checkpoint_period: 0
   actor_queue_capacity: 2000
-  stats_interval_env_steps: 50
-  checkpoint_interval_env_steps: 10000
-  checkpoint_interval_updates: 0
   resume_from: null
   run_dir: outputs/libero_spatial_task4_openpi_rlt
 
