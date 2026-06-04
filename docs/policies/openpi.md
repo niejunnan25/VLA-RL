@@ -1,15 +1,14 @@
 # OpenPI Policy Backend
 
-`OpenPIBackend` is a service-side adapter used by `scripts/serve_reference_policy.py`
-to load a Torch OpenPI policy. It is not the RLT/PLD training-process mainline;
-training examples should connect through `ReferencePolicyClient`.
+`OpenPIBackend` adapts a Torch OpenPI policy to the VLA-RL `PolicyBackend`
+interface.
 
 ## Responsibilities
 
 - Dynamically add `openpi_root/src` to `sys.path`.
 - Load an OpenPI trained policy from `config_name` and `checkpoint_path`.
 - Convert `Observation` into an OpenPI-style observation dict.
-- Return base policy actions as `ActionChunk`.
+- Return base policy action chunks as `np.ndarray` with shape `[chunk, action_dim]`.
 - Return OpenPI reference actions and prefix hidden states as `PolicyFeatures`.
 
 ## Observation Bridge

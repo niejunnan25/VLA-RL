@@ -15,7 +15,8 @@ The service side owns:
 - model loading and checkpoint format;
 - model-specific preprocessing and normalization;
 - GPU placement for the frozen VLA;
-- model hooks such as `predict_action_with_features()`.
+- model hooks such as `predict_actions_and_prefix()` or
+  `predict_action_with_features()`.
 
 The training side sees only `PolicyFeatures` through `ReferencePolicyClient`.
 This keeps the actor and learner environment small and lets a new VLA be added
@@ -44,19 +45,20 @@ RLToken encoder.
 
 ```text
 obs
-  -> ReferencePolicyClient.predict_action_with_features(obs)
-  -> PolicyFeatures(reference_actions, embeddings["prefix"], proprio)
-  -> RLTFeatureProcessor(prefix) -> z_rl
-  -> RLTAgent.act(z_rl, reference_actions) -> action_chunk
-  -> env.step_chunk(action_chunk[:execute_horizon])
-  -> CompactTransition(obs_features, action_chunk, reward, next_features, done)
+  -> ReferencePolicyClient.predict_actions_and_prefix(obs)
+  -> base_actions[:execute_horizon] + prefix_tokens + proprio
+  -> encode_rlt_obs(prefix_tokens, base_actions, proprio) -> rlt_state
+  -> RLTAgent.sample_action(rlt_state) -> actions
+  -> env.step_chunk(actions)
+  -> CompactTransition(obs_features, actions, reward, next_features, done)
   -> CompactReplayBuffer.sample()
   -> RLTAgent.update(batch)
 ```
 
 The example owns the actor and learner loops in `examples/libero_rlt/train.py`.
-`vla_rl.algorithms.rlt` owns only the trainable heads, feature processor, and
-update logic.
+`vla_rl.algorithms.rlt` owns the trainable heads and update logic.
+`RLTStateBuilder` remains only for fake/debug local runners; the formal LIBERO
+path uses the explicit `encode_rlt_obs` flow above.
 
 ## PLD Data Flow
 
@@ -64,10 +66,10 @@ PLD Stage 1 trains a residual policy on top of a frozen VLA reference action.
 
 ```text
 obs
-  -> ReferencePolicyClient.sample_actions(obs) -> base_action
-  -> PLDFeatureProcessor(obs, base_action, alpha) -> residual_obs
-  -> PLDSACAgent.act(residual_obs) -> residual_action
-  -> final_action = base_action + alpha * residual_action
+  -> ReferencePolicyClient.extract_features(obs) -> base_actions
+  -> PLDFeatureProcessor(obs, base_actions, alpha) -> residual_obs
+  -> PLDSACAgent.sample_action(pld_state) -> final_action
+  -> final_action = base_actions + alpha * residual_action
   -> env.step_chunk(final_action)
   -> CompactTransition(residual_obs, residual_action, reward, next_residual_obs, done)
   -> online/offline replay mix

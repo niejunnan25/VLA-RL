@@ -7,16 +7,23 @@ policy services.
 ## Data Flow
 
 ```text
-obs -> ReferencePolicyClient.extract_features()
-    -> PolicyFeatures(reference_actions, embeddings["prefix"])
-    -> RLTFeatureProcessor -> z_rl
-    -> RLTAgent.act -> action chunk
-    -> env.step_chunk(action_chunk[:execute_horizon])
+obs -> ReferencePolicyClient.predict_actions_and_prefix()
+    -> base_actions, prefix_tokens, proprio
+    -> base_actions[:execute_horizon]
+    -> encode_rlt_obs(prefix_tokens, base_actions, proprio)
+    -> RLTAgent.sample_action(rlt_state) -> actions
+    -> env.step_chunk(actions)
     -> compact replay -> RLTAgent.update
 ```
 
 The reference-policy server must expose `predict_action_with_features()`, which
-returns reference actions and prefix features in one call.
+returns reference actions and prefix features in one call. The actor loop uses
+the narrower `predict_actions_and_prefix()` client method so the RLT data path
+does not pass around a generic feature object.
+
+RLT optimizes exactly the action prefix that is executed in the environment:
+`reference_action`, actor output, critic action input, and BC loss all use
+`execute_horizon` actions.
 
 ## Smoke Command
 

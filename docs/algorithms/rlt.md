@@ -9,37 +9,39 @@ actions and prefix features.
 
 ```text
 LIBERO Observation
-  -> ReferencePolicyClient.predict_action_with_features
-  -> PolicyFeatures(reference_actions, embeddings["prefix"])
-  -> RLTFeatureProcessor
-  -> agent_obs: z_rl + reference_action + proprio
-  -> RLTAgent.act
-  -> full action chunk
-  -> execute first execute_horizon actions
+  -> ReferencePolicyClient.predict_actions_and_prefix
+  -> base_actions[:execute_horizon] + prefix_tokens + proprio
+  -> encode_rlt_obs
+  -> rlt_obs: z_rl + reference_action + proprio
+  -> RLTAgent.sample_action
+  -> action chunk with execute_horizon actions
+  -> env.step_chunk(actions)
   -> compact replay transition
   -> RLTAgent.update
 ```
 
-RLT-specific feature construction happens in `RLTFeatureProcessor`, not inside
-the OpenPI backend. The reference-policy client/server lives under
-`vla_rl.policies`, while trainable actor/critic code lives under
-`vla_rl.algorithms.rlt`.
+The canonical `examples/libero_rlt` path builds RLT observations explicitly in
+the actor loop. `RLTStateBuilder` is kept only for fake/debug local runners.
+The reference-policy client/server lives under `vla_rl.policies`, while
+trainable actor/critic code lives under `vla_rl.algorithms.rlt`.
 
 The model-side hook is:
 
 ```python
-predict_action_with_features(...)
+predict_actions_and_prefix(...)
 ```
 
-It should return a dict containing `actions` and `features["prefix"]`. Future
-StarVLA/JoyRA integrations should expose the same semantic hook while RLT
-training continues to consume the common `PolicyFeatures` structure.
+It returns base VLA actions, prefix tokens, and proprio. Future StarVLA/JoyRA
+integrations should expose the same semantics while RLT training continues to
+keep the frozen reference policy separate from the trainable actor/critic.
 
 ## Algorithm Semantics
 
-- `RLTAgent.act()` outputs a full `(chunk_size, action_dim)` action chunk.
-- The actor executes only the first `execute_horizon` actions.
-- Replay stores the full action chunk for critic/actor training.
+- `RLTAgent.sample_action()` outputs `(execute_horizon, action_dim)`.
+- `reference_action`, actor output, critic action input, BC loss, replay action,
+  and `env.step_chunk()` all use the same `execute_horizon` action prefix.
+- `chunk_size` belongs to the frozen VLA reference chunk, not to the RLT
+  actor/critic action space.
 - Transition discount is `gamma ** executed_steps`; terminal transitions do not bootstrap.
 - The actor loss is `-Q + bc_reg_coeff * MSE(action, reference_action)`.
 - The actor/critic state currently uses `z_rl` only; `proprio` remains part of

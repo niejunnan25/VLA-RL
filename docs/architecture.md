@@ -11,65 +11,20 @@ such as OpenPI, StarVLA, and JoyRA expose only inference hooks.
 
 ## Boundaries
 
-- Model side: OpenPI, StarVLA, JoyRA, and other VLA repositories run as frozen
-  reference-policy services. They expose inference hooks such as
-  `predict_action_with_features()` and do not own replay, actor/learner loops,
-  checkpoints, or RL losses.
-- Environment side: LIBERO, RobotWin, and real robot stacks live behind env
-  services or thin env clients. VLA-RL consumes `Observation` and `step_chunk()`
-  semantics instead of importing simulator internals into training loops.
-- Algorithm side: `vla_rl.algorithms.*` contains trainable small heads, feature
-  processors, critics, and update rules. Algorithm subpackages are imported
-  directly; the root algorithm package intentionally exposes only stable base
-  utilities.
-- Example side: `examples/` owns experiment entrypoints and visible training
-  loops. RLT, PLD, and future methods should each have their own example-local
-  actor/learner loop instead of sharing a universal runner.
-- Runtime side: `vla_rl.runtime` provides transport, checkpoint, and RPC helpers
-  only. It is support code, not an orchestration framework.
-
-
-## Public Interfaces
-
-The root packages are intentionally small. They are the surfaces that examples
-may depend on without pulling model or simulator repositories into the RL
-process.
-
-- `vla_rl.data`: stable schemas plus compact and mixed replay utilities. It may
-  contain replay records and samplers, but not debug runners or algorithm loops.
-- `vla_rl.policies`: training-side policy interfaces and
-  `ReferencePolicyClient`. Service-side adapters such as OpenPI live in
-  subpackages and are imported only by reference-policy servers.
-- `vla_rl.envs`: env interfaces, fake envs, and remote env clients. Importing it
-  must not require LIBERO, robosuite, MuJoCo, or other simulator packages.
-- `vla_rl.algorithms`: base algorithm utilities only. RLT and PLD details are
-  imported from their subpackages.
-- `vla_rl.runtime`: checkpoint, Agentlace transport helpers, and HTTP/RPC
-  utilities. It must not own rollout or learner semantics.
-
-Current v0 algorithm subpackages are public at their own namespace level:
-
-- `vla_rl.algorithms.rlt`: RLT actor, critic, RLToken encoder/decoder,
-  feature processor, and update logic.
-- `vla_rl.algorithms.pld`: residual action spec, PLD feature processor,
-  actor/critic/encoder modules, PLD SAC update logic, and PLD offline replay
-  helpers.
-
-## Example-Local Code
-
-Training scripts, launch scripts, and task recipes stay in examples. An example
-is allowed to know about a concrete task, ports, GPUs, tmux layout, smoke
-overrides, and the exact actor/learner sequence. Common code should move into
-`vla_rl/` only when it is a stable primitive shared by multiple examples.
-
-Use this rule when adding new methods:
-
-- Add a method-specific example first.
-- Keep its actor and learner loops visible in that example.
-- Share only small, stable pieces such as schemas, clients, agents, replay
-  records, checkpoint helpers, and transport helpers.
-- Do not add root registries or a universal runner to make unrelated algorithms
-  look the same.
+- Model repositories expose frozen policy capabilities such as
+  `predict_actions_and_prefix()` or `predict_action_with_features()`. They do
+  not own replay, actor/learner loops, checkpoints, or RL losses.
+- `vla_rl.policies` contains reference-policy clients and lightweight wrappers
+  around those external VLA providers. This is the boundary between model
+  environments and the RL framework.
+- `vla_rl.algorithms` contains only trainable algorithm logic: small actors,
+  critics, feature processors, and update rules.
+- `vla_rl.data`, `vla_rl.envs`, and `vla_rl.runtime` provide stable primitives
+  for replay records, environment adapters, transport, and checkpoints. Runtime
+  helpers are support code, not a universal runner abstraction.
+- `examples/` contains the real experiment recipes. Each algorithm gets a
+  self-contained example whose training flow can be read without chasing a
+  generic framework stack.
 
 ## RLT Mainline
 
@@ -77,11 +32,11 @@ The RLT LIBERO example uses the following explicit data path:
 
 ```text
 observation
-  -> reference_policy.predict_action_with_features()
-  -> PolicyFeatures(reference_actions, embeddings["prefix"])
-  -> RLTFeatureProcessor(prefix) -> z_rl
-  -> RLTAgent.act(z_rl, reference_actions) -> action chunk
-  -> env.step_chunk(action_chunk[:execute_horizon])
+  -> reference_policy.predict_actions_and_prefix()
+  -> base_actions[:execute_horizon] + prefix_tokens + proprio
+  -> encode_rlt_obs(prefix_tokens, base_actions, proprio) -> rlt_obs
+  -> RLTAgent.sample_action(rlt_obs) -> actions
+  -> env.step_chunk(actions)
   -> compact replay transition
   -> RLTAgent.update(batch)
 ```
@@ -89,14 +44,12 @@ observation
 The model-side interface is intentionally small:
 
 ```python
-predict_action_with_features(observation, ...) -> {
-    "actions": ...,
-    "features": {"prefix": ...},
-}
+predict_actions_and_prefix(observation, ...) -> (base_actions, prefix_tokens, proprio)
 ```
 
-VLA-RL converts this to `PolicyFeatures` and keeps the RLT actor/critic update
-inside the framework.
+The RLT actor/critic only sees the executed prefix: `reference_action`, sampled
+action, replay action, critic action input, and BC target are all
+`execute_horizon * action_dim`.
 
 ## PLD Mainline
 
