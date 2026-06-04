@@ -8,7 +8,6 @@ import sys
 from typing import Any
 
 import numpy as np
-from omegaconf import OmegaConf
 import torch
 
 PROJECT_ROOT = Path(__file__).resolve().parents[4]
@@ -20,6 +19,7 @@ from examples.libero.pld.config import (
     create_pld_agent,
     create_pld_obs_builder,
     create_reference_policy,
+    load_config,
     predict_base_actions,
     validate_pld_cfg,
 )
@@ -41,12 +41,7 @@ def parse_args() -> argparse.Namespace:
 
 def main() -> None:
     args = parse_args()
-    overrides = list(args.overrides)
-    if overrides and overrides[0] == "--":
-        overrides = overrides[1:]
-    cfg = OmegaConf.load(Path(args.config))
-    if overrides:
-        cfg = OmegaConf.merge(cfg, OmegaConf.from_dotlist(overrides))
+    cfg = load_config(args.config, list(args.overrides))
     validate_pld_cfg(cfg)
     output_dir = Path(args.output_dir)
     output_dir.mkdir(parents=True, exist_ok=True)
