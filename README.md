@@ -47,7 +47,7 @@ Real algorithm entrypoints live under their own examples.
 
 The default real-training path is the LIBERO RLT example. The actor and learner
 loops live directly in `examples/libero_rlt/train.py`; Agentlace is used only as
-transport for compact replay transitions and actor-weight broadcasts. The helper
+transport for RLT transitions and actor-weight broadcasts. The helper
 starts a LIBERO env server, OpenPI reference-policy server, learner, and actor in
 one tmux session:
 
@@ -72,15 +72,31 @@ examples/libero_rlt/tools/launch_rlt.sh \
   --learner-gpu 1 \
   --run-dir /tmp/vlarl_rlt_smoke \
   -- \
-  runtime.max_env_steps=200 \
-  runtime.max_update_steps=200
+  runtime.max_env_steps=1000 \
+  runtime.max_update_steps=1000
 ```
 
-The actor sends compact RLT transitions to the learner rather than raw images.
+The actor sends RLT transitions to the learner rather than raw images.
 The learner owns replay, updates, metrics, and checkpoints.
 
 See `docs/runtime/agentlace_rlt.md` for the full RLT runbook and the exact
 actor/learner data path.
+
+W&B logging follows the lightweight HIL-SERL pattern: the
+learner owns one W&B-compatible run and uploads learner update metrics, timer averages,
+and actor episode summaries forwarded through Agentlace. Formal LIBERO configs enable it by default:
+VLA-RL tries SwanLab first and falls back to W&B if SwanLab is unavailable.
+Install the logging dependencies for formal online runs:
+
+```bash
+pip install -e ".[wandb]"
+```
+
+Override run metadata with:
+
+```bash
+wandb.project=vla-rl wandb.exp_name=task4_rlt_seed0
+```
 
 ## PLD Stage 1 / Residual RL
 
@@ -105,8 +121,8 @@ examples/libero_pld/tools/launch_pld.sh \
   --learner-gpu 1 \
   --run-dir /tmp/vlarl_pld_smoke \
   -- \
-  runtime.max_env_steps=200 \
-  runtime.max_update_steps=200 \
+  runtime.max_env_steps=1000 \
+  runtime.max_update_steps=1000 \
   runtime.calql_pretrain_steps=10 \
   runtime.training_starts=10
 ```
@@ -114,3 +130,14 @@ examples/libero_pld/tools/launch_pld.sh \
 See `docs/algorithms/pld.md` for the PLD Stage 1 runbook and scope boundary.
 The default PLD recipe follows the existing `serl_torch` PLD configs and uses
 a frozen HuggingFace ResNet-18 image encoder, not torchvision.
+
+## Evaluation Entrypoints
+
+RLT and PLD keep evaluation local to their examples:
+
+```bash
+python examples/libero_rlt/eval.py --config <config> --checkpoint <checkpoint> --episodes 10 --output-dir <dir>
+python examples/libero_pld/eval.py --config <config> --checkpoint <checkpoint> --episodes 10 --output-dir <dir>
+```
+
+PLD formal runs can use `examples/libero_pld/tools/launch_pld_after_collect.sh` to collect base-success replay before starting actor/learner training.
