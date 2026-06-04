@@ -1,0 +1,230 @@
+from pathlib import Path
+
+import numpy as np
+
+from vla_rl.algorithms.pld import PLDSACAgent, PLDFeatureProcessor, ResidualActionSpec
+from vla_rl.algorithms.pld.modeling import PLDObsEncoder
+from vla_rl.algorithms.pld.replay import load_pld_offline_replay, write_pld_offline_episode
+from vla_rl.data import CompactReplayBuffer, CompactTransition, MixedReplaySampler, Observation, PolicyFeatures, RolloutBatch, Transition
+from vla_rl.envs.fake import FakeEnvBackend
+from vla_rl.policies.fake import FakePolicyBackend
+from examples.libero_pld import train as pld_train
+from omegaconf import OmegaConf
+
+
+def make_features(chunk_size: int = 3, action_dim: int = 4) -> PolicyFeatures:
+    return PolicyFeatures(reference_actions=np.ones((chunk_size, action_dim), dtype=np.float32) * 0.2)
+
+
+def make_obs() -> Observation:
+    return Observation(
+        images={
+            "front": np.zeros((16, 16, 3), dtype=np.uint8),
+            "wrist": np.ones((16, 16, 3), dtype=np.uint8) * 127,
+        },
+        proprio=np.ones((5,), dtype=np.float32),
+    )
+
+
+def make_agent_obs(value: float = 0.0) -> dict[str, np.ndarray]:
+    processor = PLDFeatureProcessor(image_keys=("front", "wrist"), action_dim=4, chunk_horizon=1, alpha=0.5)
+    agent_obs = processor.process(make_obs(), make_features(chunk_size=2, action_dim=4))
+    agent_obs["proprio"] = np.ones((5,), dtype=np.float32) * value
+    return agent_obs
+
+
+def make_transition(done: bool = False) -> Transition:
+    agent_obs = make_agent_obs(0.0)
+    next_agent_obs = None if done else make_agent_obs(1.0)
+    return Transition(
+        obs=Observation(),
+        next_obs=Observation(),
+        action=np.zeros((4,), dtype=np.float32),
+        reward=1.0,
+        done=done,
+        truncated=False,
+        discount=0.0 if done else 0.99,
+        agent_obs=agent_obs,
+        next_agent_obs=next_agent_obs,
+        info={"mc_returns": 1.0, "mc_returns_valid": True},
+    )
+
+
+def make_agent() -> PLDSACAgent:
+    return PLDSACAgent(
+        image_keys=("front", "wrist"),
+        proprio_dim=5,
+        action_dim=4,
+        chunk_horizon=1,
+        alpha=0.5,
+        actor_hidden_dims=(32,),
+        critic_hidden_dims=(32,),
+        image_feature_dim=8,
+        encoder_hidden_dim=32,
+        critic_actor_ratio=1,
+        utd_ratio=1,
+        cql_n_actions=2,
+        device="cpu",
+    )
+
+
+def test_residual_action_spec_compose_mask_limits_and_gripper_clip():
+    spec = ResidualActionSpec(
+        full_action_dim=4,
+        action_mask=(True, False, True, True),
+        action_limits=(1.0, 1.0, 0.5, 1.0),
+        alpha=0.5,
+        clip_gripper=True,
+        chunk_horizon=1,
+    )
+    final = spec.compose_chunk(
+        base_action_chunk=np.asarray([[0.0, 0.1, 0.2, 0.9]], dtype=np.float32),
+        residual_action=np.asarray([1.0, -1.0, 1.0], dtype=np.float32),
+    )
+
+    np.testing.assert_allclose(final, np.asarray([[0.5, 0.1, -0.05, 1.0]], dtype=np.float32), atol=1e-6)
+
+
+def test_pld_feature_processor_preserves_image_shapes():
+    processor = PLDFeatureProcessor(image_keys=("front", "wrist"), action_dim=4, chunk_horizon=1, alpha=0.5)
+
+    agent_obs = processor.process(make_obs(), make_features(chunk_size=2, action_dim=4))
+
+    assert agent_obs["image_front"].shape == (3, 16, 16)
+    assert agent_obs["image_wrist"].shape == (3, 16, 16)
+    assert agent_obs["base_action_chunk"].shape == (1, 4)
+    assert agent_obs["alpha"].shape == (1,)
+
+
+def test_pld_obs_encoder_can_match_serl_style_vector_projection_without_obs_projection():
+    encoder = PLDObsEncoder(
+        image_keys=("front", "wrist"),
+        proprio_dim=5,
+        action_dim=4,
+        chunk_horizon=1,
+        image_encoder_type="small",
+        image_feature_dim=8,
+        vector_latent_dim=6,
+        project_obs=False,
+    )
+    batch = {
+        key: np.expand_dims(value, axis=0)
+        for key, value in make_agent_obs().items()
+    }
+    import torch
+
+    torch_batch = {key: torch.as_tensor(value, dtype=torch.float32) for key, value in batch.items()}
+    out = encoder(torch_batch)
+
+    assert out.shape == (1, 8 * 2 + 6)
+
+
+def test_compact_replay_preserves_pld_image_shapes_and_mixed_sampling(tmp_path: Path):
+    online = CompactReplayBuffer(capacity=8, seed=0)
+    offline_dir = tmp_path / "offline"
+    compact = CompactTransition(
+        agent_obs=make_agent_obs(0.0),
+        next_agent_obs=make_agent_obs(1.0),
+        action=np.zeros((4,), dtype=np.float32),
+        reward=1.0,
+        done=False,
+        discount=0.99,
+    )
+    online.add(compact)
+    write_pld_offline_episode(offline_dir, 0, [compact])
+    offline, stats = load_pld_offline_replay(offline_dir, capacity=8)
+
+    transition = online.sample(1).transitions[0]
+    assert transition.agent_obs["image_front"].shape == (3, 16, 16)
+    assert stats["transitions_loaded"] == 1
+    mixed = MixedReplaySampler(online, offline, offline_ratio=0.5).sample(4)
+    assert mixed.mix == {"online": 2, "offline": 2}
+
+
+def test_pld_agent_act_update_calql_and_terminal_no_bootstrap():
+    agent = make_agent()
+    action = agent.act(Observation(), agent_obs=make_agent_obs(), deterministic=True)
+    assert action.actions.shape == (1, 4)
+
+    batch = RolloutBatch(transitions=[make_transition(False) for _ in range(2)])
+    metrics = agent.update(batch)
+    assert set(metrics) >= {"loss_critic", "loss_actor", "temperature", "updates"}
+
+    calql = agent.update_critics_calql(batch, calql_alpha=1.0, calql_n_actions=2, calql_temperature=1.0)
+    assert set(calql) >= {"critic_cql_penalty", "calql_bound_applied"}
+
+    terminal_batch = RolloutBatch(transitions=[make_transition(True) for _ in range(2)])
+    fb = agent._convert_batch(terminal_batch)
+    assert float(fb["discount"].max()) == 0.0
+
+
+def test_pld_agent_actor_updates_after_configured_critic_steps():
+    agent = make_agent()
+    agent.critic_actor_ratio = 2
+    batch = RolloutBatch(transitions=[make_transition(False) for _ in range(2)])
+
+    first = agent.update(batch)
+    second = agent.update(batch)
+
+    assert "loss_actor" not in first
+    assert set(second) >= {"loss_critic", "loss_actor", "temperature", "updates"}
+
+
+def test_pld_actor_weight_sync_roundtrip():
+    agent = make_agent()
+    clone = make_agent()
+    clone.load_policy_state_dict(agent.policy_state_dict())
+
+    a = agent.act(Observation(), agent_obs=make_agent_obs(), deterministic=True).actions
+    b = clone.act(Observation(), agent_obs=make_agent_obs(), deterministic=True).actions
+    np.testing.assert_allclose(a, b, atol=1e-6)
+
+
+def test_libero_pld_train_helpers_validate_config_and_reference_chunk():
+    cfg = OmegaConf.create({"algorithm": {"chunk_horizon": 1}, "runtime": {"execute_horizon": 1}})
+    pld_train._validate_pld_cfg(cfg)
+
+    reference = pld_train._reference_chunk_from_features(make_features(chunk_size=2, action_dim=4))
+
+    assert reference.actions.shape == (2, 4)
+    assert reference.horizon == 2
+
+
+def test_libero_pld_train_offline_replay_optional():
+    runtime = OmegaConf.create({"offline_replay_path": None, "require_offline": False})
+
+    replay, stats = pld_train._load_offline_replay(runtime)
+
+    assert replay is None
+    assert stats == {"episodes_loaded": 0, "transitions_loaded": 0}
+
+
+class FailingSummaryClient:
+    def request(self, request_type, payload):
+        raise RuntimeError(f"failed {request_type}")
+
+
+def test_pld_actor_summary_failure_is_persisted_and_readable(tmp_path: Path):
+    metrics = []
+    summary = pld_train._send_actor_summary(
+        FailingSummaryClient(),
+        "send-stats",
+        {"role": "actor", "algorithm": "pld", "env_steps": 7, "episodes": 1},
+        tmp_path,
+        metrics.append,
+    )
+
+    assert summary["actor_summary_notified"] is False
+    assert metrics[-1]["event"] == "actor_summary_send_failed"
+    assert metrics[-1]["algorithm"] == "pld"
+    persisted = pld_train._read_actor_summary(tmp_path)
+    assert persisted is not None
+    assert persisted["env_steps"] == 7
+    done, env_steps = pld_train._apply_actor_summary_file(tmp_path, False, 0)
+    assert done is True
+    assert env_steps == 7
+
+
+def test_pld_actor_summary_read_ignores_partial_json(tmp_path: Path):
+    (tmp_path / "actor_summary.json").write_text("{")
+    assert pld_train._read_actor_summary(tmp_path) is None

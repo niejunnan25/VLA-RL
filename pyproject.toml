@@ -19,6 +19,9 @@ dependencies = [
 dev = [
   "pytest>=8.0",
 ]
+pld = [
+  "transformers>=4.40",
+]
 
 [tool.setuptools.packages.find]
 include = ["vla_rl*"]

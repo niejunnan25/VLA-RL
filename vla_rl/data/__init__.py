@@ -8,6 +8,7 @@ from vla_rl.data.schema import (
     Transition,
 )
 from vla_rl.data.compact import CompactReplayBuffer, CompactTransition
+from vla_rl.data.mixed import MixedBatch, MixedReplaySampler
 from vla_rl.data.replay import ReplayBuffer
 
 __all__ = [
@@ -15,6 +16,8 @@ __all__ = [
     "ActionSpec",
     "CompactReplayBuffer",
     "CompactTransition",
+    "MixedBatch",
+    "MixedReplaySampler",
     "Observation",
     "ObservationSpec",
     "PolicyFeatures",
