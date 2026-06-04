@@ -12,13 +12,13 @@ final_action = base_action + alpha * residual_action
 
 The faithful default uses `chunk_horizon=1`.
 
-The official PLD recipe uses the same image encoder family as the existing
-`serl_torch/examples/libero_pld` task configs: HuggingFace
-`transformers.ResNetModel` (`microsoft/resnet-18`) with a frozen backbone,
-spatial learned embeddings, a 256-dim bottleneck, and a 64-dim projection for
-vector observations (`proprio`, base action chunk, and `alpha`). It does not
-use `torchvision.models.resnet*`. The small CNN encoder remains available for
-unit tests and lightweight debugging only.
+The default PLD recipe follows the HIL-SERL-style residual RL setup used as the
+implementation reference: HuggingFace `transformers.ResNetModel`
+(`microsoft/resnet-18`) with a frozen backbone, spatial learned embeddings, a
+256-dim bottleneck, and a 64-dim projection for vector observations (`proprio`,
+base action chunk, and `alpha`). It does not use `torchvision.models.resnet*`.
+The small CNN encoder remains available for unit tests and lightweight
+debugging only.
 
 Install the optional PLD dependency in the learner environment if it is not
 already present:
@@ -62,6 +62,6 @@ transport visible in the PLD example itself.
 
 ## Boundaries
 
-This implementation is independent of `serl_torch/examples/libero_pld` at
-runtime. The old implementation is used only as a reference for algorithm
-semantics.
+This implementation does not depend on `serl_torch` at runtime. Prior
+SERL-style PLD code is used only as a reference for algorithm semantics and
+engineering style.

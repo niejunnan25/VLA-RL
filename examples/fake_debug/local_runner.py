@@ -12,6 +12,8 @@ from vla_rl.policies import PolicyBackend
 
 
 class LocalRunner:
+    """Debug-only single-loop recipe used by fake component tests."""
+
     def __init__(
         self,
         env: EnvBackend,

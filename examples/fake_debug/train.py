@@ -16,7 +16,7 @@ from vla_rl.config import instantiate
 
 
 def parse_args() -> argparse.Namespace:
-    parser = argparse.ArgumentParser(description="Run a VLA-RL recipe.")
+    parser = argparse.ArgumentParser(description="Run a fake-debug VLA-RL recipe.")
     parser.add_argument("--config", required=True, help="Path to a YAML recipe.")
     return parser.parse_args()
 

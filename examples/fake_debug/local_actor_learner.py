@@ -16,7 +16,7 @@ from vla_rl.runtime.checkpoint import CheckpointManager
 
 
 class LocalActorLearnerRunner:
-    """Single-process actor-learner loop for interface integration tests."""
+    """Debug-only single-process actor-learner loop for integration tests."""
 
     def __init__(
         self,
