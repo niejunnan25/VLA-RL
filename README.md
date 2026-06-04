@@ -31,6 +31,9 @@ example lines rather than variants hidden behind a universal runner.
 - `vla_rl.runtime`: thin transport helpers, checkpointing, and HTTP/RPC utilities. Algorithm training loops live in examples.
 - `examples/*/configs`: example-owned configuration files. Root `recipes/` is intentionally not a public entrypoint.
 
+See `docs/architecture.md` and `docs/v0_runbook.md` for the v0 API boundary,
+public interfaces, and the difference between formal runs and connectivity smokes.
+
 ## Debug Smoke
 
 The old single-process runner is now a debug example, not a framework-level

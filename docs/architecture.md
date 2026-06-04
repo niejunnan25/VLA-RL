@@ -28,6 +28,49 @@ such as OpenPI, StarVLA, and JoyRA expose only inference hooks.
 - Runtime side: `vla_rl.runtime` provides transport, checkpoint, and RPC helpers
   only. It is support code, not an orchestration framework.
 
+
+## Public Interfaces
+
+The root packages are intentionally small. They are the surfaces that examples
+may depend on without pulling model or simulator repositories into the RL
+process.
+
+- `vla_rl.data`: stable schemas plus compact and mixed replay utilities. It may
+  contain replay records and samplers, but not debug runners or algorithm loops.
+- `vla_rl.policies`: training-side policy interfaces and
+  `ReferencePolicyClient`. Service-side adapters such as OpenPI live in
+  subpackages and are imported only by reference-policy servers.
+- `vla_rl.envs`: env interfaces, fake envs, and remote env clients. Importing it
+  must not require LIBERO, robosuite, MuJoCo, or other simulator packages.
+- `vla_rl.algorithms`: base algorithm utilities only. RLT and PLD details are
+  imported from their subpackages.
+- `vla_rl.runtime`: checkpoint, Agentlace transport helpers, and HTTP/RPC
+  utilities. It must not own rollout or learner semantics.
+
+Current v0 algorithm subpackages are public at their own namespace level:
+
+- `vla_rl.algorithms.rlt`: RLT actor, critic, RLToken encoder/decoder,
+  feature processor, and update logic.
+- `vla_rl.algorithms.pld`: residual action spec, PLD feature processor,
+  actor/critic/encoder modules, PLD SAC update logic, and PLD offline replay
+  helpers.
+
+## Example-Local Code
+
+Training scripts, launch scripts, and task recipes stay in examples. An example
+is allowed to know about a concrete task, ports, GPUs, tmux layout, smoke
+overrides, and the exact actor/learner sequence. Common code should move into
+`vla_rl/` only when it is a stable primitive shared by multiple examples.
+
+Use this rule when adding new methods:
+
+- Add a method-specific example first.
+- Keep its actor and learner loops visible in that example.
+- Share only small, stable pieces such as schemas, clients, agents, replay
+  records, checkpoint helpers, and transport helpers.
+- Do not add root registries or a universal runner to make unrelated algorithms
+  look the same.
+
 ## RLT Mainline
 
 The RLT LIBERO example uses the following explicit data path:
