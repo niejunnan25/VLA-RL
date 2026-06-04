@@ -34,7 +34,7 @@ from vla_rl.runtime.checkpoint import CheckpointManager
 from vla_rl.runtime.wandb import make_wandb_logger
 from vla_rl.runtime.timer import Timer
 from vla_rl.runtime.run_utils import (
-    apply_actor_summary_file,
+    apply_actor_summary_file as read_actor_summary_file,
     make_jsonl_metric_writer,
     run_dir_from_runtime,
     save_checkpoint,
@@ -111,9 +111,9 @@ def run_learner(cfg: DictConfig) -> dict[str, Any]:
             f.write(json.dumps(json_sanitize(metric), sort_keys=True) + "\n")
         wandb_logger.log(metric, step=update_steps)
 
-    def apply_actor_summary_file() -> None:
+    def refresh_actor_summary_file() -> None:
         nonlocal actor_done, actor_done_env_steps
-        actor_done, actor_done_env_steps = apply_actor_summary_file(run_dir, actor_done, actor_done_env_steps)
+        actor_done, actor_done_env_steps = read_actor_summary_file(run_dir, actor_done, actor_done_env_steps)
 
     def request_callback(request_type: str, payload: Any) -> Any:
         nonlocal actor_done, actor_done_env_steps
@@ -211,7 +211,7 @@ def run_learner(cfg: DictConfig) -> dict[str, Any]:
         checkpoint_period = int(runtime.checkpoint_period)
 
         while True:
-            apply_actor_summary_file()
+            refresh_actor_summary_file()
             env_steps = current_env_steps(env_steps)
             if _learner_should_stop(update_steps, env_steps, int(runtime.max_update_steps), int(runtime.max_env_steps), actor_done):
                 break

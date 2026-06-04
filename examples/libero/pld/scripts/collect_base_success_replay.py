@@ -8,7 +8,6 @@ import sys
 import time
 
 import numpy as np
-from omegaconf import OmegaConf
 
 PROJECT_ROOT = Path(__file__).resolve().parents[4]
 if str(PROJECT_ROOT) not in sys.path:
@@ -18,6 +17,7 @@ from examples.libero.pld.config import (
     create_env,
     create_pld_obs_builder,
     create_reference_policy,
+    load_config,
     predict_base_actions,
     validate_pld_cfg,
 )
@@ -37,12 +37,7 @@ def parse_args() -> argparse.Namespace:
 
 def main() -> None:
     args = parse_args()
-    overrides = list(args.overrides)
-    if overrides and overrides[0] == "--":
-        overrides = overrides[1:]
-    cfg = OmegaConf.load(args.config)
-    if overrides:
-        cfg = OmegaConf.merge(cfg, OmegaConf.from_dotlist(overrides))
+    cfg = load_config(args.config, list(args.overrides))
     validate_pld_cfg(cfg)
 
     collect_cfg = cfg.get("collect", {})
