@@ -12,16 +12,6 @@ def run_dir_from_runtime(runtime: Any) -> Path | None:
     return Path(value) if value else None
 
 
-def next_interval(current: int, interval: int) -> int:
-    if interval <= 0:
-        return 0
-    return ((int(current) // int(interval)) + 1) * int(interval)
-
-
-def runtime_float(runtime: Any, key: str, default: float) -> float:
-    return float(runtime.get(key, default))
-
-
 def make_jsonl_metric_writer(run_dir: Path | None, filename: str) -> Callable[[dict[str, Any]], None]:
     if run_dir is not None:
         run_dir.mkdir(parents=True, exist_ok=True)

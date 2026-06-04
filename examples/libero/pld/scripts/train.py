@@ -36,9 +36,7 @@ from vla_rl.runtime.timer import Timer
 from vla_rl.runtime.run_utils import (
     apply_actor_summary_file,
     make_jsonl_metric_writer,
-    next_interval,
     run_dir_from_runtime,
-    runtime_float,
     save_checkpoint,
     send_actor_summary,
 )
@@ -209,9 +207,12 @@ def run_learner(cfg: DictConfig) -> dict[str, Any]:
                 "update_steps": update_steps,
             }
         )
-        next_publish_at = next_interval(update_steps, int(runtime.publish_interval_updates))
-        next_ckpt_env_at = next_interval(env_steps, int(runtime.checkpoint_interval_env_steps))
-        next_ckpt_update_at = next_interval(update_steps, int(runtime.checkpoint_interval_updates))
+        publish_interval = int(runtime.publish_interval_updates)
+        ckpt_env_interval = int(runtime.checkpoint_interval_env_steps)
+        ckpt_update_interval = int(runtime.checkpoint_interval_updates)
+        last_publish_update_steps = (update_steps // publish_interval) * publish_interval if publish_interval > 0 else update_steps
+        last_ckpt_env_steps = (env_steps // ckpt_env_interval) * ckpt_env_interval if ckpt_env_interval > 0 else env_steps
+        last_ckpt_update_steps = (update_steps // ckpt_update_interval) * ckpt_update_interval if ckpt_update_interval > 0 else update_steps
 
         while True:
             apply_actor_summary_file()
@@ -250,10 +251,10 @@ def run_learner(cfg: DictConfig) -> dict[str, Any]:
                         "wall_time_sec": now - start_time,
                     })
                     last_wait_metric_time = now
-                time.sleep(runtime_float(runtime, "update_sleep_sec", 0.05))
+                time.sleep(float(runtime.get("update_sleep_sec", 0.05)))
                 continue
             if update_steps >= int(runtime.max_update_steps):
-                time.sleep(runtime_float(runtime, "update_sleep_sec", 0.05))
+                time.sleep(float(runtime.get("update_sleep_sec", 0.05)))
                 continue
             step_timer = Timer()
             with step_timer.context("mixed_sample"):
@@ -267,21 +268,21 @@ def run_learner(cfg: DictConfig) -> dict[str, Any]:
 
             publish_time_sec = 0.0
             checkpoint_time_sec = 0.0
-            if int(runtime.publish_interval_updates) > 0 and update_steps >= next_publish_at:
+            if publish_interval > 0 and update_steps - last_publish_update_steps >= publish_interval:
                 publish_start = time.perf_counter()
                 server.publish_network(agent.policy_state_dict())
                 publish_time_sec += time.perf_counter() - publish_start
-                next_publish_at += int(runtime.publish_interval_updates)
-            if checkpoints is not None and int(runtime.checkpoint_interval_env_steps) > 0 and env_steps >= next_ckpt_env_at:
+                last_publish_update_steps = update_steps
+            if checkpoints is not None and ckpt_env_interval > 0 and env_steps - last_ckpt_env_steps >= ckpt_env_interval:
                 ckpt_start = time.perf_counter()
                 save_checkpoint(checkpoints, agent, env_steps, update_steps, episodes, total_reward, config_snapshot)
                 checkpoint_time_sec += time.perf_counter() - ckpt_start
-                next_ckpt_env_at += int(runtime.checkpoint_interval_env_steps)
-            if checkpoints is not None and int(runtime.checkpoint_interval_updates) > 0 and update_steps >= next_ckpt_update_at:
+                last_ckpt_env_steps = env_steps
+            if checkpoints is not None and ckpt_update_interval > 0 and update_steps - last_ckpt_update_steps >= ckpt_update_interval:
                 ckpt_start = time.perf_counter()
                 save_checkpoint(checkpoints, agent, env_steps, update_steps, episodes, total_reward, config_snapshot, tag=f"update_{update_steps}.pt")
                 checkpoint_time_sec += time.perf_counter() - ckpt_start
-                next_ckpt_update_at += int(runtime.checkpoint_interval_updates)
+                last_ckpt_update_steps = update_steps
 
             wall_time_sec = time.perf_counter() - start_time
             write_metric(
@@ -367,12 +368,12 @@ def run_actor(cfg: DictConfig) -> dict[str, Any]:
             has_policy_state = True
 
     client.recv_network_callback(update_actor)
-    _wait_for_initial_weights(
-        client,
-        has_policy_state_fn=lambda: has_policy_state,
-        timeout_sec=runtime_float(runtime, "initial_weight_timeout_sec", 300.0),
-        sleep_sec=runtime_float(runtime, "client_update_sleep_sec", 0.1),
-    )
+    deadline = time.perf_counter() + float(runtime.get("initial_weight_timeout_sec", 300.0))
+    while not has_policy_state:
+        client.update()
+        if time.perf_counter() > deadline:
+            raise TimeoutError("timed out waiting for initial learner policy weights")
+        time.sleep(float(runtime.get("client_update_sleep_sec", 0.1)))
 
     try:
         obs = env.reset()
@@ -381,8 +382,10 @@ def run_actor(cfg: DictConfig) -> dict[str, Any]:
         successes = 0
         total_reward = 0.0
         episode_return = 0.0
-        next_weight_update_at = next_interval(env_steps, int(runtime.weight_update_interval_steps))
-        next_stats_at = next_interval(env_steps, int(runtime.stats_interval_env_steps))
+        weight_update_interval = int(runtime.weight_update_interval_steps)
+        stats_interval = int(runtime.stats_interval_env_steps)
+        last_weight_update_env_steps = (env_steps // weight_update_interval) * weight_update_interval if weight_update_interval > 0 else env_steps
+        last_stats_env_steps = (env_steps // stats_interval) * stats_interval if stats_interval > 0 else env_steps
         start_time = time.perf_counter()
         active_rollout_time_sec = 0.0
         episode_success = False
@@ -490,12 +493,12 @@ def run_actor(cfg: DictConfig) -> dict[str, Any]:
                 **timing,
             }
             write_actor_metric(metric)
-            if int(runtime.stats_interval_env_steps) > 0 and env_steps >= next_stats_at:
+            if stats_interval > 0 and env_steps - last_stats_env_steps >= stats_interval:
                 client.request(str(runtime.request_type), {"timer": chunk_timer.get_average_times()})
-                next_stats_at += int(runtime.stats_interval_env_steps)
-            if int(runtime.weight_update_interval_steps) > 0 and env_steps >= next_weight_update_at:
+                last_stats_env_steps = env_steps
+            if weight_update_interval > 0 and env_steps - last_weight_update_env_steps >= weight_update_interval:
                 client.update()
-                next_weight_update_at += int(runtime.weight_update_interval_steps)
+                last_weight_update_env_steps = env_steps
         summary = {
             "role": "actor",
             "algorithm": "pld",
@@ -530,15 +533,6 @@ def _load_offline_replay(runtime: DictConfig) -> tuple[ReplayBuffer | None, dict
     if bool(runtime.require_offline) and len(replay) == 0:
         raise RuntimeError(f"PLD offline replay is empty: {path}")
     return replay, stats
-
-
-def _wait_for_initial_weights(client: Any, *, has_policy_state_fn, timeout_sec: float, sleep_sec: float) -> None:
-    deadline = time.perf_counter() + timeout_sec
-    while not has_policy_state_fn():
-        client.update()
-        if time.perf_counter() > deadline:
-            raise TimeoutError("timed out waiting for initial learner policy weights")
-        time.sleep(sleep_sec)
 
 
 def _learner_should_stop(update_steps: int, env_steps: int, max_update_steps: int, max_env_steps: int, actor_done: bool) -> bool:
