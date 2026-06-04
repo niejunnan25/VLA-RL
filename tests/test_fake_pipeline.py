@@ -88,3 +88,16 @@ def test_local_actor_learner_runner_uses_replay(tmp_path: Path):
     assert summary["replay_size"] == 5
     lines = [json.loads(line) for line in metrics_path.read_text().splitlines()]
     assert lines[-1]["summary"]["replay_size"] == 5
+
+
+
+def test_fake_env_step_chunk_returns_final_step_info():
+    env = FakeEnvBackend(action_dim=2, max_steps=3)
+    env.reset("pick")
+    final_obs, reward, done, truncated, info = env.step_chunk(np.zeros((5, 2), dtype=np.float32))
+
+    assert final_obs is not None
+    assert isinstance(reward, float)
+    assert done is True
+    assert truncated is False
+    assert info["executed_steps"] == 3

@@ -10,13 +10,19 @@ import time
 import numpy as np
 from omegaconf import OmegaConf
 
-PROJECT_ROOT = Path(__file__).resolve().parents[1]
+PROJECT_ROOT = Path(__file__).resolve().parents[2]
 if str(PROJECT_ROOT) not in sys.path:
     sys.path.insert(0, str(PROJECT_ROOT))
 
-from vla_rl.algorithms.pld import write_pld_offline_episode
-from vla_rl.config import instantiate
-from vla_rl.data import CompactTransition
+from examples.libero_pld.common import (
+    create_env,
+    create_pld_obs_builder,
+    create_reference_policy,
+    predict_base_actions,
+    validate_pld_cfg,
+)
+from vla_rl.algorithms.pld import build_pld_obs, write_pld_offline_episode
+from vla_rl.data import Transition
 
 
 def parse_args() -> argparse.Namespace:
@@ -37,6 +43,7 @@ def main() -> None:
     cfg = OmegaConf.load(args.config)
     if overrides:
         cfg = OmegaConf.merge(cfg, OmegaConf.from_dotlist(overrides))
+    validate_pld_cfg(cfg)
 
     collect_cfg = cfg.get("collect", {})
     target_successes = int(args.target_successes or collect_cfg.get("target_successes", 50))
@@ -44,11 +51,12 @@ def main() -> None:
     output_dir = Path(args.output_dir or collect_cfg.get("output_dir", "outputs/pld_base_success"))
     output_dir.mkdir(parents=True, exist_ok=True)
 
-    env = instantiate(cfg.env)
-    policy = instantiate(cfg.policy)
-    feature_processor = instantiate(cfg.feature)
+    env = create_env(cfg)
+    reference_policy = create_reference_policy(cfg)
+    pld_obs_builder = create_pld_obs_builder(cfg)
     gamma = float(cfg.runtime.get("gamma", 0.99))
-    execute_horizon = int(cfg.runtime.get("execute_horizon", cfg.algorithm.get("chunk_horizon", 1)))
+    execute_horizon = int(cfg.runtime.execute_horizon)
+    action_dim = int(cfg.algorithm.action_dim)
     successes = 0
     attempts = 0
     steps_written = 0
@@ -56,24 +64,24 @@ def main() -> None:
     try:
         while successes < target_successes and attempts < max_attempts:
             obs = env.reset()
-            episode: list[CompactTransition] = []
+            episode: list[Transition] = []
             episode_success = False
             while True:
-                features = policy.extract_features(obs)
-                base_actions, agent_obs = feature_processor.build(obs, features)
-                execute_actions = base_actions[:execute_horizon]
+                base_actions = predict_base_actions(reference_policy, obs, horizon=execute_horizon, action_dim=action_dim)
+                pld_obs = build_pld_obs(obs, base_actions, builder=pld_obs_builder)
+                execute_actions = base_actions
                 next_obs, reward, done, truncated, info = env.step_chunk(execute_actions)
                 executed_steps = int(info.get("executed_steps", min(execute_horizon, len(base_actions))))
                 terminal = bool(done or truncated)
                 episode_success = bool(episode_success or info.get("success", False) or info.get("env_done", False))
-                next_agent_obs = None
+                next_pld_obs = None
                 if not terminal:
-                    next_features = policy.extract_features(next_obs)
-                    next_agent_obs = feature_processor.process(next_obs, next_features)
+                    next_base_actions = predict_base_actions(reference_policy, next_obs, horizon=execute_horizon, action_dim=action_dim)
+                    next_pld_obs = build_pld_obs(next_obs, next_base_actions, builder=pld_obs_builder)
                 episode.append(
-                    CompactTransition(
-                        agent_obs=agent_obs,
-                        next_agent_obs=next_agent_obs,
+                    Transition(
+                        obs=pld_obs,
+                        next_obs=next_pld_obs,
                         action=np.asarray(execute_actions, dtype=np.float32).reshape(-1),
                         reward=float(reward),
                         done=bool(done),
@@ -105,9 +113,8 @@ def main() -> None:
                 steps_written += len(episode)
             print(json.dumps({"attempt": attempts, "success": episode_success, "successes": successes, "steps_written": steps_written}))
     finally:
-        close = getattr(env, "close", None)
-        if callable(close):
-            close()
+        env.close()
+        reference_policy.close()
     summary = {
         "output_dir": str(output_dir),
         "target_successes": target_successes,
@@ -120,7 +127,7 @@ def main() -> None:
     print(json.dumps(summary, sort_keys=True))
 
 
-def _attach_mc_returns(transitions: list[CompactTransition], gamma: float) -> None:
+def _attach_mc_returns(transitions: list[Transition], gamma: float) -> None:
     running = 0.0
     for transition in reversed(transitions):
         running = float(transition.reward) + float(gamma) * float(transition.discount > 0.0) * running

@@ -9,7 +9,7 @@ examples/libero_rlt/tools/launch_rlt.sh
 ```
 
 `vla_rl.runtime.agentlace` is only the transport layer: it imports Agentlace,
-creates trainer configs, adapts compact replay to a data store, and sanitizes
+creates trainer configs, adapts replay to a data store, and sanitizes
 metrics. It does not own RLT rollout or update semantics.
 
 ## Runtime Layout
@@ -18,12 +18,12 @@ metrics. It does not own RLT rollout or update semantics.
   server script.
 - Reference-policy server: external process, usually OpenPI, exposing
   `predict_action_with_features()`.
-- Learner: owns RLT actor/critic updates, compact replay, checkpoints, and
+- Learner: owns RLT actor/critic updates, replay, checkpoints, and
   metrics.
 - Actor: owns LIBERO rollout, reference-policy calls, RLT feature processing,
   and action execution.
 
-The actor streams compact transitions containing `z_rl`, `next_z_rl`,
+The actor streams transitions containing `z_rl`, `next_z_rl`,
 `reference_action`, `next_reference_action`, action chunk, reward, terminal
 flags, `executed_steps`, and `discount`. Raw observations and images stay on the
 actor side.
@@ -46,7 +46,7 @@ Recipes should use `vla_rl.policies.ReferencePolicyClient` with the matching
 server URL. This keeps the actor independent of OpenPI, StarVLA, or any other
 provider-specific Python environment.
 
-## 200-step Smoke
+## 1000-step Smoke
 
 ```bash
 source /vla/miniconda3/etc/profile.d/conda.sh
@@ -64,7 +64,7 @@ bash examples/libero_rlt/tools/launch_rlt.sh \
   --trainer-port 5568 \
   --broadcast-port 5569 \
   --run-dir /tmp/vlarl_rlt_task4_smoke \
-  -- runtime.max_env_steps=200 runtime.max_update_steps=200
+  -- runtime.max_env_steps=1000 runtime.max_update_steps=1000
 ```
 
 ## Metrics and Acceptance

@@ -29,24 +29,22 @@ class EnvBackend(ABC):
         if actions.ndim == 1:
             actions = actions[None, :]
         total_reward = 0.0
-        last_obs: Observation | None = None
-        last_info: dict = {}
+        next_obs = None
         done = False
         truncated = False
+        info: dict = {}
         executed_steps = 0
         for action in actions:
-            result = self.step(action)
-            if len(result) == 4:
-                last_obs, reward, done, last_info = result
-                truncated = bool(last_info.get("truncated", False))
-            else:
-                last_obs, reward, done, truncated, last_info = result
+            next_obs, reward, done, truncated, info = self.step(action)
             total_reward += float(reward)
             executed_steps += 1
             if done or truncated:
                 break
-        if last_obs is None:
+        if next_obs is None:
             raise ValueError("step_chunk requires at least one action")
-        info = dict(last_info)
+        info = dict(info)
         info["executed_steps"] = executed_steps
-        return last_obs, total_reward, bool(done), bool(truncated), info
+        return next_obs, float(total_reward), bool(done), bool(truncated), info
+
+    def close(self) -> None:
+        pass

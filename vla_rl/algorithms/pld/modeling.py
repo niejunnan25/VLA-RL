@@ -124,7 +124,7 @@ class HFResNetImageEncoder(nn.Module):
     def _normalize(self, image: Tensor) -> Tensor:
         x = _to_bchw(image)
         x = x.float()
-        # PLDFeatureProcessor emits float images in [0, 1]. If callers provide
+        # PLDObservationBuilder emits float images in [0, 1]. If callers provide
         # uint8 tensors directly, convert without adding a GPU synchronization.
         if not image.is_floating_point():
             x = x / 255.0

@@ -4,11 +4,10 @@ from typing import Any
 
 import numpy as np
 
-from vla_rl.data import CompactReplayBuffer
 
 
-def make_agentlace_replay_store(agentlace: Any, replay: CompactReplayBuffer) -> Any:
-    class AgentlaceCompactReplayStore(agentlace.DataStoreBase):
+def make_agentlace_replay_store(agentlace: Any, replay: Any) -> Any:
+    class AgentlaceReplayStore(agentlace.DataStoreBase):
         def __init__(self) -> None:
             self._latest_data_id = 0
 
@@ -26,7 +25,7 @@ def make_agentlace_replay_store(agentlace: Any, replay: CompactReplayBuffer) -> 
         def __len__(self) -> int:
             return len(replay)
 
-    return AgentlaceCompactReplayStore()
+    return AgentlaceReplayStore()
 
 
 def make_trainer_config(agentlace: Any, trainer_port: int, broadcast_port: int, request_types: list[str]) -> Any:

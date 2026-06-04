@@ -80,31 +80,67 @@ class PolicyFeatures:
             _as_float_array("features.proprio", self.proprio, ndim=1)
 
 
+ObsValue = dict[str, np.ndarray] | Observation
+
+
 @dataclass(slots=True)
 class Transition:
-    obs: Observation
+    obs: ObsValue
     action: np.ndarray
     reward: float
-    next_obs: Observation
+    next_obs: ObsValue | None
     done: bool
     discount: float
     truncated: bool = False
-    agent_obs: dict[str, np.ndarray] | None = None
-    next_agent_obs: dict[str, np.ndarray] | None = None
+    executed_steps: int = 1
+    env_steps: int = 0
     info: dict[str, Any] = field(default_factory=dict)
 
     def validate(self) -> None:
-        self.obs.validate()
-        self.next_obs.validate()
+        _validate_obs_value("obs", self.obs)
+        if self.next_obs is None:
+            if not (self.done or self.truncated):
+                raise ValueError("non-terminal transition requires next_obs")
+        else:
+            _validate_obs_value("next_obs", self.next_obs)
         _as_float_array("transition.action", self.action, ndim=1)
-        if self.agent_obs is not None:
-            _validate_agent_obs("agent_obs", self.agent_obs)
-        if self.next_agent_obs is not None:
-            _validate_agent_obs("next_agent_obs", self.next_agent_obs)
         if not np.isfinite(self.reward):
             raise ValueError(f"reward must be finite, got {self.reward}")
         if not 0.0 <= float(self.discount) <= 1.0:
             raise ValueError(f"discount must be in [0, 1], got {self.discount}")
+        if int(self.executed_steps) <= 0:
+            raise ValueError(f"executed_steps must be positive, got {self.executed_steps}")
+
+    @classmethod
+    def from_payload(cls, payload: "Transition | dict[str, Any]") -> "Transition":
+        if isinstance(payload, Transition):
+            return payload
+        return cls(
+            obs=_copy_obs_value(payload["obs"]),
+            next_obs=None if payload.get("next_obs") is None else _copy_obs_value(payload["next_obs"]),
+            action=np.asarray(payload["action"], dtype=np.float32).reshape(-1),
+            reward=float(payload["reward"]),
+            done=bool(payload["done"]),
+            truncated=bool(payload.get("truncated", False)),
+            discount=float(payload["discount"]),
+            executed_steps=int(payload.get("executed_steps", 1)),
+            env_steps=int(payload.get("env_steps", 0)),
+            info=dict(payload.get("info", {})),
+        )
+
+    def to_payload(self) -> dict[str, Any]:
+        return {
+            "obs": _copy_obs_value(self.obs),
+            "next_obs": None if self.next_obs is None else _copy_obs_value(self.next_obs),
+            "action": np.asarray(self.action, dtype=np.float32).reshape(-1),
+            "reward": float(self.reward),
+            "done": bool(self.done),
+            "truncated": bool(self.truncated),
+            "discount": float(self.discount),
+            "executed_steps": int(self.executed_steps),
+            "env_steps": int(self.env_steps),
+            "info": dict(self.info),
+        }
 
 
 @dataclass(slots=True)
@@ -118,8 +154,26 @@ class RolloutBatch:
             transition.validate()
 
 
-def _validate_agent_obs(name: str, value: dict[str, np.ndarray]) -> None:
+def _validate_obs_value(name: str, value: ObsValue) -> None:
+    if isinstance(value, Observation):
+        value.validate()
+        return
+    _validate_obs_dict(name, value)
+
+
+def _validate_obs_dict(name: str, value: dict[str, np.ndarray]) -> None:
     if not isinstance(value, dict):
-        raise ValueError(f"{name} must be a dict, got {type(value).__name__}")
+        raise ValueError(f"{name} must be an Observation or dict, got {type(value).__name__}")
     for key, array in value.items():
         _as_float_array(f"{name}[{key}]", array)
+
+
+def _copy_obs_value(value: ObsValue) -> ObsValue:
+    if isinstance(value, Observation):
+        return Observation(
+            images={str(key): np.asarray(array).copy() for key, array in value.images.items()},
+            proprio=None if value.proprio is None else np.asarray(value.proprio, dtype=np.float32).copy(),
+            task=value.task,
+            raw=dict(value.raw),
+        )
+    return {str(key): np.asarray(array, dtype=np.float32).copy() for key, array in value.items()}

@@ -23,11 +23,14 @@ def run_import_check(code: str) -> str:
 def test_policies_root_is_training_side_only():
     run_import_check(
         """
+import sys
 import vla_rl.policies as policies
 
 assert sorted(policies.__all__) == ["FakePolicyBackend", "PolicyBackend", "ReferencePolicyClient"]
 assert not hasattr(policies, "OpenPIBackend")
 assert not hasattr(policies, "create_reference_policy")
+assert "vla_rl.policies.openpi" not in sys.modules
+assert "vla_rl.policies.openpi.backend" not in sys.modules
 """
     )
 
@@ -56,7 +59,7 @@ import vla_rl.algorithms as algorithms
 assert sorted(algorithms.__all__) == [
     "Algorithm",
     "FakeAlgorithm",
-    "PLDFeatureProcessor",
+    "PLDObservationBuilder",
     "PLDSACAgent",
     "RLTAgent",
     "RLTStateBuilder",

@@ -1,6 +1,6 @@
 import numpy as np
 
-from vla_rl.data import CompactReplayBuffer, CompactTransition
+from vla_rl.data import ReplayBuffer, Transition
 from vla_rl.runtime.agentlace import json_sanitize, make_agentlace_replay_store, make_trainer_config
 
 
@@ -15,7 +15,7 @@ class FakeAgentlace:
             self.request_types = request_types
 
 
-def make_agent_obs(value: float = 0.0) -> dict[str, np.ndarray]:
+def make_obs_dict(value: float = 0.0) -> dict[str, np.ndarray]:
     return {
         "z_rl": np.full((16,), value, dtype=np.float32),
         "reference_action": np.zeros((4,), dtype=np.float32),
@@ -23,12 +23,12 @@ def make_agent_obs(value: float = 0.0) -> dict[str, np.ndarray]:
     }
 
 
-def test_compact_transition_replay_samples_rlt_batch():
-    replay = CompactReplayBuffer(capacity=8, seed=0)
+def test_transition_replay_samples_dict_obs_batch():
+    replay = ReplayBuffer(capacity=8, seed=0)
     replay.add(
-        CompactTransition(
-            agent_obs=make_agent_obs(0.0),
-            next_agent_obs=make_agent_obs(1.0),
+        Transition(
+            obs=make_obs_dict(0.0),
+            next_obs=make_obs_dict(1.0),
             action=np.zeros((4,), dtype=np.float32),
             reward=1.0,
             done=False,
@@ -45,16 +45,16 @@ def test_compact_transition_replay_samples_rlt_batch():
 
     assert len(replay) == 1
     assert replay.latest_env_steps == 2
-    assert transition.agent_obs is not None
-    assert transition.next_agent_obs is not None
-    np.testing.assert_allclose(transition.agent_obs["z_rl"], np.zeros((16,), dtype=np.float32))
-    np.testing.assert_allclose(transition.next_agent_obs["z_rl"], np.ones((16,), dtype=np.float32))
+    assert isinstance(transition.obs, dict)
+    assert isinstance(transition.next_obs, dict)
+    np.testing.assert_allclose(transition.obs["z_rl"], np.zeros((16,), dtype=np.float32))
+    np.testing.assert_allclose(transition.next_obs["z_rl"], np.ones((16,), dtype=np.float32))
 
 
-def test_compact_terminal_transition_has_no_next_agent_obs():
-    compact = CompactTransition(
-        agent_obs=make_agent_obs(0.0),
-        next_agent_obs=None,
+def test_terminal_transition_has_no_next_obs():
+    transition = Transition(
+        obs=make_obs_dict(0.0),
+        next_obs=None,
         action=np.zeros((4,), dtype=np.float32),
         reward=1.0,
         done=True,
@@ -64,19 +64,19 @@ def test_compact_terminal_transition_has_no_next_agent_obs():
         env_steps=2,
     )
 
-    transition = compact.to_transition()
+    transition.validate()
 
     assert transition.done
-    assert transition.next_agent_obs is None
+    assert transition.next_obs is None
     assert transition.discount == 0.0
 
 
 def test_agentlace_replay_store_helper_inserts_into_replay():
-    replay = CompactReplayBuffer(capacity=8, seed=0)
+    replay = ReplayBuffer(capacity=8, seed=0)
     store = make_agentlace_replay_store(FakeAgentlace, replay)
-    transition = CompactTransition(
-        agent_obs=make_agent_obs(0.0),
-        next_agent_obs=make_agent_obs(1.0),
+    transition = Transition(
+        obs=make_obs_dict(0.0),
+        next_obs=make_obs_dict(1.0),
         action=np.zeros((4,), dtype=np.float32),
         reward=1.0,
         done=False,

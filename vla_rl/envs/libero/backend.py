@@ -93,16 +93,18 @@ class LiberoRemoteEnvBackend(EnvBackend):
         return obs, reward, done, truncated, info
 
     def step_chunk(self, actions: np.ndarray) -> tuple[Observation, float, bool, bool, dict]:
-        response = self.client.call("step_chunk", actions=np.asarray(actions, dtype=np.float32))
+        actions = np.asarray(actions, dtype=np.float32)
+        response = self.client.call("step_chunk", actions=actions)
+        meta = response.get("meta", self.meta)
+        self.meta = meta
+        task = self._task_from_meta(meta)
         raw_obs = response["obs"]
-        reward = float(response.get("reward", 0.0))
+        obs = build_libero_observation(raw_obs, task=task, image_size=self.image_size)
+        reward = float(response.get("reward", response.get("reward_sum", 0.0)))
         done = bool(response.get("done", False))
         truncated = bool(response.get("truncated", False))
         info = dict(response.get("info", {}))
-        meta = response.get("meta", self.meta)
-        self.meta = meta
-        info.setdefault("executed_steps", min(len(actions), int(info.get("take_action_cnt_delta", len(actions)))))
-        obs = build_libero_observation(raw_obs, task=self._task_from_meta(meta), image_size=self.image_size)
+        info.setdefault("executed_steps", int(response.get("num_steps", len(actions))))
         return obs, reward, done, truncated, info
 
     def close(self, clear_cache: bool = False) -> None:

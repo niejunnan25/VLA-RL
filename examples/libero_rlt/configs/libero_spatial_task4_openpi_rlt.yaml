@@ -23,7 +23,10 @@ policy:
   retries: 3
   retry_sleep: 1.0
 
-rlt_observation:
+rlt:
+  chunk_size: 10
+
+feature:
   encoder_path: /vla/users/yixin/openpi/checkpoints/rlt_stage1_single_cos_l6/checkpoint_12000.pt
   device: cuda
   input_dim: 2048
@@ -39,7 +42,7 @@ algorithm:
   z_rl_dim: 2048
   proprio_dim: 8
   action_dim: 7
-  execute_horizon: 5
+  chunk_size: 10
   actor_hidden_dims: [512, 512, 512]
   critic_hidden_dims: [512, 512, 512]
   actor_std: 0.01
@@ -67,7 +70,6 @@ runtime:
   max_env_steps: 300000
   max_update_steps: 300000
   warmup_steps: 0
-  execute_horizon: 5
   batch_size: 1
   replay_capacity: 100000
   replay_seed: 0
@@ -81,3 +83,14 @@ runtime:
   checkpoint_interval_updates: 0
   resume_from: null
   run_dir: outputs/libero_spatial_task4_openpi_rlt
+
+wandb:
+  project: vla-rl
+  entity: null
+  workspace: null
+  group: null
+  exp_name: libero_spatial_task4_rlt
+  tags: [libero, rlt]
+  mode: online
+  debug: false
+  save_code: true

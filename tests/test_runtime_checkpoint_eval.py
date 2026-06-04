@@ -15,7 +15,7 @@ def test_rlt_state_dict_roundtrip_deterministic_action():
     agent = RLTAgent(
         z_rl_dim=16,
         action_dim=2,
-        execute_horizon=2,
+        chunk_size=2,
         actor_hidden_dims=(32, 32),
         critic_hidden_dims=(32, 32),
         num_critics=2,
@@ -31,7 +31,7 @@ def test_rlt_state_dict_roundtrip_deterministic_action():
     restored = RLTAgent(
         z_rl_dim=16,
         action_dim=2,
-        execute_horizon=2,
+        chunk_size=2,
         actor_hidden_dims=(32, 32),
         critic_hidden_dims=(32, 32),
         num_critics=2,
@@ -47,7 +47,7 @@ def test_rlt_policy_state_dict_roundtrip_deterministic_action():
     agent = RLTAgent(
         z_rl_dim=16,
         action_dim=2,
-        execute_horizon=2,
+        chunk_size=2,
         actor_hidden_dims=(32, 32),
         critic_hidden_dims=(32, 32),
         num_critics=2,
@@ -63,7 +63,7 @@ def test_rlt_policy_state_dict_roundtrip_deterministic_action():
     restored = RLTAgent(
         z_rl_dim=16,
         action_dim=2,
-        execute_horizon=2,
+        chunk_size=2,
         actor_hidden_dims=(32, 32),
         critic_hidden_dims=(32, 32),
         num_critics=2,

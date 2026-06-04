@@ -22,6 +22,10 @@ dev = [
 pld = [
   "transformers>=4.40",
 ]
+wandb = [
+  "swanlab>=0.7",
+  "wandb>=0.16",
+]
 
 [tool.setuptools.packages.find]
 include = ["vla_rl*"]

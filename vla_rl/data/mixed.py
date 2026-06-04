@@ -2,7 +2,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 
-from vla_rl.data.compact import CompactReplayBuffer
+from vla_rl.data.replay import ReplayBuffer
 from vla_rl.data.schema import RolloutBatch
 
 
@@ -17,8 +17,8 @@ class MixedReplaySampler:
 
     def __init__(
         self,
-        online_replay: CompactReplayBuffer,
-        offline_replay: CompactReplayBuffer | None = None,
+        online_replay: ReplayBuffer,
+        offline_replay: ReplayBuffer | None = None,
         offline_ratio: float = 0.5,
     ) -> None:
         if not 0.0 <= float(offline_ratio) <= 1.0:

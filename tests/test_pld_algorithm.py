@@ -1,13 +1,15 @@
 from pathlib import Path
 
 import numpy as np
+import pytest
 
-from vla_rl.algorithms.pld import PLDSACAgent, PLDFeatureProcessor, ResidualActionSpec
+from vla_rl.algorithms.pld import PLDObservationBuilder, PLDSACAgent, ResidualActionSpec, build_pld_obs
 from vla_rl.algorithms.pld.modeling import PLDObsEncoder
 from vla_rl.algorithms.pld.replay import load_pld_offline_replay, write_pld_offline_episode
-from vla_rl.data import CompactReplayBuffer, CompactTransition, MixedReplaySampler, Observation, PolicyFeatures, RolloutBatch, Transition
+from vla_rl.data import MixedReplaySampler, Observation, PolicyFeatures, ReplayBuffer, RolloutBatch, Transition
 from vla_rl.envs.fake import FakeEnvBackend
 from vla_rl.policies.fake import FakePolicyBackend
+from examples.libero_pld import common as pld_common
 from examples.libero_pld import train as pld_train
 from omegaconf import OmegaConf
 
@@ -26,26 +28,24 @@ def make_obs() -> Observation:
     )
 
 
-def make_agent_obs(value: float = 0.0) -> dict[str, np.ndarray]:
-    processor = PLDFeatureProcessor(image_keys=("front", "wrist"), action_dim=4, chunk_horizon=1, alpha=0.5)
-    agent_obs = processor.process(make_obs(), make_features(chunk_size=2, action_dim=4))
-    agent_obs["proprio"] = np.ones((5,), dtype=np.float32) * value
-    return agent_obs
+def make_pld_obs(value: float = 0.0) -> dict[str, np.ndarray]:
+    builder = PLDObservationBuilder(image_keys=("front", "wrist"), action_dim=4, chunk_horizon=1, alpha=0.5)
+    pld_obs = build_pld_obs(make_obs(), make_features(chunk_size=2, action_dim=4).reference_actions, builder=builder)
+    pld_obs["proprio"] = np.ones((5,), dtype=np.float32) * value
+    return pld_obs
 
 
 def make_transition(done: bool = False) -> Transition:
-    agent_obs = make_agent_obs(0.0)
-    next_agent_obs = None if done else make_agent_obs(1.0)
     return Transition(
-        obs=Observation(),
-        next_obs=Observation(),
+        obs=make_pld_obs(0.0),
+        next_obs=None if done else make_pld_obs(1.0),
         action=np.zeros((4,), dtype=np.float32),
         reward=1.0,
         done=done,
         truncated=False,
         discount=0.0 if done else 0.99,
-        agent_obs=agent_obs,
-        next_agent_obs=next_agent_obs,
+        executed_steps=1,
+        env_steps=1,
         info={"mc_returns": 1.0, "mc_returns_valid": True},
     )
 
@@ -85,15 +85,15 @@ def test_residual_action_spec_compose_mask_limits_and_gripper_clip():
     np.testing.assert_allclose(final, np.asarray([[0.5, 0.1, -0.05, 1.0]], dtype=np.float32), atol=1e-6)
 
 
-def test_pld_feature_processor_preserves_image_shapes():
-    processor = PLDFeatureProcessor(image_keys=("front", "wrist"), action_dim=4, chunk_horizon=1, alpha=0.5)
+def test_pld_observation_builder_preserves_image_shapes():
+    builder = PLDObservationBuilder(image_keys=("front", "wrist"), action_dim=4, chunk_horizon=1, alpha=0.5)
 
-    agent_obs = processor.process(make_obs(), make_features(chunk_size=2, action_dim=4))
+    pld_obs = build_pld_obs(make_obs(), make_features(chunk_size=2, action_dim=4).reference_actions, builder=builder)
 
-    assert agent_obs["image_front"].shape == (3, 16, 16)
-    assert agent_obs["image_wrist"].shape == (3, 16, 16)
-    assert agent_obs["base_action_chunk"].shape == (1, 4)
-    assert agent_obs["alpha"].shape == (1,)
+    assert pld_obs["image_front"].shape == (3, 16, 16)
+    assert pld_obs["image_wrist"].shape == (3, 16, 16)
+    assert pld_obs["base_action_chunk"].shape == (1, 4)
+    assert pld_obs["alpha"].shape == (1,)
 
 
 def test_pld_obs_encoder_can_match_serl_style_vector_projection_without_obs_projection():
@@ -109,7 +109,7 @@ def test_pld_obs_encoder_can_match_serl_style_vector_projection_without_obs_proj
     )
     batch = {
         key: np.expand_dims(value, axis=0)
-        for key, value in make_agent_obs().items()
+        for key, value in make_pld_obs().items()
     }
     import torch
 
@@ -120,22 +120,22 @@ def test_pld_obs_encoder_can_match_serl_style_vector_projection_without_obs_proj
 
 
 def test_compact_replay_preserves_pld_image_shapes_and_mixed_sampling(tmp_path: Path):
-    online = CompactReplayBuffer(capacity=8, seed=0)
+    online = ReplayBuffer(capacity=8, seed=0)
     offline_dir = tmp_path / "offline"
-    compact = CompactTransition(
-        agent_obs=make_agent_obs(0.0),
-        next_agent_obs=make_agent_obs(1.0),
+    transition = Transition(
+        obs=make_pld_obs(0.0),
+        next_obs=make_pld_obs(1.0),
         action=np.zeros((4,), dtype=np.float32),
         reward=1.0,
         done=False,
         discount=0.99,
     )
-    online.add(compact)
-    write_pld_offline_episode(offline_dir, 0, [compact])
+    online.add(transition)
+    write_pld_offline_episode(offline_dir, 0, [transition])
     offline, stats = load_pld_offline_replay(offline_dir, capacity=8)
 
     transition = online.sample(1).transitions[0]
-    assert transition.agent_obs["image_front"].shape == (3, 16, 16)
+    assert transition.obs["image_front"].shape == (3, 16, 16)
     assert stats["transitions_loaded"] == 1
     mixed = MixedReplaySampler(online, offline, offline_ratio=0.5).sample(4)
     assert mixed.mix == {"online": 2, "offline": 2}
@@ -143,7 +143,7 @@ def test_compact_replay_preserves_pld_image_shapes_and_mixed_sampling(tmp_path: 
 
 def test_pld_agent_act_update_calql_and_terminal_no_bootstrap():
     agent = make_agent()
-    action = agent.sample_action(make_agent_obs(), deterministic=True)
+    action = agent.sample_action(make_pld_obs(), deterministic=True)
     assert action.shape == (1, 4)
 
     batch = RolloutBatch(transitions=[make_transition(False) for _ in range(2)])
@@ -157,6 +157,25 @@ def test_pld_agent_act_update_calql_and_terminal_no_bootstrap():
     fb = agent._convert_batch(terminal_batch)
     assert float(fb["discount"].max()) == 0.0
 
+
+
+def test_pld_train_config_uses_explicit_builders():
+    cfg = OmegaConf.load("examples/libero_pld/configs/fake_pld_smoke.yaml")
+
+    pld_common.validate_pld_cfg(cfg)
+    agent = pld_common.create_pld_agent(cfg)
+    builder = pld_common.create_pld_obs_builder(cfg)
+
+    assert isinstance(agent, PLDSACAgent)
+    assert isinstance(builder, PLDObservationBuilder)
+
+
+def test_pld_config_validation_rejects_horizon_mismatch():
+    cfg = OmegaConf.load("examples/libero_pld/configs/fake_pld_smoke.yaml")
+    cfg.runtime.execute_horizon = 2
+
+    with pytest.raises(ValueError, match="chunk_horizon must match runtime.execute_horizon"):
+        pld_common.validate_pld_cfg(cfg)
 
 def test_pld_agent_actor_updates_after_configured_critic_steps():
     agent = make_agent()
@@ -175,14 +194,20 @@ def test_pld_actor_weight_sync_roundtrip():
     clone = make_agent()
     clone.load_policy_state_dict(agent.policy_state_dict())
 
-    a = agent.sample_action(make_agent_obs(), deterministic=True)
-    b = clone.sample_action(make_agent_obs(), deterministic=True)
+    a = agent.sample_action(make_pld_obs(), deterministic=True)
+    b = clone.sample_action(make_pld_obs(), deterministic=True)
     np.testing.assert_allclose(a, b, atol=1e-6)
 
 
 def test_libero_pld_train_helpers_validate_config():
-    cfg = OmegaConf.create({"algorithm": {"chunk_horizon": 1}, "runtime": {"execute_horizon": 1}})
-    pld_train._validate_pld_cfg(cfg)
+    cfg = OmegaConf.create(
+        {
+            "algorithm": {"chunk_horizon": 1, "action_dim": 4},
+            "pld_observation": {"chunk_horizon": 1, "action_dim": 4},
+            "runtime": {"execute_horizon": 1},
+        }
+    )
+    pld_common.validate_pld_cfg(cfg)
 
 
 def test_libero_pld_train_offline_replay_optional():

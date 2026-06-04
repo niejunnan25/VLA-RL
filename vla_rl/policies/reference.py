@@ -7,7 +7,6 @@ import numpy as np
 
 from vla_rl.data import ActionSpec, Observation, PolicyFeatures
 from vla_rl.policies.base import PolicyBackend
-from vla_rl.policies.openpi import OpenPIBackend
 from vla_rl.runtime.remote_http import RemoteHttpRpcClient
 
 
@@ -28,7 +27,7 @@ class ReferencePolicy(Protocol):
 class OpenPIReferencePolicy:
     """RLT-facing wrapper around the OpenPI policy adapter."""
 
-    policy: OpenPIBackend
+    policy: Any
 
     def action_spec(self) -> ActionSpec:
         return self.policy.action_spec()
@@ -113,6 +112,8 @@ class ReferencePolicyClient(PolicyBackend):
 
 def create_reference_policy(name: str, **kwargs: Any) -> ReferencePolicy:
     if name == "openpi":
+        from vla_rl.policies.openpi import OpenPIBackend
+
         policy = OpenPIBackend(
             openpi_root=kwargs.get("policy_root") or kwargs.get("openpi_root"),
             config_name=kwargs.get("config_name", "pi0_libero"),

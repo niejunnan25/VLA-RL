@@ -24,24 +24,14 @@ class RLTStateBuilder(FeatureProcessor):
         dropout: float = 0.0,
         max_tokens: int | None = 512,
         chunk_size: int = 10,
-        execute_horizon: int | None = None,
         action_dim: int = 7,
         encoder: RLTokenEncoder | None = None,
     ) -> None:
         self.device = torch.device(device)
         self.chunk_size = int(chunk_size)
-        if execute_horizon is None:
-            raise ValueError("RLTStateBuilder requires explicit execute_horizon")
-        self.execute_horizon = int(execute_horizon)
         self.action_dim = int(action_dim)
         if self.chunk_size <= 0:
             raise ValueError(f"chunk_size must be positive, got {chunk_size}")
-        if self.execute_horizon <= 0:
-            raise ValueError(f"execute_horizon must be positive, got {execute_horizon}")
-        if self.execute_horizon > self.chunk_size:
-            raise ValueError(
-                f"execute_horizon={self.execute_horizon} must be <= chunk_size={self.chunk_size}"
-            )
         if self.action_dim <= 0:
             raise ValueError(f"action_dim must be positive, got {action_dim}")
         self.max_tokens = _normalize_max_tokens(max_tokens)
@@ -86,7 +76,15 @@ class RLTStateBuilder(FeatureProcessor):
         if max_tokens is not None:
             z_vla = z_vla[:, : int(max_tokens), :]
         z_rl = self.encoder(z_vla).squeeze(0).detach().cpu().numpy().astype(np.float32)
-        reference = base_actions[: self.execute_horizon, : self.action_dim].reshape(-1).astype(np.float32)
+        if base_actions.ndim != 2:
+            raise ValueError(f"reference actions must be [T, A], got shape={base_actions.shape}")
+        if base_actions.shape[0] < self.chunk_size:
+            raise ValueError(
+                f"reference policy returned {base_actions.shape[0]} actions, need chunk_size={self.chunk_size}"
+            )
+        if base_actions.shape[1] < self.action_dim:
+            raise ValueError(f"reference action dim {base_actions.shape[1]} is smaller than action_dim={self.action_dim}")
+        reference = base_actions[: self.chunk_size, : self.action_dim].reshape(-1).astype(np.float32)
         proprio = features.proprio
         if proprio is None:
             proprio = np.zeros((0,), dtype=np.float32)

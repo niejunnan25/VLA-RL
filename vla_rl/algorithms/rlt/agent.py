@@ -18,7 +18,7 @@ class RLTAgent(Algorithm):
         z_rl_dim: int = 2048,
         proprio_dim: int = 8,
         action_dim: int = 7,
-        execute_horizon: int = 5,
+        chunk_size: int = 10,
         actor_hidden_dims: tuple[int, ...] = (512, 512, 512),
         critic_hidden_dims: tuple[int, ...] = (512, 512, 512),
         actor_std: float = 0.01,
@@ -35,12 +35,12 @@ class RLTAgent(Algorithm):
         device: str = "cpu",
     ) -> None:
         del proprio_dim
-        if execute_horizon <= 0:
-            raise ValueError(f"execute_horizon must be positive, got {execute_horizon}")
+        if chunk_size <= 0:
+            raise ValueError(f"chunk_size must be positive, got {chunk_size}")
         self.device = torch.device(device)
         self.z_rl_dim = int(z_rl_dim)
         self.action_dim = int(action_dim)
-        self.execute_horizon = int(execute_horizon)
+        self.chunk_size = int(chunk_size)
         self.actor_hidden_dims = tuple(int(dim) for dim in actor_hidden_dims)
         self.critic_hidden_dims = tuple(int(dim) for dim in critic_hidden_dims)
         self.actor_std = float(actor_std)
@@ -57,7 +57,7 @@ class RLTAgent(Algorithm):
         self.update_count = 0
         self._critic_step_count = 0
 
-        action_chunk_dim = self.execute_horizon * self.action_dim
+        action_chunk_dim = self.chunk_size * self.action_dim
         self.actor = RLTActor(
             state_dim=self.z_rl_dim,
             action_chunk_dim=action_chunk_dim,
@@ -86,7 +86,7 @@ class RLTAgent(Algorithm):
         else:
             action, _ = self.actor.sample(z_rl, ref)
         action_np = action.squeeze(0).detach().cpu().numpy().astype(np.float32)
-        return action_np.reshape(self.execute_horizon, self.action_dim)
+        return action_np.reshape(self.chunk_size, self.action_dim)
 
     def update(self, batch: RolloutBatch) -> dict:
         batch.validate()
@@ -102,9 +102,9 @@ class RLTAgent(Algorithm):
                 }
             )
             self._update_target_networks()
+            self._critic_step_count += 1
             if self._critic_step_count % self.policy_update_freq == 0:
                 info.update(self._actor_step(fb))
-            self._critic_step_count += 1
         self.update_count += 1
         info["updates"] = self.update_count
         return info
@@ -112,16 +112,20 @@ class RLTAgent(Algorithm):
     def _convert_batch(self, batch: RolloutBatch) -> dict[str, torch.Tensor]:
         transitions = batch.transitions
         for transition in transitions:
-            if transition.agent_obs is None:
-                raise ValueError("RLT replay transition is missing agent_obs")
-            if transition.next_agent_obs is None and not (transition.done or transition.truncated):
-                raise ValueError("non-terminal RLT replay transition is missing next_agent_obs")
+            if not isinstance(transition.obs, dict):
+                raise ValueError("RLT replay transition obs must be a dict")
+            if transition.next_obs is None and not (transition.done or transition.truncated):
+                raise ValueError("non-terminal RLT replay transition requires next_obs")
+            if transition.next_obs is not None and not isinstance(transition.next_obs, dict):
+                raise ValueError("RLT replay transition next_obs must be a dict or None")
 
-        z_rl = self._stack_agent_key(transitions, "agent_obs", "z_rl")
-        next_z_rl = self._stack_next_z_rl(transitions)
-        ref_action = self._stack_agent_key(transitions, "agent_obs", "reference_action")
-        next_ref_action = self._stack_next_reference(transitions)
+        z_rl = self._stack_obs_key(transitions, "z_rl")
+        next_z_rl = self._stack_next_key(transitions, "z_rl")
+        ref_action = self._stack_obs_key(transitions, "reference_action")
+        next_ref_action = self._stack_next_key(transitions, "reference_action")
+        action_mask = self._stack_action_mask(transitions, ref_action.shape[-1])
         actions = np.stack([transition.action for transition in transitions]).astype(np.float32)
+        actions = actions * action_mask
         rewards = np.asarray([transition.reward for transition in transitions], dtype=np.float32)[:, None]
         dones = np.asarray([transition.done or transition.truncated for transition in transitions], dtype=np.float32)[:, None]
         discounts = np.asarray([transition.discount for transition in transitions], dtype=np.float32)[:, None]
@@ -134,6 +138,7 @@ class RLTAgent(Algorithm):
             "discount": torch.as_tensor(discounts, dtype=torch.float32, device=self.device),
             "reference_action": torch.as_tensor(ref_action, dtype=torch.float32, device=self.device),
             "next_reference_action": torch.as_tensor(next_ref_action, dtype=torch.float32, device=self.device),
+            "action_mask": torch.as_tensor(action_mask, dtype=torch.float32, device=self.device),
         }
 
     def _critic_step(self, fb: dict[str, torch.Tensor]) -> tuple[float, float, float]:
@@ -160,11 +165,13 @@ class RLTAgent(Algorithm):
     def _actor_step(self, fb: dict[str, torch.Tensor]) -> dict[str, float]:
         state = fb["state"]
         ref = fb["reference_action"]
+        action_mask = fb["action_mask"]
         mask = (torch.rand(ref.shape[0], 1, device=self.device) > self.ref_dropout).float()
         ref_input = ref * mask
         action = self.actor(state, ref_input)
-        q_value = self.critics[0](state, action)
-        bc_loss = F.mse_loss(action, ref)
+        action_for_q = action * action_mask
+        q_value = self.critics[0](state, action_for_q)
+        bc_loss = ((action - ref).pow(2) * action_mask).sum() / action_mask.sum().clamp_min(1.0)
         loss = -q_value.mean() + self.bc_reg_coeff * bc_loss
         self.actor_optimizer.zero_grad()
         loss.backward()
@@ -178,25 +185,29 @@ class RLTAgent(Algorithm):
                 target_param.data.mul_(1.0 - self.tau).add_(param.data, alpha=self.tau)
 
     @staticmethod
-    def _stack_agent_key(transitions, field: str, key: str) -> np.ndarray:
+    def _stack_obs_key(transitions, key: str) -> np.ndarray:
         values = []
         for transition in transitions:
-            agent_obs = getattr(transition, field)
-            values.append(np.asarray(agent_obs[key], dtype=np.float32).reshape(-1))
+            assert isinstance(transition.obs, dict)
+            values.append(np.asarray(transition.obs[key], dtype=np.float32).reshape(-1))
         return np.stack(values)
 
-    def _stack_next_z_rl(self, transitions) -> np.ndarray:
+    def _stack_next_key(self, transitions, key: str) -> np.ndarray:
         values = []
         for transition in transitions:
-            source = transition.next_agent_obs if transition.next_agent_obs is not None else transition.agent_obs
-            values.append(np.asarray(source["z_rl"], dtype=np.float32).reshape(-1))
+            source = transition.next_obs if transition.next_obs is not None else transition.obs
+            assert isinstance(source, dict)
+            values.append(np.asarray(source[key], dtype=np.float32).reshape(-1))
         return np.stack(values)
 
-    def _stack_next_reference(self, transitions) -> np.ndarray:
+    def _stack_action_mask(self, transitions, action_dim: int) -> np.ndarray:
         values = []
         for transition in transitions:
-            source = transition.next_agent_obs if transition.next_agent_obs is not None else transition.agent_obs
-            values.append(np.asarray(source["reference_action"], dtype=np.float32).reshape(-1))
+            assert isinstance(transition.obs, dict)
+            mask = transition.obs.get("action_mask")
+            if mask is None:
+                mask = np.ones((int(action_dim),), dtype=np.float32)
+            values.append(np.asarray(mask, dtype=np.float32).reshape(-1))
         return np.stack(values)
 
     def state_dict(self) -> dict:
@@ -211,7 +222,7 @@ class RLTAgent(Algorithm):
             "config": {
                 "z_rl_dim": self.z_rl_dim,
                 "action_dim": self.action_dim,
-                "execute_horizon": self.execute_horizon,
+                "chunk_size": self.chunk_size,
                 "actor_hidden_dims": self.actor_hidden_dims,
                 "critic_hidden_dims": self.critic_hidden_dims,
                 "actor_std": self.actor_std,

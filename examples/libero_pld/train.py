@@ -15,11 +15,19 @@ PROJECT_ROOT = Path(__file__).resolve().parents[2]
 if str(PROJECT_ROOT) not in sys.path:
     sys.path.insert(0, str(PROJECT_ROOT))
 
-from vla_rl.algorithms.pld import load_pld_offline_replay
-from vla_rl.config import instantiate
-from vla_rl.data import CompactReplayBuffer, CompactTransition, MixedReplaySampler
+from examples.libero_pld.common import (
+    create_env,
+    create_pld_agent,
+    create_pld_obs_builder,
+    create_reference_policy,
+    predict_base_actions,
+    validate_pld_cfg,
+)
+from vla_rl.algorithms.pld import build_pld_obs, load_pld_offline_replay
+from vla_rl.data import MixedReplaySampler, ReplayBuffer, Transition
 from vla_rl.runtime.agentlace import import_agentlace, json_sanitize, make_agentlace_replay_store, make_trainer_config
 from vla_rl.runtime.checkpoint import CheckpointManager
+from vla_rl.runtime.wandb import make_wandb_logger
 from vla_rl.runtime.timer import Timer
 
 
@@ -35,22 +43,30 @@ def main() -> None:
     args = parse_args()
     cfg = _load_config(args.config, args.overrides)
     cfg.runtime.role = args.role
-    _validate_pld_cfg(cfg)
+    validate_pld_cfg(cfg)
     summary = run_learner(cfg) if args.role == "learner" else run_actor(cfg)
     print(json.dumps(json_sanitize(summary), sort_keys=True))
 
 
 def run_learner(cfg: DictConfig) -> dict[str, Any]:
     runtime = cfg.runtime
-    algorithm = instantiate(cfg.algorithm)
+    agent = create_pld_agent(cfg)
     agentlace = import_agentlace()
     run_dir = _run_dir(runtime)
     checkpoints = CheckpointManager(run_dir) if run_dir is not None else None
-    replay = CompactReplayBuffer(capacity=int(runtime.replay_capacity), seed=int(runtime.replay_seed))
+    replay = ReplayBuffer(capacity=int(runtime.replay_capacity), seed=int(runtime.replay_seed))
     config_snapshot = OmegaConf.to_container(cfg, resolve=True)
     offline_load_start = time.perf_counter()
     offline_replay, offline_stats = _load_offline_replay(runtime)
     offline_load_time_sec = time.perf_counter() - offline_load_start
+    wandb_logger = make_wandb_logger(cfg.get("wandb", None), variant=config_snapshot, run_dir=run_dir)
+    wandb_finished = False
+
+    def finish_wandb_logger() -> None:
+        nonlocal wandb_finished
+        if not wandb_finished:
+            wandb_logger.finish()
+            wandb_finished = True
 
     if run_dir is not None:
         run_dir.mkdir(parents=True, exist_ok=True)
@@ -65,7 +81,7 @@ def run_learner(cfg: DictConfig) -> dict[str, Any]:
     episodes = 0
     total_reward = 0.0
     if runtime.get("resume_from", None):
-        payload = checkpoints.load(runtime.resume_from, algorithm) if checkpoints is not None else {}
+        payload = checkpoints.load(runtime.resume_from, agent) if checkpoints is not None else {}
         update_steps = int(payload.get("update_steps", 0))
         env_steps = int(payload.get("env_steps", 0))
         episodes = int(payload.get("episodes", 0))
@@ -79,9 +95,11 @@ def run_learner(cfg: DictConfig) -> dict[str, Any]:
 
     def write_metric(metric: dict[str, Any]) -> None:
         if run_dir is None:
+            wandb_logger.log(metric, step=update_steps)
             return
         with (run_dir / "metrics.jsonl").open("a") as f:
             f.write(json.dumps(json_sanitize(metric), sort_keys=True) + "\n")
+        wandb_logger.log(metric, step=update_steps)
 
     def apply_actor_summary_file() -> None:
         nonlocal actor_done, actor_done_env_steps
@@ -128,6 +146,7 @@ def run_learner(cfg: DictConfig) -> dict[str, Any]:
         }
     )
 
+    completed_loop = False
     try:
         while calql_steps_done < int(runtime.calql_pretrain_steps) and update_steps < int(runtime.max_update_steps):
             if offline_replay is None or len(offline_replay) == 0:
@@ -136,7 +155,7 @@ def run_learner(cfg: DictConfig) -> dict[str, Any]:
             with step_timer.context("offline_sample"):
                 batch = offline_replay.sample(int(runtime.batch_size))
             with step_timer.context("calql_update"):
-                last_update = algorithm.update_critics_calql(
+                last_update = agent.update_critics_calql(
                     batch,
                     calql_alpha=float(runtime.calql_alpha),
                     calql_n_actions=int(runtime.calql_n_actions),
@@ -165,7 +184,7 @@ def run_learner(cfg: DictConfig) -> dict[str, Any]:
             )
 
         publish_start = time.perf_counter()
-        server.publish_network(algorithm.policy_state_dict())
+        server.publish_network(agent.policy_state_dict())
         initial_publish_time_sec = time.perf_counter() - publish_start
         write_metric(
             {
@@ -202,7 +221,7 @@ def run_learner(cfg: DictConfig) -> dict[str, Any]:
                     })
                     break
                 if now - last_wait_publish_time >= 1.0:
-                    server.publish_network(algorithm.policy_state_dict())
+                    server.publish_network(agent.policy_state_dict())
                     last_wait_publish_time = now
                 if now - last_wait_metric_time >= 1.0:
                     write_metric({
@@ -226,7 +245,7 @@ def run_learner(cfg: DictConfig) -> dict[str, Any]:
             with step_timer.context("mixed_sample"):
                 mixed = sampler.sample(int(runtime.batch_size))
             with step_timer.context("algorithm_update"):
-                last_update = algorithm.update(mixed.batch)
+                last_update = agent.update(mixed.batch)
             timing = step_timer.get_average_times(reset=False, prefix="time/", suffix="_sec")
             active_update_time_sec += sum(step_timer.get_total_times(reset=False).values())
             update_steps += 1
@@ -236,17 +255,17 @@ def run_learner(cfg: DictConfig) -> dict[str, Any]:
             checkpoint_time_sec = 0.0
             if int(runtime.publish_interval_updates) > 0 and update_steps >= next_publish_at:
                 publish_start = time.perf_counter()
-                server.publish_network(algorithm.policy_state_dict())
+                server.publish_network(agent.policy_state_dict())
                 publish_time_sec += time.perf_counter() - publish_start
                 next_publish_at += int(runtime.publish_interval_updates)
             if checkpoints is not None and int(runtime.checkpoint_interval_env_steps) > 0 and env_steps >= next_ckpt_env_at:
                 ckpt_start = time.perf_counter()
-                _save_checkpoint(checkpoints, algorithm, env_steps, update_steps, episodes, total_reward, config_snapshot)
+                _save_checkpoint(checkpoints, agent, env_steps, update_steps, episodes, total_reward, config_snapshot)
                 checkpoint_time_sec += time.perf_counter() - ckpt_start
                 next_ckpt_env_at += int(runtime.checkpoint_interval_env_steps)
             if checkpoints is not None and int(runtime.checkpoint_interval_updates) > 0 and update_steps >= next_ckpt_update_at:
                 ckpt_start = time.perf_counter()
-                _save_checkpoint(checkpoints, algorithm, env_steps, update_steps, episodes, total_reward, config_snapshot, tag=f"update_{update_steps}.pt")
+                _save_checkpoint(checkpoints, agent, env_steps, update_steps, episodes, total_reward, config_snapshot, tag=f"update_{update_steps}.pt")
                 checkpoint_time_sec += time.perf_counter() - ckpt_start
                 next_ckpt_update_at += int(runtime.checkpoint_interval_updates)
 
@@ -273,10 +292,11 @@ def run_learner(cfg: DictConfig) -> dict[str, Any]:
                     **{f"train/{key}": value for key, value in last_update.items()},
                 }
             )
+        completed_loop = True
     finally:
-        stop = getattr(server, "stop", None)
-        if callable(stop):
-            stop()
+        server.stop()
+        if not completed_loop:
+            finish_wandb_logger()
 
     env_steps = current_env_steps(env_steps)
     summary = {
@@ -291,20 +311,23 @@ def run_learner(cfg: DictConfig) -> dict[str, Any]:
         "offline_stats": offline_stats,
         "last_algorithm_updates": last_update.get("updates", 0),
     }
-    if checkpoints is not None:
-        _save_checkpoint(checkpoints, algorithm, env_steps, update_steps, episodes, total_reward, config_snapshot, tag="final.pt")
-    if run_dir is not None:
-        (run_dir / "summary.json").write_text(json.dumps(json_sanitize(summary), indent=2, sort_keys=True) + "\n")
-    write_metric({"summary": summary})
+    try:
+        if checkpoints is not None:
+            _save_checkpoint(checkpoints, agent, env_steps, update_steps, episodes, total_reward, config_snapshot, tag="final.pt")
+        if run_dir is not None:
+            (run_dir / "summary.json").write_text(json.dumps(json_sanitize(summary), indent=2, sort_keys=True) + "\n")
+        write_metric({"summary": summary})
+    finally:
+        finish_wandb_logger()
     return summary
 
 
 def run_actor(cfg: DictConfig) -> dict[str, Any]:
     runtime = cfg.runtime
-    env = instantiate(cfg.env)
-    policy = instantiate(cfg.policy)
-    feature_processor = instantiate(cfg.feature)
-    algorithm = instantiate(cfg.algorithm)
+    env = create_env(cfg)
+    reference_policy = create_reference_policy(cfg)
+    pld_obs_builder = create_pld_obs_builder(cfg)
+    agent = create_pld_agent(cfg)
     agentlace = import_agentlace()
     run_dir = _run_dir(runtime)
     if run_dir is not None:
@@ -330,7 +353,7 @@ def run_actor(cfg: DictConfig) -> dict[str, Any]:
     def network_callback(payload: dict[str, Any]) -> None:
         nonlocal has_policy_state
         if payload is not None:
-            algorithm.load_policy_state_dict(payload)
+            agent.load_policy_state_dict(payload)
             has_policy_state = True
 
     client.recv_network_callback(network_callback)
@@ -347,46 +370,58 @@ def run_actor(cfg: DictConfig) -> dict[str, Any]:
         episodes = 0
         successes = 0
         total_reward = 0.0
+        episode_return = 0.0
         next_weight_update_at = _next_interval(env_steps, int(runtime.weight_update_interval_steps))
         next_stats_at = _next_interval(env_steps, int(runtime.stats_interval_env_steps))
         start_time = time.perf_counter()
         active_rollout_time_sec = 0.0
         episode_success = False
+        episode_steps = 0
         while env_steps < int(runtime.max_env_steps):
             chunk_start = time.perf_counter()
             chunk_timer = Timer()
-            with chunk_timer.context("policy_extract_features"):
-                features = policy.extract_features(obs)
-            with chunk_timer.context("feature_process"):
-                base_actions, pld_state = feature_processor.build(obs, features)
+            with chunk_timer.context("reference_policy"):
+                base_actions = predict_base_actions(
+                    reference_policy,
+                    obs,
+                    horizon=int(runtime.execute_horizon),
+                    action_dim=int(cfg.algorithm.action_dim),
+                )
+            with chunk_timer.context("build_pld_obs"):
+                pld_obs = build_pld_obs(obs, base_actions, builder=pld_obs_builder)
             base_warmup = episodes < int(runtime.base_warmup_episodes)
             if base_warmup:
-                actions = base_actions
+                final_actions = base_actions
             else:
                 with chunk_timer.context("sample_action"):
-                    actions = algorithm.sample_action(pld_state)
-            actions = np.asarray(actions, dtype=np.float32)
-            if actions.shape[0] < int(runtime.execute_horizon):
-                raise ValueError(
-                    f"action chunk length {actions.shape[0]} is shorter than execute_horizon={int(runtime.execute_horizon)}"
-                )
-            execute_actions = actions[: int(runtime.execute_horizon)]
+                    final_actions = agent.sample_action(pld_obs)
+            final_actions = np.asarray(final_actions, dtype=np.float32)
+            if final_actions.shape != base_actions.shape:
+                raise ValueError(f"final action shape {final_actions.shape} must match base action shape {base_actions.shape}")
+            execute_actions = final_actions
             with chunk_timer.context("env_step_chunk"):
                 next_obs, reward, done, truncated, info = env.step_chunk(execute_actions)
             executed_steps = int(info.get("executed_steps", len(execute_actions)))
             env_steps += executed_steps
+            episode_steps += executed_steps
             total_reward += float(reward)
+            episode_return += float(reward)
             terminal = bool(done or truncated)
             episode_success = bool(episode_success or info.get("success", False) or info.get("env_done", False))
-            next_pld_state = None
+            next_pld_obs = None
             if not terminal:
-                with chunk_timer.context("next_policy_extract_features"):
-                    next_features = policy.extract_features(next_obs)
-                with chunk_timer.context("next_feature_process"):
-                    next_pld_state = feature_processor.process(next_obs, next_features)
-            transition = CompactTransition(
-                agent_obs=pld_state,
-                next_agent_obs=next_pld_state,
+                with chunk_timer.context("next_reference_policy"):
+                    next_base_actions = predict_base_actions(
+                        reference_policy,
+                        next_obs,
+                        horizon=int(runtime.execute_horizon),
+                        action_dim=int(cfg.algorithm.action_dim),
+                    )
+                with chunk_timer.context("next_build_pld_obs"):
+                    next_pld_obs = build_pld_obs(next_obs, next_base_actions, builder=pld_obs_builder)
+            transition = Transition(
+                obs=pld_obs,
+                next_obs=next_pld_obs,
                 action=np.asarray(execute_actions, dtype=np.float32).reshape(-1),
                 reward=float(reward),
                 done=bool(done),
@@ -404,9 +439,24 @@ def run_actor(cfg: DictConfig) -> dict[str, Any]:
             active_rollout_time_sec += chunk_time_sec
             reset_time_sec = 0.0
             if terminal:
+                client.request(
+                    str(runtime.request_type),
+                    {
+                        "environment": {
+                            "episode": {
+                                "return": episode_return,
+                                "length": episode_steps,
+                                "success": bool(episode_success),
+                                "env_steps": env_steps,
+                            }
+                        }
+                    },
+                )
                 episodes += 1
                 successes += int(episode_success)
                 episode_success = False
+                episode_return = 0.0
+                episode_steps = 0
                 reset_start = time.perf_counter()
                 obs = env.reset()
                 reset_time_sec = time.perf_counter() - reset_start
@@ -433,7 +483,7 @@ def run_actor(cfg: DictConfig) -> dict[str, Any]:
             }
             write_actor_metric(metric)
             if int(runtime.stats_interval_env_steps) > 0 and env_steps >= next_stats_at:
-                client.request(str(runtime.request_type), metric)
+                client.request(str(runtime.request_type), {"timer": chunk_timer.get_average_times()})
                 next_stats_at += int(runtime.stats_interval_env_steps)
             if int(runtime.weight_update_interval_steps) > 0 and env_steps >= next_weight_update_at:
                 client.update()
@@ -451,15 +501,9 @@ def run_actor(cfg: DictConfig) -> dict[str, Any]:
         write_actor_metric({"summary": summary})
         return summary
     finally:
-        stop = getattr(client, "stop", None)
-        if callable(stop):
-            stop()
-        close = getattr(env, "close", None)
-        if callable(close):
-            close()
-        close = getattr(policy, "close", None)
-        if callable(close):
-            close()
+        client.stop()
+        env.close()
+        reference_policy.close()
 
 
 def _load_config(path: str, overrides: list[str]) -> DictConfig:
@@ -472,14 +516,7 @@ def _load_config(path: str, overrides: list[str]) -> DictConfig:
     return cfg
 
 
-def _validate_pld_cfg(cfg: DictConfig) -> None:
-    if int(cfg.algorithm.chunk_horizon) != int(cfg.runtime.execute_horizon):
-        raise ValueError("algorithm.chunk_horizon must match runtime.execute_horizon")
-    if int(cfg.runtime.execute_horizon) <= 0:
-        raise ValueError("runtime.execute_horizon must be positive")
-
-
-def _load_offline_replay(runtime: DictConfig) -> tuple[CompactReplayBuffer | None, dict[str, Any]]:
+def _load_offline_replay(runtime: DictConfig) -> tuple[ReplayBuffer | None, dict[str, Any]]:
     path = runtime.get("offline_replay_path", None)
     if not path:
         if bool(runtime.require_offline):

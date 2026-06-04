@@ -4,12 +4,11 @@ from typing import Iterable
 
 import numpy as np
 
-from vla_rl.data import Observation, PolicyFeatures
-from vla_rl.features import FeatureProcessor
+from vla_rl.data import Observation
 
 
-class PLDFeatureProcessor(FeatureProcessor):
-    """Build PLD residual observations from env observations and base actions."""
+class PLDObservationBuilder:
+    """Build residual-RL observations from env observations and frozen VLA base actions."""
 
     def __init__(
         self,
@@ -20,34 +19,41 @@ class PLDFeatureProcessor(FeatureProcessor):
     ) -> None:
         self.image_keys = tuple(str(key) for key in image_keys)
         if not self.image_keys:
-            raise ValueError("PLDFeatureProcessor requires at least one image key")
+            raise ValueError("PLDObservationBuilder requires at least one image key")
         self.action_dim = int(action_dim)
         self.chunk_horizon = int(chunk_horizon)
         self.alpha = float(alpha)
         if self.action_dim <= 0 or self.chunk_horizon <= 0:
             raise ValueError("action_dim and chunk_horizon must be positive")
 
-    def process(self, obs: Observation, features: PolicyFeatures) -> dict[str, np.ndarray]:
-        base = self._base_actions(features)
+    def build_observation(self, obs: Observation, base_actions: np.ndarray) -> dict[str, np.ndarray]:
+        base = _base_action_prefix(base_actions, horizon=self.chunk_horizon, action_dim=self.action_dim)
         proprio = np.asarray(obs.proprio, dtype=np.float32).reshape(-1)
         result: dict[str, np.ndarray] = {
             "proprio": proprio,
-            "base_action_chunk": base[: self.chunk_horizon, : self.action_dim].astype(np.float32, copy=False),
+            "base_action_chunk": base,
             "alpha": np.asarray([self.alpha], dtype=np.float32),
         }
         for key in self.image_keys:
             result[f"image_{key}"] = _image_to_chw_float(obs.images[key])
         return result
 
-    def build(self, obs: Observation, features: PolicyFeatures) -> tuple[np.ndarray, dict[str, np.ndarray]]:
-        base = self._base_actions(features)
-        return base[: self.chunk_horizon, : self.action_dim].astype(np.float32, copy=False), self.process(obs, features)
 
-    @staticmethod
-    def _base_actions(features: PolicyFeatures) -> np.ndarray:
-        if features.reference_actions is None:
-            raise ValueError("PLDFeatureProcessor requires PolicyFeatures.reference_actions")
-        return np.asarray(features.reference_actions, dtype=np.float32)
+def build_pld_obs(obs: Observation, base_actions: np.ndarray, *, builder: PLDObservationBuilder) -> dict[str, np.ndarray]:
+    return builder.build_observation(obs, base_actions)
+
+
+def pld_base_action_prefix(base_actions: np.ndarray, *, horizon: int, action_dim: int) -> np.ndarray:
+    return _base_action_prefix(base_actions, horizon=horizon, action_dim=action_dim)
+
+
+def _base_action_prefix(base_actions: np.ndarray, *, horizon: int, action_dim: int) -> np.ndarray:
+    base = np.asarray(base_actions, dtype=np.float32)
+    if base.ndim != 2:
+        raise ValueError(f"base_actions must have shape (T, A), got {base.shape}")
+    if base.shape[0] < horizon or base.shape[1] < action_dim:
+        raise ValueError(f"base_actions shape {base.shape} is shorter than required {(horizon, action_dim)}")
+    return base[:horizon, :action_dim].astype(np.float32, copy=False)
 
 
 def _image_to_chw_float(image: np.ndarray) -> np.ndarray:

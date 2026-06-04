@@ -19,7 +19,7 @@ def make_agent() -> RLTAgent:
         z_rl_dim=16,
         proprio_dim=3,
         action_dim=2,
-        execute_horizon=2,
+        chunk_size=2,
         actor_hidden_dims=(32, 32),
         critic_hidden_dims=(32, 32),
         num_critics=2,
@@ -38,17 +38,16 @@ def make_rlt_state(value: float = 0.0) -> dict[str, np.ndarray]:
 
 
 def make_transition(done: bool = False, discount: float = 0.25) -> Transition:
-    obs = Observation(proprio=np.zeros((3,), dtype=np.float32))
     return Transition(
-        obs=obs,
+        obs=make_rlt_state(0.0),
+        next_obs=None if done else make_rlt_state(1.0),
         action=np.zeros((4,), dtype=np.float32),
         reward=1.0,
-        next_obs=obs,
         done=done,
         truncated=False,
         discount=discount,
-        agent_obs=make_rlt_state(0.0),
-        next_agent_obs=None if done else make_rlt_state(1.0),
+        executed_steps=2,
+        env_steps=2,
     )
 
 
@@ -80,8 +79,7 @@ def test_rlt_state_builder_outputs_rlt_state():
     encoder = RLTokenEncoder(input_dim=8, rl_token_dim=8, num_layers=1, num_heads=2, ff_dim=16)
     state_builder = RLTStateBuilder(
         device="cpu",
-        chunk_size=4,
-        execute_horizon=2,
+        chunk_size=2,
         action_dim=2,
         max_tokens=3,
         encoder=encoder,
@@ -99,59 +97,19 @@ def test_rlt_state_builder_outputs_rlt_state():
     assert rlt_state["proprio"].shape == (3,)
 
 
-def test_rlt_state_builder_requires_execute_horizon():
-    encoder = RLTokenEncoder(input_dim=8, rl_token_dim=8, num_layers=1, num_heads=2, ff_dim=16)
-
-    with pytest.raises(ValueError, match="execute_horizon"):
-        RLTStateBuilder(
-            device="cpu",
-            chunk_size=4,
-            action_dim=2,
-            max_tokens=3,
-            encoder=encoder,
-        )
-
-
-def test_rlt_configs_match_execute_horizon_semantics():
+def test_rlt_config_uses_chunk_size_without_execute_horizon():
     repo_root = Path(__file__).resolve().parents[1]
 
-    formal_cfg = OmegaConf.load(repo_root / "examples/libero_rlt/configs/libero_spatial_task4_openpi_rlt.yaml")
-    assert "rlt_observation" in formal_cfg
-    assert "_target_" not in formal_cfg.rlt_observation
-    agent_cfg = dict(OmegaConf.to_container(formal_cfg.algorithm, resolve=True))
+    cfg = OmegaConf.load(repo_root / "examples/libero_rlt/configs/libero_spatial_task4_openpi_rlt.yaml")
+    assert "rlt" in cfg
+    assert int(cfg.rlt.chunk_size) == 10
+    assert "execute_horizon" not in cfg.runtime
+    assert "execute_horizon" not in cfg.algorithm
+    agent_cfg = dict(OmegaConf.to_container(cfg.algorithm, resolve=True))
     agent_cfg.pop("_target_", None)
     agent_cfg["device"] = "cpu"
     agent = RLTAgent(**agent_cfg)
-    assert agent.execute_horizon == formal_cfg.runtime.execute_horizon
-
-    recipe_agent_cfg = dict(
-        OmegaConf.to_container(OmegaConf.load(repo_root / "recipes/config/algorithm/rlt.yaml"), resolve=True)
-    )
-    recipe_agent_cfg.pop("_target_", None)
-    recipe_agent_cfg["device"] = "cpu"
-    recipe_agent = RLTAgent(**recipe_agent_cfg)
-    assert recipe_agent.execute_horizon == 5
-
-    recipe_feature_cfg = OmegaConf.load(repo_root / "recipes/config/feature/rlt_encoder.yaml")
-    builder = RLTStateBuilder(
-        device="cpu",
-        chunk_size=int(recipe_feature_cfg.chunk_size),
-        execute_horizon=int(recipe_feature_cfg.execute_horizon),
-        action_dim=int(recipe_feature_cfg.action_dim),
-        max_tokens=3,
-        encoder=RLTokenEncoder(input_dim=8, rl_token_dim=8, num_layers=1, num_heads=2, ff_dim=16),
-    )
-    features = PolicyFeatures(
-        reference_actions=np.ones(
-            (int(recipe_feature_cfg.chunk_size), int(recipe_feature_cfg.action_dim)),
-            dtype=np.float32,
-        ),
-        embeddings={"prefix": np.zeros((1, 6, 8), dtype=np.float32)},
-    )
-    rlt_state = builder.process(Observation(), features)
-    assert rlt_state["reference_action"].shape == (
-        int(recipe_feature_cfg.execute_horizon) * int(recipe_feature_cfg.action_dim),
-    )
+    assert agent.chunk_size == cfg.rlt.chunk_size
 
 
 def test_rlt_agent_act_and_update():
@@ -177,14 +135,14 @@ def test_rlt_agent_uses_transition_discount_and_terminal_no_bootstrap():
 
 def test_local_actor_learner_with_rlt_cpu_small_model(tmp_path: Path):
     encoder = RLTokenEncoder(input_dim=16, rl_token_dim=16, num_layers=1, num_heads=4, ff_dim=32)
-    processor = RLTStateBuilder(device="cpu", chunk_size=4, execute_horizon=2, action_dim=7, max_tokens=3, encoder=encoder)
+    processor = RLTStateBuilder(device="cpu", chunk_size=2, action_dim=7, max_tokens=3, encoder=encoder)
     env = FakeEnvBackend(action_dim=7, proprio_dim=8, max_steps=20)
-    policy = FakePolicyBackend(action_dim=7, chunk_size=4, embedding_dim=16)
+    policy = FakePolicyBackend(action_dim=7, chunk_size=2, embedding_dim=16)
     agent = RLTAgent(
         z_rl_dim=16,
         proprio_dim=8,
         action_dim=7,
-        execute_horizon=2,
+        chunk_size=2,
         actor_hidden_dims=(32, 32),
         critic_hidden_dims=(32, 32),
         policy_update_freq=1,
@@ -238,3 +196,19 @@ def test_rlt_actor_summary_failure_is_persisted_and_readable(tmp_path: Path):
 def test_rlt_actor_summary_read_ignores_partial_json(tmp_path: Path):
     (tmp_path / "actor_summary.json").write_text("{")
     assert rlt_train._read_actor_summary(tmp_path) is None
+
+
+
+def test_rlt_agent_reads_action_mask_for_bc_loss():
+    agent = make_agent()
+    transition = make_transition()
+    assert isinstance(transition.obs, dict)
+    transition.obs["action_mask"] = np.array([1.0, 1.0, 0.0, 0.0], dtype=np.float32)
+    fb = agent._convert_batch(RolloutBatch(transitions=[transition, transition]))
+
+    np.testing.assert_allclose(
+        fb["action_mask"].cpu().numpy(),
+        np.array([[1.0, 1.0, 0.0, 0.0], [1.0, 1.0, 0.0, 0.0]], dtype=np.float32),
+    )
+    metrics = agent.update(RolloutBatch(transitions=[transition, transition]))
+    assert "bc_loss" in metrics

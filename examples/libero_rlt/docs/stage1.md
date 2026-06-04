@@ -72,6 +72,6 @@ bash examples/libero_rlt/tools/launch_rlt.sh \
   --python /vla/miniconda3/envs/serl_torch/bin/python \
   -- \
   feature.encoder_path=/tmp/vlarl_rlt_stage1_smoke/final_model.pt \
-  runtime.max_env_steps=200 \
-  runtime.max_update_steps=200
+  runtime.max_env_steps=1000 \
+  runtime.max_update_steps=1000
 ```

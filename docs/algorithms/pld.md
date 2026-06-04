@@ -46,18 +46,18 @@ The output defaults to:
 outputs/pld_base_success/libero_spatial_task4_pi0_libero
 ```
 
-Each transition stores residual observations, executed base actions, rewards,
+Each transition stores PLD observations, final executed actions, rewards,
 terminal flags, discounts, and Monte Carlo returns for Cal-QL-style critic
 pretraining.
 
-The PLD loader expects this VLA-RL compact replay format. It does not load old
+The PLD loader expects this VLA-RL Transition replay format. It does not load old
 `serl_torch` prepared replay dictionaries directly.
 
 ## Training
 
 PLD training lives in `examples/libero_pld/train.py`. The actor and learner
 loops make base warmup, offline/online replay mixing, Cal-QL-style critic
-pretraining, residual action selection, checkpointing, and compact replay
+pretraining, residual action selection, checkpointing, and replay
 transport visible in the PLD example itself.
 
 ## Boundaries

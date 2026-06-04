@@ -46,12 +46,12 @@ RLToken encoder.
 ```text
 obs
   -> ReferencePolicyClient.predict_actions_and_prefix(obs)
-  -> base_actions[:execute_horizon] + prefix_tokens + proprio
+  -> base_actions[:chunk_size] + prefix_tokens + proprio
   -> encode_rlt_obs(prefix_tokens, base_actions, proprio) -> rlt_state
   -> RLTAgent.sample_action(rlt_state) -> actions
   -> env.step_chunk(actions)
-  -> CompactTransition(obs_features, actions, reward, next_features, done)
-  -> CompactReplayBuffer.sample()
+  -> Transition(obs=learner_obs, action=actions, reward=reward, next_obs=next_learner_obs, done=done)
+  -> ReplayBuffer.sample()
   -> RLTAgent.update(batch)
 ```
 
@@ -67,11 +67,11 @@ PLD Stage 1 trains a residual policy on top of a frozen VLA reference action.
 ```text
 obs
   -> ReferencePolicyClient.extract_features(obs) -> base_actions
-  -> PLDFeatureProcessor(obs, base_actions, alpha) -> residual_obs
-  -> PLDSACAgent.sample_action(pld_state) -> final_action
-  -> final_action = base_actions + alpha * residual_action
-  -> env.step_chunk(final_action)
-  -> CompactTransition(residual_obs, residual_action, reward, next_residual_obs, done)
+  -> PLDObservationBuilder(obs, base_actions, alpha) -> pld_obs
+  -> PLDSACAgent.sample_action(pld_obs) -> final_actions
+  -> final_actions = base_actions + alpha * residual_actions
+  -> env.step_chunk(final_actions)
+  -> Transition(obs=pld_obs, action=final_actions, reward=reward, next_obs=next_pld_obs, done=done)
   -> online/offline replay mix
   -> PLDSACAgent.update(batch)
 ```
@@ -101,6 +101,46 @@ runtime.batch_size=1
 ```
 
 Smoke results verify plumbing, not sample efficiency or paper-level behavior.
+
+## W&B Logging
+
+VLA-RL follows the lightweight HIL-SERL logging pattern. The learner owns the
+single W&B-compatible run. Actor metrics are sent to the learner with the same
+Agentlace `send-stats` request used for local JSONL metrics, and the learner
+uploads them together with learner update metrics and timer diagnostics.
+
+Local files are always written first:
+
+- learner: `metrics.jsonl`, `summary.json`, `checkpoints/`;
+- actor: `actor_metrics.jsonl`, `actor_summary.json`.
+
+W&B logging is enabled by default in formal LIBERO RLT/PLD configs. Internally,
+VLA-RL tries SwanLab first, then falls back to native W&B if SwanLab is not
+installed. Formal online runs should install the logging extra:
+
+```bash
+pip install -e ".[wandb]"
+```
+
+Override the run name or project with:
+
+```bash
+wandb.project=vla-rl \
+wandb.exp_name=task4_rlt_seed0
+```
+
+Disable online upload for local smoke/debug runs with:
+
+```bash
+wandb.mode=disabled
+```
+
+The uploaded payload is intentionally small and mirrors HIL-SERL: learner
+update metrics (`train/*`), timer averages (`timer/*`), and actor episode
+environment summaries (`environment/episode/*`). VLA-RL does not upload replay
+sizes, speed diagnostics, observations, replay batches, raw actions, videos, or
+model-specific large arrays. Those richer diagnostics remain available in the
+local JSONL files.
 
 ## Public vs Example-Local
 

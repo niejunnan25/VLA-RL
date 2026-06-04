@@ -137,13 +137,20 @@ class PLDSACAgent(Algorithm):
     @torch.no_grad()
     def sample_action(
         self,
-        pld_state: dict[str, Any],
+        pld_obs: dict[str, Any],
         deterministic: bool = False,
     ) -> np.ndarray:
-        batch = self._agent_obs_to_torch([pld_state])
-        residual = self.actor.deterministic(batch) if deterministic else self.actor.sample(batch)[0]
-        base = batch["base_action_chunk"]
-        return self.residual_spec.compose_chunk_torch(base, residual).squeeze(0).detach().cpu().numpy().astype(np.float32)
+        """Return the composed final action chunk executed by the environment."""
+        batch = self._obs_to_torch([pld_obs])
+        residual = self._sample_residual(batch, deterministic=deterministic)
+        final_action = self._compose_final_action(batch, residual)
+        return final_action.squeeze(0).detach().cpu().numpy().astype(np.float32)
+
+    def _sample_residual(self, batch: dict[str, torch.Tensor], *, deterministic: bool) -> torch.Tensor:
+        return self.actor.deterministic(batch) if deterministic else self.actor.sample(batch)[0]
+
+    def _compose_final_action(self, batch: dict[str, torch.Tensor], residual: torch.Tensor) -> torch.Tensor:
+        return self.residual_spec.compose_chunk_torch(batch["base_action_chunk"], residual)
 
     def update(self, batch: RolloutBatch) -> dict:
         fb = self._convert_batch(batch)
@@ -289,10 +296,13 @@ class PLDSACAgent(Algorithm):
 
     def _convert_batch(self, batch: RolloutBatch) -> dict[str, torch.Tensor | dict[str, torch.Tensor]]:
         transitions = batch.transitions
-        obs = self._agent_obs_to_torch([t.agent_obs for t in transitions])
-        next_obs = self._agent_obs_to_torch(
-            [(t.next_agent_obs if t.next_agent_obs is not None else t.agent_obs) for t in transitions]
-        )
+        for transition in transitions:
+            if not isinstance(transition.obs, dict):
+                raise ValueError("PLD replay transition obs must be a dict")
+            if transition.next_obs is not None and not isinstance(transition.next_obs, dict):
+                raise ValueError("PLD replay transition next_obs must be a dict or None")
+        obs = self._obs_to_torch([t.obs for t in transitions])
+        next_obs = self._obs_to_torch([(t.next_obs if t.next_obs is not None else t.obs) for t in transitions])
         action = np.stack([np.asarray(t.action, dtype=np.float32).reshape(-1) for t in transitions])
         return {
             "obs": obs,
@@ -305,7 +315,7 @@ class PLDSACAgent(Algorithm):
             "mc_returns_valid": torch.tensor([bool(t.info.get("mc_returns_valid", False)) for t in transitions], dtype=torch.float32, device=self.device),
         }
 
-    def _agent_obs_to_torch(self, obs_list: list[dict[str, Any]]) -> dict[str, torch.Tensor]:
+    def _obs_to_torch(self, obs_list: list[dict[str, Any]]) -> dict[str, torch.Tensor]:
         result: dict[str, torch.Tensor] = {}
         required_keys = [*(f"image_{key}" for key in self.image_keys), "proprio", "base_action_chunk", "alpha"]
         for key in required_keys:
@@ -362,7 +372,7 @@ class PLDSACAgent(Algorithm):
         self.update_count = int(state.get("update_count", self.update_count))
 
     def _ensure_networks_initialized(self, actor_only: bool = False) -> None:
-        dummy = self._dummy_agent_obs_torch()
+        dummy = self._dummy_obs_torch()
         with torch.no_grad():
             self.actor.deterministic(dummy)
             if actor_only:
@@ -373,7 +383,7 @@ class PLDSACAgent(Algorithm):
             for target in self.critic_targets:
                 target(dummy, final_action)
 
-    def _dummy_agent_obs_torch(self) -> dict[str, torch.Tensor]:
+    def _dummy_obs_torch(self) -> dict[str, torch.Tensor]:
         dummy: dict[str, torch.Tensor] = {
             "proprio": torch.zeros((1, self.proprio_dim), dtype=torch.float32, device=self.device),
             "base_action_chunk": torch.zeros(

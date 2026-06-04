@@ -9,10 +9,9 @@ from vla_rl.algorithms import Algorithm
 from vla_rl.data import RolloutBatch, Transition
 from vla_rl.envs import EnvBackend
 from vla_rl.policies import PolicyBackend
-from vla_rl.runtime.base import Runner
 
 
-class LocalRunner(Runner):
+class LocalRunner:
     def __init__(
         self,
         env: EnvBackend,

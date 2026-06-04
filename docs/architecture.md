@@ -33,11 +33,11 @@ The RLT LIBERO example uses the following explicit data path:
 ```text
 observation
   -> reference_policy.predict_actions_and_prefix()
-  -> base_actions[:execute_horizon] + prefix_tokens + proprio
+  -> base_actions[:chunk_size] + prefix_tokens + proprio
   -> encode_rlt_obs(prefix_tokens, base_actions, proprio) -> rlt_obs
   -> RLTAgent.sample_action(rlt_obs) -> actions
   -> env.step_chunk(actions)
-  -> compact replay transition
+  -> Transition -> ReplayBuffer
   -> RLTAgent.update(batch)
 ```
 
@@ -47,9 +47,7 @@ The model-side interface is intentionally small:
 predict_actions_and_prefix(observation, ...) -> (base_actions, prefix_tokens, proprio)
 ```
 
-The RLT actor/critic only sees the executed prefix: `reference_action`, sampled
-action, replay action, critic action input, and BC target are all
-`execute_horizon * action_dim`.
+The RLT actor/critic uses a single `chunk_size`: `reference_action`, sampled action, environment execution, replay action, critic action input, and BC target are all `chunk_size * action_dim`. VLA-RL v0 does not support a separate RLT execution horizon; adaptive execution should be designed as a separate method.
 
 ## PLD Mainline
 

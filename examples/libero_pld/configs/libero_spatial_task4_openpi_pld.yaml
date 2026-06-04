@@ -22,8 +22,8 @@ policy:
   timeout: 120.0
   retries: 3
   retry_sleep: 1.0
-feature:
-  _target_: vla_rl.algorithms.pld.PLDFeatureProcessor
+pld_observation:
+  _target_: vla_rl.algorithms.pld.PLDObservationBuilder
   image_keys: [image_rgb_0, image_rgb_1]
   action_dim: 7
   chunk_horizon: 1
@@ -102,6 +102,17 @@ runtime:
   calql_alpha: 1.0
   calql_n_actions: 10
   calql_temperature: 1.0
+
+wandb:
+  project: vla-rl
+  entity: null
+  workspace: null
+  group: null
+  exp_name: libero_spatial_task4_pld
+  tags: [libero, pld]
+  mode: online
+  debug: false
+  save_code: true
 
 collect:
   output_dir: outputs/pld_base_success/libero_spatial_task4_pi0_libero

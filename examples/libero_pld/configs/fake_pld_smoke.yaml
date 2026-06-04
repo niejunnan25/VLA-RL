@@ -13,8 +13,8 @@ policy:
   embedding_dim: 8
   seed: 1
 
-feature:
-  _target_: vla_rl.algorithms.pld.PLDFeatureProcessor
+pld_observation:
+  _target_: vla_rl.algorithms.pld.PLDObservationBuilder
   image_keys: [front]
   action_dim: 4
   chunk_horizon: 1

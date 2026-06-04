@@ -10,13 +10,13 @@ actions and prefix features.
 ```text
 LIBERO Observation
   -> ReferencePolicyClient.predict_actions_and_prefix
-  -> base_actions[:execute_horizon] + prefix_tokens + proprio
+  -> base_actions[:chunk_size] + prefix_tokens + proprio
   -> encode_rlt_obs
   -> rlt_obs: z_rl + reference_action + proprio
   -> RLTAgent.sample_action
-  -> action chunk with execute_horizon actions
+  -> action chunk with chunk_size actions
   -> env.step_chunk(actions)
-  -> compact replay transition
+  -> compact chunk replay transition
   -> RLTAgent.update
 ```
 
@@ -37,13 +37,12 @@ keep the frozen reference policy separate from the trainable actor/critic.
 
 ## Algorithm Semantics
 
-- `RLTAgent.sample_action()` outputs `(execute_horizon, action_dim)`.
-- `reference_action`, actor output, critic action input, BC loss, replay action,
-  and `env.step_chunk()` all use the same `execute_horizon` action prefix.
-- `chunk_size` belongs to the frozen VLA reference chunk, not to the RLT
-  actor/critic action space.
-- Transition discount is `gamma ** executed_steps`; terminal transitions do not bootstrap.
-- The actor loss is `-Q + bc_reg_coeff * MSE(action, reference_action)`.
+- `RLTAgent.sample_action()` outputs `(chunk_size, action_dim)`.
+- RLT v0 intentionally has no separate `execute_horizon`: actor output, env execution, critic action input, replay action chunk, and BC target all use `chunk_size`.
+- The actor stores one replay transition per executed chunk. This keeps the online path simple and avoids per-step VLA backfill.
+- Terminal tails shorter than `chunk_size` carry `action_mask`; actor BC loss and actor Q loss ignore padded action dimensions.
+- Chunk transition discount is `gamma ** executed_steps`; terminal chunks do not bootstrap.
+- The actor loss is `-Q + bc_reg_coeff * masked_mse(action, reference_action)`.
 - The actor/critic state currently uses `z_rl` only; `proprio` remains part of
   the explicit observation schema for future variants.
 
@@ -57,7 +56,7 @@ examples/libero_rlt/configs/libero_spatial_task4_openpi_rlt.yaml
 examples/libero_rlt/tools/launch_rlt.sh
 ```
 
-A 200-step smoke run is:
+A 1000-step smoke run is:
 
 ```bash
 cd /vla/users/niejunnan/codebase/VLA-RL
@@ -71,7 +70,7 @@ bash examples/libero_rlt/tools/launch_rlt.sh \
   --trainer-port 5568 \
   --broadcast-port 5569 \
   --run-dir /tmp/vlarl_rlt_task4_smoke \
-  -- runtime.max_env_steps=200 runtime.max_update_steps=200
+  -- runtime.max_env_steps=1000 runtime.max_update_steps=1000
 ```
 
 For long runs, remove the short-step overrides or set

@@ -18,7 +18,7 @@ if str(PROJECT_ROOT) not in sys.path:
 
 from vla_rl.algorithms.rlt import RLTAgent, RLTokenEncoder
 from vla_rl.algorithms.rlt.features import load_frozen_rlt_encoder
-from vla_rl.data import CompactReplayBuffer, CompactTransition
+from vla_rl.data import ReplayBuffer, Transition
 from vla_rl.envs.libero import LiberoRemoteEnvBackend
 from vla_rl.policies import ReferencePolicyClient
 from vla_rl.runtime.agentlace import (
@@ -28,6 +28,7 @@ from vla_rl.runtime.agentlace import (
     make_trainer_config,
 )
 from vla_rl.runtime.checkpoint import CheckpointManager
+from vla_rl.runtime.wandb import make_wandb_logger
 from vla_rl.runtime.timer import Timer
 
 
@@ -55,7 +56,7 @@ def main() -> None:
 def run_learner(cfg: DictConfig) -> dict[str, Any]:
     """SERL-style RLT learner loop.
 
-    The learner owns the trainable actor/critic, compact replay, updates,
+    The learner owns the trainable actor/critic, replay, updates,
     checkpointing, and metrics. Agentlace is used only as transport for actor
     transitions and actor-weight broadcasts.
     """
@@ -65,8 +66,16 @@ def run_learner(cfg: DictConfig) -> dict[str, Any]:
     agentlace = import_agentlace()
     run_dir = _run_dir(runtime)
     checkpoints = CheckpointManager(run_dir) if run_dir is not None else None
-    replay = CompactReplayBuffer(capacity=int(runtime.replay_capacity), seed=int(runtime.replay_seed))
+    replay = ReplayBuffer(capacity=int(runtime.replay_capacity), seed=int(runtime.replay_seed))
     config_snapshot = OmegaConf.to_container(cfg, resolve=True)
+    wandb_logger = make_wandb_logger(cfg.get("wandb", None), variant=config_snapshot, run_dir=run_dir)
+    wandb_finished = False
+
+    def finish_wandb_logger() -> None:
+        nonlocal wandb_finished
+        if not wandb_finished:
+            wandb_logger.finish()
+            wandb_finished = True
 
     if run_dir is not None:
         run_dir.mkdir(parents=True, exist_ok=True)
@@ -95,9 +104,11 @@ def run_learner(cfg: DictConfig) -> dict[str, Any]:
 
     def write_metric(metric: dict[str, Any]) -> None:
         if run_dir is None:
+            wandb_logger.log(metric, step=update_steps)
             return
         with (run_dir / "metrics.jsonl").open("a") as f:
             f.write(json.dumps(json_sanitize(metric), sort_keys=True) + "\n")
+        wandb_logger.log(metric, step=update_steps)
 
     def apply_actor_summary_file() -> None:
         nonlocal actor_done, actor_done_env_steps
@@ -132,6 +143,7 @@ def run_learner(cfg: DictConfig) -> dict[str, Any]:
     last_wait_publish_time = time.perf_counter()
     last_update: dict[str, Any] = {}
 
+    completed_loop = False
     try:
         while True:
             apply_actor_summary_file()
@@ -170,7 +182,7 @@ def run_learner(cfg: DictConfig) -> dict[str, Any]:
                 time.sleep(_runtime_float(runtime, "update_sleep_sec", 0.05))
                 continue
 
-            min_replay_size = max(int(runtime.batch_size), int(runtime.training_starts))
+            min_replay_size = max(int(runtime.training_starts), int(runtime.batch_size))
             if len(replay) < min_replay_size:
                 now = time.perf_counter()
                 if actor_done:
@@ -261,10 +273,13 @@ def run_learner(cfg: DictConfig) -> dict[str, Any]:
                     **{f"train/{key}": value for key, value in last_update.items()},
                 }
             )
+        completed_loop = True
     finally:
         stop = getattr(server, "stop", None)
         if callable(stop):
             stop()
+        if not completed_loop:
+            finish_wandb_logger()
 
     env_steps = current_env_steps(env_steps)
     summary = {
@@ -274,13 +289,16 @@ def run_learner(cfg: DictConfig) -> dict[str, Any]:
         "replay_size": len(replay),
         "last_algorithm_updates": last_update.get("updates", 0),
     }
-    if checkpoints is not None:
-        if int(runtime.checkpoint_interval_env_steps) > 0 and env_steps >= next_ckpt_env_at:
-            _save_checkpoint(checkpoints, agent, env_steps, update_steps, episodes, total_reward, config_snapshot)
-        _save_checkpoint(checkpoints, agent, env_steps, update_steps, episodes, total_reward, config_snapshot, tag="final.pt")
-    if run_dir is not None:
-        (run_dir / "summary.json").write_text(json.dumps(json_sanitize(summary), indent=2, sort_keys=True) + "\n")
-    write_metric({"summary": summary})
+    try:
+        if checkpoints is not None:
+            if int(runtime.checkpoint_interval_env_steps) > 0 and env_steps >= next_ckpt_env_at:
+                _save_checkpoint(checkpoints, agent, env_steps, update_steps, episodes, total_reward, config_snapshot)
+            _save_checkpoint(checkpoints, agent, env_steps, update_steps, episodes, total_reward, config_snapshot, tag="final.pt")
+        if run_dir is not None:
+            (run_dir / "summary.json").write_text(json.dumps(json_sanitize(summary), indent=2, sort_keys=True) + "\n")
+        write_metric({"summary": summary})
+    finally:
+        finish_wandb_logger()
     return summary
 
 
@@ -289,7 +307,7 @@ def run_actor(cfg: DictConfig) -> dict[str, Any]:
 
     The actor keeps the RLT data path explicit:
     observation -> frozen VLA output -> base action + RLT observation ->
-    RLT actor/reference action -> env chunk step -> compact learner transition.
+    RLT actor/reference action -> env chunk step -> learner transition.
     """
 
     runtime = cfg.runtime
@@ -330,20 +348,24 @@ def run_actor(cfg: DictConfig) -> dict[str, Any]:
         env_steps = 0
         episodes = 0
         total_reward = 0.0
+        episode_return = 0.0
         active_rollout_time_sec = 0.0
         next_weight_update_at = _next_interval(env_steps, int(runtime.weight_update_interval_steps))
         next_stats_at = _next_interval(env_steps, int(runtime.stats_interval_env_steps))
         start_time = time.perf_counter()
         timer = Timer()
-        execute_horizon = int(runtime.execute_horizon)
+        rlt_cfg = _rlt_cfg(cfg)
+        chunk_size = int(rlt_cfg.chunk_size)
+        episode_step = 0
 
         while env_steps < int(runtime.max_env_steps):
             timer.tick("total")
             chunk_start = time.perf_counter()
+            chunk_start_env_steps = env_steps
 
             with timer.context("reference_policy"):
                 base_actions, prefix_tokens, proprio = reference_policy.predict_actions_and_prefix(obs)
-                base_actions = np.asarray(base_actions, dtype=np.float32)[:execute_horizon]
+                base_actions = np.asarray(base_actions, dtype=np.float32)[:chunk_size]
 
             with timer.context("encode_rlt_obs"):
                 rlt_obs = encode_rlt_obs(
@@ -360,27 +382,23 @@ def run_actor(cfg: DictConfig) -> dict[str, Any]:
                     actions = agent.sample_action(rlt_obs)
 
             actions = np.asarray(actions, dtype=np.float32)
-            if actions.shape[0] != execute_horizon:
-                raise ValueError(
-                    f"action chunk length {actions.shape[0]} must match execute_horizon={execute_horizon}"
-                )
 
             with timer.context("step_env"):
                 next_obs, reward, done, truncated, info = env.step_chunk(actions)
 
+            info = dict(info)
             executed_steps = int(info.get("executed_steps", len(actions)))
-            env_steps += executed_steps
-            total_reward += float(reward)
+            reward = float(reward)
+            total_reward += reward
+            episode_return += reward
             terminal = bool(done or truncated)
 
             next_rlt_state = None
             if not terminal:
-                with timer.context("reference_policy"):
-                    next_base_actions, next_prefix_tokens, next_proprio = reference_policy.predict_actions_and_prefix(
-                        next_obs
-                    )
-                    next_base_actions = np.asarray(next_base_actions, dtype=np.float32)[:execute_horizon]
-                with timer.context("encode_rlt_obs"):
+                with timer.context("next_reference_policy"):
+                    next_base_actions, next_prefix_tokens, next_proprio = reference_policy.predict_actions_and_prefix(next_obs)
+                    next_base_actions = np.asarray(next_base_actions, dtype=np.float32)[:chunk_size]
+                with timer.context("next_encode_rlt_obs"):
                     next_rlt_state = encode_rlt_obs(
                         next_prefix_tokens,
                         next_base_actions,
@@ -388,28 +406,49 @@ def run_actor(cfg: DictConfig) -> dict[str, Any]:
                         rl_token_encoder=rl_token_encoder,
                     )
 
-            transition = CompactTransition(
-                agent_obs=rlt_obs,
-                next_agent_obs=next_rlt_state,
+            action_mask = np.zeros_like(actions, dtype=np.float32)
+            action_mask[:executed_steps] = 1.0
+            rlt_obs["action_mask"] = action_mask.reshape(-1)
+            transition = Transition(
+                obs=rlt_obs,
+                next_obs=next_rlt_state,
                 action=actions.reshape(-1),
-                reward=float(reward),
+                reward=reward,
                 done=bool(done),
                 truncated=bool(truncated),
                 discount=0.0 if terminal else float(runtime.gamma) ** executed_steps,
                 executed_steps=executed_steps,
-                env_steps=env_steps,
-                info=info,
+                env_steps=env_steps + executed_steps,
+                info={**info, "chunk_start_env_steps": chunk_start_env_steps},
             )
             with timer.context("send_transition"):
                 data_store.insert(transition.to_payload())
                 client.update()
+
+            env_steps += executed_steps
+            episode_step += executed_steps
 
             metric_episode = episodes
             chunk_time_sec = time.perf_counter() - chunk_start
             active_rollout_time_sec += chunk_time_sec
             reset_time_sec = 0.0
             if terminal:
+                client.request(
+                    str(runtime.request_type),
+                    {
+                        "environment": {
+                            "episode": {
+                                "return": episode_return,
+                                "length": episode_step,
+                                "success": bool(info.get("success", False) or info.get("env_done", False) or info.get("is_success", False)),
+                                "env_steps": env_steps,
+                            }
+                        }
+                    },
+                )
                 episodes += 1
+                episode_step = 0
+                episode_return = 0.0
                 reset_start = time.perf_counter()
                 with timer.context("reset_env"):
                     obs = env.reset()
@@ -427,6 +466,7 @@ def run_actor(cfg: DictConfig) -> dict[str, Any]:
                 "done": bool(done),
                 "truncated": bool(truncated),
                 "executed_steps": executed_steps,
+                "chunk_size": chunk_size,
                 "wall_time_sec": wall_time_sec,
                 "chunk_time_sec": chunk_time_sec,
                 "time/reset_env_sec": reset_time_sec,
@@ -530,7 +570,6 @@ def load_rl_token_encoder(cfg: DictConfig) -> RLTokenEncoder:
     return encoder
 
 
-@torch.no_grad()
 def encode_rlt_obs(
     prefix_tokens: np.ndarray,
     base_actions: np.ndarray,
@@ -572,13 +611,24 @@ def create_rlt_agent(cfg: DictConfig) -> RLTAgent:
 
 
 def _validate_rlt_cfg(cfg: DictConfig) -> None:
+    rlt_cfg = _rlt_cfg(cfg)
     agent_cfg = _cfg_section(cfg, "agent", "algorithm")
-    if int(agent_cfg.execute_horizon) != int(cfg.runtime.execute_horizon):
-        raise ValueError("agent.execute_horizon must match runtime.execute_horizon")
+    runtime = _cfg_section(cfg, "runtime")
+    if "execute_horizon" in agent_cfg or "execute_horizon" in runtime:
+        raise ValueError("RLT v0 uses chunk_size only; remove execute_horizon from config")
+    chunk_size = int(rlt_cfg.chunk_size)
+    if chunk_size <= 0:
+        raise ValueError(f"rlt.chunk_size must be positive, got {chunk_size}")
+    if int(agent_cfg.chunk_size) != chunk_size:
+        raise ValueError("algorithm.chunk_size must match rlt.chunk_size")
+
+
+def _rlt_cfg(cfg: DictConfig) -> DictConfig:
+    return _cfg_section(cfg, "rlt")
 
 
 def _rlt_encoder_cfg(cfg: DictConfig) -> DictConfig:
-    return _cfg_section(cfg, "rlt_observation", "feature")
+    return _cfg_section(cfg, "feature")
 
 
 def _cfg_section(cfg: DictConfig, *names: str) -> DictConfig:

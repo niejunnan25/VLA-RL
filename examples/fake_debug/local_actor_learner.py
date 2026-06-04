@@ -13,11 +13,10 @@ from vla_rl.data import ReplayBuffer, Transition
 from vla_rl.envs import EnvBackend
 from vla_rl.features import FeatureProcessor
 from vla_rl.policies import PolicyBackend
-from vla_rl.runtime.base import Runner
 from vla_rl.runtime.checkpoint import CheckpointManager
 
 
-class LocalActorLearnerRunner(Runner):
+class LocalActorLearnerRunner:
     """Single-process actor-learner loop for interface integration tests."""
 
     def __init__(
@@ -127,21 +126,23 @@ class LocalActorLearnerRunner(Runner):
             env_steps += executed_steps
             total_reward += float(reward)
             terminal = bool(done or truncated)
-            next_agent_obs = None
+            next_processed_obs = None
             if not terminal and self.feature_processor is not None:
                 next_features = self.policy.extract_features(next_obs)
-                next_agent_obs = self._process_features(next_obs, next_features)
+                next_processed_obs = self._process_features(next_obs, next_features)
+            transition_obs = algorithm_state if algorithm_state is not None else obs
+            transition_next_obs = None if terminal else (next_processed_obs if algorithm_state is not None else next_obs)
             transition = Transition(
-                obs=obs,
+                obs=transition_obs,
+                next_obs=transition_next_obs,
                 action=actions.reshape(-1),
                 reward=float(reward),
-                next_obs=next_obs,
                 done=bool(done),
                 truncated=bool(truncated),
                 discount=0.0 if terminal else self.gamma**executed_steps,
-                agent_obs=algorithm_state,
-                next_agent_obs=next_agent_obs,
-                info={**info, "executed_steps": executed_steps},
+                executed_steps=executed_steps,
+                env_steps=env_steps,
+                info=dict(info),
             )
             self.replay.add(transition)
 

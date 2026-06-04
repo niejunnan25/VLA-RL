@@ -24,3 +24,6 @@ class PolicyBackend(ABC):
         **kwargs,
     ) -> PolicyFeatures:
         raise NotImplementedError
+
+    def close(self) -> None:
+        pass
