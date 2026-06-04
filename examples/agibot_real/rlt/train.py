@@ -23,7 +23,10 @@ from examples.agibot_real.rlt.handover import HandoverClassifier, HandoverLabelC
 from vla_rl.algorithms.rlt import RLTAgent, RLTokenEncoder
 from vla_rl.algorithms.rlt.features import load_frozen_rlt_encoder
 from vla_rl.data import ReplayBuffer, Transition
-from vla_rl.runtime.agentlace import import_agentlace, json_sanitize, make_agentlace_replay_store, make_trainer_config
+from agentlace.data.data_store import QueuedDataStore
+from agentlace.trainer import TrainerClient, TrainerConfig, TrainerServer
+
+from vla_rl.runtime.agentlace import json_sanitize, make_agentlace_replay_store
 from vla_rl.runtime.checkpoint import CheckpointManager
 from vla_rl.runtime.wandb import make_wandb_logger
 
@@ -48,7 +51,6 @@ def main() -> None:
 def run_learner(cfg: DictConfig) -> dict[str, Any]:
     runtime = cfg.runtime
     agent = create_rlt_agent(cfg)
-    agentlace = import_agentlace()
     out_dir = run_dir(runtime)
     if out_dir is not None:
         out_dir.mkdir(parents=True, exist_ok=True)
@@ -75,11 +77,15 @@ def run_learner(cfg: DictConfig) -> dict[str, Any]:
         write({"role": "actor", **stat}, step=agent.update_count)
         return {"ok": True}
 
-    server = agentlace.TrainerServer(
-        make_trainer_config(agentlace, int(runtime.trainer_port), int(runtime.broadcast_port), [str(runtime.request_type)]),
+    server = TrainerServer(
+        TrainerConfig(
+            port_number=int(runtime.trainer_port),
+            broadcast_port=int(runtime.broadcast_port),
+            request_types=[str(runtime.request_type)],
+        ),
         request_callback=request_callback,
     )
-    server.register_data_store(str(runtime.store_name), make_agentlace_replay_store(agentlace, replay))
+    server.register_data_store(str(runtime.store_name), make_agentlace_replay_store(replay))
     server.start(threaded=True)
     server.publish_network(agent.policy_state_dict())
 
@@ -128,25 +134,28 @@ def run_actor(cfg: DictConfig) -> dict[str, Any]:
     reference_policy = create_reference_policy(cfg)
     rl_token_encoder = load_rl_token_encoder(cfg)
     agent = create_rlt_agent(cfg)
-    agentlace = import_agentlace()
     out_dir = run_dir(runtime)
     actor_metrics = make_jsonl_writer(None if out_dir is None else out_dir / "actor_metrics.jsonl")
-    data_store = agentlace.QueuedDataStore(int(runtime.actor_queue_capacity))
-    client = agentlace.TrainerClient(
+    data_store = QueuedDataStore(int(runtime.actor_queue_capacity))
+    client = TrainerClient(
         str(runtime.actor_name),
         str(runtime.trainer_ip),
-        make_trainer_config(agentlace, int(runtime.trainer_port), int(runtime.broadcast_port), [str(runtime.request_type)]),
+        TrainerConfig(
+            port_number=int(runtime.trainer_port),
+            broadcast_port=int(runtime.broadcast_port),
+            request_types=[str(runtime.request_type)],
+        ),
         data_store,
         wait_for_server=True,
     )
     has_policy_state = False
 
-    def network_callback(payload: dict[str, Any]) -> None:
+    def update_actor(payload: dict[str, Any]) -> None:
         nonlocal has_policy_state
         agent.load_policy_state_dict(payload)
         has_policy_state = True
 
-    client.recv_network_callback(network_callback)
+    client.recv_network_callback(update_actor)
     while not has_policy_state:
         client.update()
         time.sleep(float(runtime.get("client_update_sleep_sec", 0.1)))

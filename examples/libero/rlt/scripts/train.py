@@ -18,11 +18,10 @@ if str(PROJECT_ROOT) not in sys.path:
 
 from vla_rl.algorithms.rlt import RLTokenEncoder
 from vla_rl.data import ReplayBuffer, Transition
-from vla_rl.runtime.agentlace import (
-    import_agentlace,
-    json_sanitize,
-    make_agentlace_replay_store,
-)
+from agentlace.data.data_store import QueuedDataStore
+from agentlace.trainer import TrainerClient, TrainerConfig, TrainerServer
+
+from vla_rl.runtime.agentlace import json_sanitize, make_agentlace_replay_store
 from vla_rl.runtime.checkpoint import CheckpointManager
 from vla_rl.runtime.wandb import make_wandb_logger
 from vla_rl.runtime.timer import Timer
@@ -77,7 +76,6 @@ def run_learner(cfg: DictConfig) -> dict[str, Any]:
 
     runtime = cfg.runtime
     agent = create_rlt_agent(cfg)
-    agentlace = import_agentlace()
     run_dir = run_dir_from_runtime(runtime)
     checkpoints = CheckpointManager(run_dir) if run_dir is not None else None
     replay = ReplayBuffer(capacity=int(runtime.replay_capacity), seed=int(runtime.replay_seed))
@@ -140,13 +138,13 @@ def run_learner(cfg: DictConfig) -> dict[str, Any]:
         write_metric(stat)
         return {"ok": True}
 
-    trainer_config = agentlace.TrainerConfig(
+    trainer_config = TrainerConfig(
         port_number=int(runtime.trainer_port),
         broadcast_port=int(runtime.broadcast_port),
         request_types=[str(runtime.request_type)],
     )
-    server = agentlace.TrainerServer(trainer_config, request_callback=request_callback)
-    server.register_data_store(str(runtime.store_name), make_agentlace_replay_store(agentlace, replay))
+    server = TrainerServer(trainer_config, request_callback=request_callback)
+    server.register_data_store(str(runtime.store_name), make_agentlace_replay_store(replay))
     server.start(threaded=True)
     server.publish_network(agent.policy_state_dict())
 
@@ -331,17 +329,16 @@ def run_actor(cfg: DictConfig) -> dict[str, Any]:
     reference_policy = build_reference_policy(cfg)
     rl_token_encoder = load_rl_token_encoder(cfg)
     agent = create_rlt_agent(cfg)
-    agentlace = import_agentlace()
     run_dir = run_dir_from_runtime(runtime)
     write_actor_metric = make_jsonl_metric_writer(run_dir, "actor_metrics.jsonl")
 
-    data_store = agentlace.QueuedDataStore(int(runtime.actor_queue_capacity))
-    trainer_config = agentlace.TrainerConfig(
+    data_store = QueuedDataStore(int(runtime.actor_queue_capacity))
+    trainer_config = TrainerConfig(
         port_number=int(runtime.trainer_port),
         broadcast_port=int(runtime.broadcast_port),
         request_types=[str(runtime.request_type)],
     )
-    client = agentlace.TrainerClient(
+    client = TrainerClient(
         str(runtime.actor_name),
         str(runtime.trainer_ip),
         trainer_config,

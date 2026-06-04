@@ -1,18 +1,7 @@
 import numpy as np
 
 from vla_rl.data import ReplayBuffer, Transition
-from vla_rl.runtime.agentlace import json_sanitize, make_agentlace_replay_store, make_trainer_config
-
-
-class FakeAgentlace:
-    class DataStoreBase:
-        pass
-
-    class TrainerConfig:
-        def __init__(self, port_number, broadcast_port, request_types):
-            self.port_number = port_number
-            self.broadcast_port = broadcast_port
-            self.request_types = request_types
+from vla_rl.runtime.agentlace import json_sanitize, make_agentlace_replay_store
 
 
 def make_obs_dict(value: float = 0.0) -> dict[str, np.ndarray]:
@@ -71,7 +60,7 @@ def test_terminal_transition_has_no_next_obs():
 
 def test_agentlace_replay_store_helper_inserts_into_replay():
     replay = ReplayBuffer(capacity=8, seed=0)
-    store = make_agentlace_replay_store(FakeAgentlace, replay)
+    store = make_agentlace_replay_store(replay)
     transition = Transition(
         obs=make_obs_dict(0.0),
         next_obs=make_obs_dict(1.0),
@@ -92,11 +81,6 @@ def test_agentlace_replay_store_helper_inserts_into_replay():
     assert store.get_latest_data(0) == []
 
 
-def test_trainer_config_and_json_sanitize_helpers():
-    cfg = make_trainer_config(FakeAgentlace, 1234, 1235, ["send-stats"])
-    assert cfg.port_number == 1234
-    assert cfg.broadcast_port == 1235
-    assert cfg.request_types == ["send-stats"]
-
+def test_json_sanitize_helper():
     value = json_sanitize({"x": np.array([1, 2]), "y": np.float32(1.5)})
     assert value == {"x": [1, 2], "y": 1.5}
