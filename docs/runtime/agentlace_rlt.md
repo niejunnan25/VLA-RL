@@ -1,35 +1,34 @@
 # Agentlace RLT Runbook
 
-This runbook describes the current production-style RLT Stage 2 path in
-VLA-RL. It uses Agentlace for actor-learner communication, OpenPI for the
-frozen base VLA, LIBERO as the remote environment, and the RLT actor/critic as
-the learner-side algorithm.
+This runbook covers the RLT Stage-2 actor/learner split in VLA-RL. The training
+loop is intentionally owned by the LIBERO example:
+
+```text
+examples/libero_rlt/train.py
+examples/libero_rlt/tools/launch_rlt.sh
+```
+
+`vla_rl.runtime.agentlace` is only the transport layer: it imports Agentlace,
+creates trainer configs, adapts compact replay to a data store, and sanitizes
+metrics. It does not own RLT rollout or update semantics.
 
 ## Runtime Layout
 
-- Learner: run from the `serl_torch` conda environment.
-- Actor/OpenPI: run from
-  `/vla/users/niejunnan/codebase/openpi-modified/.venv/bin/python3`.
-- LIBERO env server: launched through the external
-  `/vla/users/niejunnan/codebase/serl_torch-rlt-merge/examples/libero/tools/serve_env.sh`
-  wrapper.
-- OpenPI fork: the configured `openpi_root` must expose
-  `PI0Pytorch.predict_action_with_features()`. The default fork path is
-  `/vla/users/niejunnan/codebase/openpi-rlt-github`.
+- LIBERO env server: external process, launched through the existing LIBERO
+  server script.
+- Reference-policy server: external process, usually OpenPI, exposing
+  `predict_action_with_features()`.
+- Learner: owns RLT actor/critic updates, compact replay, checkpoints, and
+  metrics.
+- Actor: owns LIBERO rollout, reference-policy calls, RLT feature processing,
+  and action execution.
 
-The 234 smoke environment required these packages:
-
-- `serl_torch`: `numpydantic`, `tyro`.
-- OpenPI venv: `agentlace`, `lz4`.
+The actor streams compact transitions containing `z_rl`, `next_z_rl`,
+`reference_action`, `next_reference_action`, action chunk, reward, terminal
+flags, `executed_steps`, and `discount`. Raw observations and images stay on the
+actor side.
 
 ## Reference Policy Server
-
-RLT treats the frozen VLA as a reference policy: it provides the reference
-action chunk and prefix hidden states used by `RLTFeatureProcessor`.
-
-The in-process actor path can load OpenPI directly through `OpenPIBackend`.
-For model isolation, the same contract can be served over the lightweight
-pickle HTTP RPC:
 
 ```bash
 python scripts/serve_reference_policy.py \
@@ -37,117 +36,41 @@ python scripts/serve_reference_policy.py \
   --policy-root /vla/users/niejunnan/codebase/openpi-rlt-github \
   --config-name pi0_libero \
   --checkpoint-path /vla/users/niejunnan/assets/openpi-assets/checkpoints/pi0_libero_pytorch \
+  --action-dim 7 \
   --device cuda \
   --host 127.0.0.1 \
   --port 8899
 ```
 
-Training recipes can then point their policy target at
-`vla_rl.algorithms.rlt.ReferencePolicyClient` with `url=http://127.0.0.1:8899`.
-This keeps the RLT actor loop independent of whether the reference policy is
-OpenPI, StarVLA, or another frozen VLA.
+Recipes should use `vla_rl.policies.ReferencePolicyClient` with the matching
+server URL. This keeps the actor independent of OpenPI, StarVLA, or any other
+provider-specific Python environment.
 
-## Launcher Parameters
-
-`scripts/launch_agentlace_rlt.sh` starts one tmux session with three windows:
-
-- `env`: LIBERO env server.
-- `learner`: Agentlace learner and RLT optimizer.
-- `actor`: LIBERO rollout, OpenPI inference, RLT feature processing, and action
-  execution.
-
-Important options:
-
-- `--actor-gpu`: GPU used by actor and OpenPI. Default convention is GPU0.
-- `--learner-gpu`: GPU used by learner. Default convention is GPU1.
-- `--env-gpu`: GPU used by LIBERO env server. Defaults to actor GPU.
-- `--env-port`: HTTP port for the LIBERO env server.
-- `--trainer-port`: Agentlace trainer request/data port.
-- `--broadcast-port`: Agentlace network broadcast port.
-- `--run-dir`: directory for `metrics.jsonl`, `actor_metrics.jsonl`,
-  summaries, and checkpoints.
-- `--python`: learner Python executable.
-- `--actor-python`: actor/OpenPI Python executable.
-- `--`: all arguments after this marker are OmegaConf dotlist overrides passed
-  to both actor and learner.
-
-Use distinct port triples for concurrent runs.
-
-## Commands
-
-### 200-step Smoke
+## 200-step Smoke
 
 ```bash
 source /vla/miniconda3/etc/profile.d/conda.sh
 conda activate serl_torch
 cd /vla/users/niejunnan/codebase/VLA-RL
 
-rm -rf /tmp/vlarl_m4_agentlace_smoke
+rm -rf /tmp/vlarl_rlt_task4_smoke
 
-bash scripts/launch_agentlace_rlt.sh \
-  --session vlarl_m4_agentlace_smoke \
+bash examples/libero_rlt/tools/launch_rlt.sh \
+  --session vlarl_rlt_task4_smoke \
   --actor-gpu 0 \
   --learner-gpu 1 \
-  --env-port 23100 \
-  --trainer-port 5518 \
-  --broadcast-port 5519 \
-  --run-dir /tmp/vlarl_m4_agentlace_smoke \
-  -- runtime.max_env_steps=200 \
-     runtime.max_update_steps=200 \
-     runtime.checkpoint_interval_env_steps=100
+  --env-port 23200 \
+  --policy-port 8899 \
+  --trainer-port 5568 \
+  --broadcast-port 5569 \
+  --run-dir /tmp/vlarl_rlt_task4_smoke \
+  -- runtime.max_env_steps=200 runtime.max_update_steps=200
 ```
-
-### 1k Sanity
-
-```bash
-source /vla/miniconda3/etc/profile.d/conda.sh
-conda activate serl_torch
-cd /vla/users/niejunnan/codebase/VLA-RL
-
-rm -rf /tmp/vlarl_m4_agentlace_1k_sanity
-
-bash scripts/launch_agentlace_rlt.sh \
-  --session vlarl_m4_agentlace_1k_sanity \
-  --actor-gpu 0 \
-  --learner-gpu 1 \
-  --env-port 23110 \
-  --trainer-port 5528 \
-  --broadcast-port 5529 \
-  --run-dir /tmp/vlarl_m4_agentlace_1k_sanity \
-  -- runtime.max_env_steps=1000 \
-     runtime.max_update_steps=1000 \
-     runtime.checkpoint_interval_env_steps=500
-```
-
-### 300k Task-4 Training
-
-```bash
-source /vla/miniconda3/etc/profile.d/conda.sh
-conda activate serl_torch
-cd /vla/users/niejunnan/codebase/VLA-RL
-
-bash scripts/launch_agentlace_rlt.sh \
-  --session vlarl_task4_rlt_300k \
-  --actor-gpu 0 \
-  --learner-gpu 1 \
-  --env-port 23120 \
-  --trainer-port 5538 \
-  --broadcast-port 5539 \
-  --run-dir outputs/libero_spatial_task4_openpi_rlt_agentlace
-```
-
-The default recipe already sets `runtime.max_env_steps=300000` and
-`runtime.max_update_steps=300000`.
 
 ## Metrics and Acceptance
 
 The learner writes `metrics.jsonl` and `summary.json`. The actor writes
 `actor_metrics.jsonl` and `actor_summary.json`.
-
-The learner keeps the Agentlace server alive after it reaches
-`runtime.max_update_steps` until the actor has also reached
-`runtime.max_env_steps` or reports its final actor summary. This keeps actor
-rollout and learner checkpoint accounting aligned for sanity checks.
 
 For smoke and sanity checks, verify:
 
@@ -156,16 +79,4 @@ For smoke and sanity checks, verify:
 - `summary.json.update_steps` reaches the requested update target.
 - `summary.json.replay_size > 0`.
 - `checkpoints/latest.pt` and `checkpoints/final.pt` exist.
-- `train/critic_loss`, `train/actor_loss`, and Q metrics in `metrics.jsonl`
-  are finite.
-
-Useful speed estimates:
-
-- Actor wall env/s: final actor env steps divided by the actor wall-clock span.
-- Actor active env/s: sum of `executed_steps` divided by sum of
-  `chunk_time_sec`.
-- Learner wall update/s: final update steps divided by learner wall-clock span.
-- Learner active update/s: inverse of mean `update_time_sec`.
-
-After a run, stop the tmux session if needed and confirm no stale GPU compute
-processes remain.
+- `train/critic_loss`, `train/actor_loss`, and Q metrics are finite.

@@ -107,8 +107,8 @@ class LocalActorLearnerRunner(Runner):
         while env_steps < self.max_env_steps:
             chunk_start = time.perf_counter()
             if self.feature_processor is None:
-                features = self.policy.extract_features(obs)
-                reference = self._reference_chunk_from_features(features)
+                reference = self.policy.sample_actions(obs, task=obs.task)
+                features = self.policy.extract_features(obs, actions=reference)
             else:
                 features = self.policy.extract_features(obs)
                 reference = self._reference_chunk_from_features(features)
@@ -198,7 +198,7 @@ class LocalActorLearnerRunner(Runner):
         if self.metrics_path is None:
             return
         with self.metrics_path.open("a") as f:
-            f.write(json.dumps(_json_sanitize(metric), sort_keys=True) + "\n")
+            f.write(json.dumps(json_sanitize(metric), sort_keys=True) + "\n")
 
     def _process_features(self, obs, features):
         if self.feature_processor is None:
@@ -207,7 +207,7 @@ class LocalActorLearnerRunner(Runner):
 
     def _reference_chunk_from_features(self, features):
         if features.reference_actions is None:
-            raise ValueError("PolicyFeatures.reference_actions is required for warmup/reference actions")
+            raise ValueError("feature_processor path requires PolicyFeatures.reference_actions for warmup/reference actions")
         from vla_rl.data import ActionChunk
 
         reference = ActionChunk(
@@ -270,7 +270,8 @@ class LocalActorLearnerRunner(Runner):
             info: dict[str, Any] = {}
             while not (done or truncated):
                 if self.eval_feature_processor is None:
-                    features = self.eval_policy.extract_features(obs)
+                    reference = self.eval_policy.sample_actions(obs, task=obs.task)
+                    features = self.eval_policy.extract_features(obs, actions=reference)
                     agent_obs = None
                 else:
                     features = self.eval_policy.extract_features(obs)
@@ -302,11 +303,11 @@ class LocalActorLearnerRunner(Runner):
         }
 
 
-def _json_sanitize(value):
+def json_sanitize(value):
     if isinstance(value, dict):
-        return {str(key): _json_sanitize(item) for key, item in value.items()}
+        return {str(key): json_sanitize(item) for key, item in value.items()}
     if isinstance(value, (list, tuple)):
-        return [_json_sanitize(item) for item in value]
+        return [json_sanitize(item) for item in value]
     if isinstance(value, np.generic):
         return value.item()
     if isinstance(value, np.ndarray):

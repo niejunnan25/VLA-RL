@@ -8,7 +8,8 @@ from vla_rl.algorithms.rlt.features import load_frozen_rlt_encoder
 from vla_rl.data import Observation, PolicyFeatures, RolloutBatch, Transition
 from vla_rl.envs.fake import FakeEnvBackend
 from vla_rl.policies.fake import FakePolicyBackend
-from vla_rl.runtime.local_actor_learner import LocalActorLearnerRunner
+from examples.fake_debug.local_actor_learner import LocalActorLearnerRunner
+from examples.libero_rlt import train as rlt_train
 
 
 def make_agent() -> RLTAgent:
@@ -150,3 +151,34 @@ def test_local_actor_learner_with_rlt_cpu_small_model(tmp_path: Path):
     assert summary["env_steps"] == 10
     assert summary["update_steps"] == 10
     assert summary["replay_size"] == 5
+
+
+class FailingSummaryClient:
+    def request(self, request_type, payload):
+        raise RuntimeError(f"failed {request_type}")
+
+
+def test_rlt_actor_summary_failure_is_persisted_and_readable(tmp_path: Path):
+    metrics = []
+    summary = rlt_train._send_actor_summary(
+        FailingSummaryClient(),
+        "send-stats",
+        {"role": "actor", "env_steps": 12, "episodes": 1},
+        tmp_path,
+        metrics.append,
+    )
+
+    assert summary["actor_summary_notified"] is False
+    assert metrics[-1]["event"] == "actor_summary_send_failed"
+    persisted = rlt_train._read_actor_summary(tmp_path)
+    assert persisted is not None
+    assert persisted["env_steps"] == 12
+    assert persisted["actor_summary_notified"] is False
+    done, env_steps = rlt_train._apply_actor_summary_file(tmp_path, False, 0)
+    assert done is True
+    assert env_steps == 12
+
+
+def test_rlt_actor_summary_read_ignores_partial_json(tmp_path: Path):
+    (tmp_path / "actor_summary.json").write_text("{")
+    assert rlt_train._read_actor_summary(tmp_path) is None

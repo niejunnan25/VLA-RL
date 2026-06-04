@@ -1,50 +1,68 @@
 # VLA-RL Architecture
 
-VLA-RL is a thin bridge package for frozen VLA reference-policy inference. It is
-not the long-term training framework for RLT, PLD, residual RL, or other
-sample-efficient frozen-VLA RL methods. Training loops, replay semantics,
-checkpointing, and experiment recipes should live in `serl_torch` examples.
+VLA-RL is the main training framework for sample-efficient frozen-VLA
+reinforcement learning. It follows the SERL style: examples own the visible
+training loop, common library code stays thin, and large VLA models remain
+frozen reference-policy providers.
+
+The project is built for methods such as RLT, PLD, residual RL, and related
+small-head RL algorithms. The trainable parts live in VLA-RL; model repositories
+such as OpenPI, StarVLA, and JoyRA expose only inference hooks.
 
 ## Boundaries
 
-The intended boundaries are:
+- Model repositories expose frozen policy capabilities such as
+  `predict_action_with_features()`. They do not own replay, actor/learner loops,
+  checkpoints, or RL losses.
+- `vla_rl.policies` contains reference-policy clients and lightweight wrappers
+  around those external VLA providers. This is the boundary between model
+  environments and the RL framework.
+- `vla_rl.algorithms` contains only trainable algorithm logic: small actors,
+  critics, feature processors, and update rules.
+- `vla_rl.data`, `vla_rl.envs`, and `vla_rl.runtime` provide stable primitives
+  for replay records, environment adapters, transport, and checkpoints. Runtime
+  helpers are support code, not a universal runner abstraction.
+- `examples/` contains the real experiment recipes. Each algorithm gets a
+  self-contained example whose training flow can be read without chasing a
+  generic framework stack.
 
-- Model repositories such as OpenPI, StarVLA, and JoyRA expose frozen policy
-  capabilities, for example `predict_action_with_features()`. They do not own
-  RL training.
-- VLA-RL provides small client/server adapters and schema tests for reference
-  actions and VLA features.
-- `serl_torch` owns actor/learner loops, replay buffers, update logic, and
-  benchmark recipes.
+## RLT Mainline
 
-This keeps VLA dependencies isolated in their own Python environments while
-preserving SERL-style explicit training scripts in the RL repository.
-
-## Current Bridge Contract
-
-For RLT, a reference-policy server returns:
-
-```text
-Observation
-  -> reference_actions
-  -> features["prefix"]
-```
-
-The training side turns this into:
+The RLT LIBERO example uses the following explicit data path:
 
 ```text
-prefix features -> frozen RLTokenEncoder -> z_rl
-reference_actions -> RLT actor condition and BC target
+observation
+  -> reference_policy.predict_action_with_features()
+  -> PolicyFeatures(reference_actions, embeddings["prefix"])
+  -> RLTFeatureProcessor(prefix) -> z_rl
+  -> RLTAgent.act(z_rl, reference_actions) -> action chunk
+  -> env.step_chunk(action_chunk[:execute_horizon])
+  -> compact replay transition
+  -> RLTAgent.update(batch)
 ```
 
-The bridge should stay minimal: it may know how to call OpenPI or another VLA
-provider, but it should not add new generic runners, algorithm registries, or
-replay systems.
+The model-side interface is intentionally small:
 
-## Deprecated Direction
+```python
+predict_action_with_features(observation, ...) -> {
+    "actions": ...,
+    "features": {"prefix": ...},
+}
+```
 
-Earlier local experiments added generic `Algorithm`, `Runner`, local
-actor/learner, and Agentlace runtime abstractions inside VLA-RL. Those were useful
-for smoke tests, but they should not continue as the main training stack. New RLT
-and PLD work should be implemented in `serl_torch`, with VLA-RL used only where a
-standalone reference-policy bridge is useful.
+VLA-RL converts this to `PolicyFeatures` and keeps the RLT actor/critic update
+inside the framework.
+
+## PLD Mainline
+
+PLD is a separate example, not a mode inside the RLT runner. It has its own
+base-success collection, residual observation construction, offline/online replay
+mix, and Cal-QL-style critic pretraining. It shares only stable primitives such
+as policy clients, environment clients, replay records, and checkpoints.
+
+## Design Rule
+
+Do not rebuild RLinf-style universal orchestration here. When adding a method,
+prefer a clear example-local training script over a new generic registry or
+runner layer. Promote code to `vla_rl/` only after it has become a stable
+primitive shared by more than one example.

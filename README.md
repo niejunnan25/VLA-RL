@@ -3,10 +3,11 @@
 VLA-RL is a sample-efficient reinforcement-learning infrastructure for
 post-training vision-language-action policies.
 
-Milestone 4 defines the core contracts, wires OpenPI and LIBERO as the first
-real policy/env boundaries, integrates RLT Stage 2 as the first real algorithm,
-and adds an Agentlace-first actor-learner runtime. PLD, residual SAC, and
-StarVLA are still future targets.
+VLA-RL keeps large VLA models and simulation environments outside the RL
+process. They run as external services, while VLA-RL owns the lightweight
+actor/critic training loops, replay, checkpoints, and example recipes. RLT is
+the first clean SERL-style training line; PLD and residual SAC are separate
+example lines rather than variants hidden behind a universal runner.
 
 ## v0 Targets
 
@@ -24,105 +25,52 @@ StarVLA are still future targets.
 - `vla_rl.algorithms`: algorithm interface and fake algorithm.
 - `vla_rl.algorithms.rlt`: RLT Stage 2 actor/critic and frozen encoder feature
   processing.
-- `vla_rl.runtime`: local debug runners, Agentlace actor-learner runtime,
-  checkpointing, synchronous evaluation, and HTTP RPC utilities.
-- `recipes`: composable configuration files.
+- `vla_rl.algorithms.pld`: PLD Stage 1 residual action policy, residual
+  observation processing, SAC updates, Cal-QL-style critic pretraining, and
+  offline/online replay mixing.
+- `vla_rl.runtime`: thin transport helpers, checkpointing, and HTTP/RPC utilities. Algorithm training loops live in examples.
+- `examples/*/configs`: example-owned configuration files.
 
-## Local Smoke
+## Debug Smoke
+
+The old single-process runner is now a debug example, not a framework-level
+training entrypoint:
 
 ```bash
-python scripts/train.py --config recipes/fake_local.yaml
+python examples/fake_debug/train.py --config examples/fake_debug/configs/fake_local.yaml
 pytest -q
 ```
 
-## LIBERO + OpenPI Integration Shape
+Real algorithm entrypoints live under their own examples.
 
-Start the external LIBERO server through the compatibility wrapper:
+## RLT Stage 2 SERL-Style Run
 
-```bash
-python scripts/serve_libero_env.py \
-  --serl-torch-root /vla/users/niejunnan/codebase/serl_torch-rlt-merge \
-  --host 127.0.0.1 \
-  --port 23000 \
-  --gpu-id 0
-```
-
-Then run a local actor-learner recipe. This uses OpenPI for reference actions
-and features, LIBERO over RPC for rollout, and `FakeAlgorithm` as the placeholder
-algorithm:
+The default real-training path is the LIBERO RLT example. The actor and learner
+loops live directly in `examples/libero_rlt/train.py`; Agentlace is used only as
+transport for compact replay transitions and actor-weight broadcasts. The helper
+starts a LIBERO env server, OpenPI reference-policy server, learner, and actor in
+one tmux session:
 
 ```bash
-python scripts/train.py --config recipes/libero_spatial_openpi_fake_algorithm.yaml
-```
-
-The real recipe requires the `niejunnan25/openpi` extractor fork and Torch
-OpenPI checkpoint paths configured in `recipes/config/policy/openpi_*.yaml`.
-
-## RLT Stage 2 Smoke
-
-```bash
-python scripts/train.py --config recipes/libero_spatial_openpi_rlt_smoke.yaml
-```
-
-This smoke recipe uses OpenPI + LIBERO + a frozen Stage 1 RLTokenEncoder and
-trains the local RLT actor/critic. It is single-process and intended for systems
-checks, not final experiment throughput.
-
-## RLT Stage 2 Formal Single-Process Run
-
-The single-process runner is kept as a debug path. For real training, prefer
-the Agentlace runtime below.
-
-Start separate LIBERO servers for training and synchronous evaluation:
-
-```bash
-python scripts/serve_libero_env.py \
-  --serl-torch-root /vla/users/niejunnan/codebase/serl_torch-rlt-merge \
-  --host 127.0.0.1 \
-  --port 23000 \
-  --gpu-id 0
-
-python scripts/serve_libero_env.py \
-  --serl-torch-root /vla/users/niejunnan/codebase/serl_torch-rlt-merge \
-  --host 127.0.0.1 \
-  --port 23001 \
-  --gpu-id 0
-```
-
-Run the 300k task-4 recipe:
-
-```bash
-python scripts/train.py --config recipes/libero_spatial_task4_openpi_rlt_300k.yaml
-```
-
-The run directory contains `config.yaml`, `metrics.jsonl`, `summary.json`, and
-`checkpoints/latest.pt`. Resume by setting `runtime.resume_from` in the recipe
-or by editing a copy of the YAML to point at `checkpoints/latest.pt`.
-
-## RLT Stage 2 Agentlace Run
-
-The default real-training path is Agentlace actor-learner. The helper starts a
-LIBERO env server, learner, and actor in one tmux session:
-
-```bash
-scripts/launch_agentlace_rlt.sh \
+examples/libero_rlt/tools/launch_rlt.sh \
   --session vlarl_rlt_task4 \
   --actor-gpu 0 \
   --learner-gpu 1 \
   --env-port 23000 \
+  --policy-port 8899 \
   --trainer-port 5488 \
   --broadcast-port 5489 \
-  --run-dir outputs/libero_spatial_task4_openpi_rlt_agentlace
+  --run-dir outputs/libero_spatial_task4_openpi_rlt
 ```
 
 For a short smoke, pass overrides after `--`:
 
 ```bash
-scripts/launch_agentlace_rlt.sh \
+examples/libero_rlt/tools/launch_rlt.sh \
   --session vlarl_rlt_task4_smoke \
   --actor-gpu 0 \
   --learner-gpu 1 \
-  --run-dir /tmp/vlarl_rlt_agentlace_smoke \
+  --run-dir /tmp/vlarl_rlt_smoke \
   -- \
   runtime.max_env_steps=200 \
   runtime.max_update_steps=200
@@ -131,6 +79,38 @@ scripts/launch_agentlace_rlt.sh \
 The actor sends compact RLT transitions to the learner rather than raw images.
 The learner owns replay, updates, metrics, and checkpoints.
 
-See `docs/runtime/agentlace_rlt.md` for the full runbook, including the
-separate actor/learner Python environments, known dependency requirements, port
-conventions, smoke commands, 1k sanity checks, and how to interpret metrics.
+See `docs/runtime/agentlace_rlt.md` for the full RLT runbook and the exact
+actor/learner data path.
+
+## PLD Stage 1 / Residual RL
+
+VLA-RL implements PLD Stage 1 only: residual RL on top of a frozen OpenPI base
+policy. Stage 2 hybrid data collection and Stage 3 VLA SFT are intentionally
+out of scope for this milestone.
+
+Collect successful base-policy replay:
+
+```bash
+examples/libero_pld/collect_base_success_replay.py \
+  --config examples/libero_pld/configs/libero_spatial_task4_openpi_pld.yaml \
+  --target-successes 50
+```
+
+Run PLD through its example-local launcher:
+
+```bash
+examples/libero_pld/tools/launch_pld.sh \
+  --session vlarl_pld_task4_smoke \
+  --actor-gpu 0 \
+  --learner-gpu 1 \
+  --run-dir /tmp/vlarl_pld_smoke \
+  -- \
+  runtime.max_env_steps=200 \
+  runtime.max_update_steps=200 \
+  runtime.calql_pretrain_steps=10 \
+  runtime.training_starts=10
+```
+
+See `docs/algorithms/pld.md` for the PLD Stage 1 runbook and scope boundary.
+The default PLD recipe follows the existing `serl_torch` PLD configs and uses
+a frozen HuggingFace ResNet-18 image encoder, not torchvision.

@@ -13,7 +13,7 @@ This keeps OpenPI-specific input formatting outside `OpenPIBackend`.
 ## Server
 
 Milestone 1 does not vendor the LIBERO simulator implementation. Start the
-validated server through the compatibility wrapper:
+validated server through the lightweight launcher:
 
 ```bash
 python scripts/serve_libero_env.py \
@@ -23,7 +23,7 @@ python scripts/serve_libero_env.py \
   --gpu-id 0
 ```
 
-The wrapper forwards all unknown arguments to
+The launcher forwards all unknown arguments to
 `examples/libero/scripts/serve_env.py` in the external `serl_torch` checkout.
 
 ## Client Recipe

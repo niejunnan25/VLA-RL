@@ -40,11 +40,10 @@ class CompactTransition:
             raise ValueError(f"executed_steps must be positive, got {self.executed_steps}")
 
     def to_transition(self) -> Transition:
-        self.validate()
         empty_obs = Observation()
         return Transition(
             obs=empty_obs,
-            action=np.asarray(self.action, dtype=np.float32).reshape(-1),
+            action=np.asarray(self.action, dtype=np.float32),
             reward=float(self.reward),
             next_obs=empty_obs,
             done=bool(self.done),
@@ -59,9 +58,7 @@ class CompactTransition:
     def from_payload(cls, payload: "CompactTransition | dict[str, Any]") -> "CompactTransition":
         if isinstance(payload, CompactTransition):
             return payload
-        if not isinstance(payload, dict):
-            raise TypeError(f"expected CompactTransition or dict payload, got {type(payload).__name__}")
-        transition = cls(
+        return cls(
             agent_obs=_copy_agent_obs(payload["agent_obs"]),
             next_agent_obs=None
             if payload.get("next_agent_obs") is None
@@ -75,15 +72,12 @@ class CompactTransition:
             env_steps=int(payload.get("env_steps", 0)),
             info=dict(payload.get("info", {})),
         )
-        transition.validate()
-        return transition
 
     def to_payload(self) -> dict[str, Any]:
-        self.validate()
         return {
             "agent_obs": _copy_agent_obs(self.agent_obs),
             "next_agent_obs": None if self.next_agent_obs is None else _copy_agent_obs(self.next_agent_obs),
-            "action": np.asarray(self.action, dtype=np.float32).reshape(-1),
+            "action": np.asarray(self.action, dtype=np.float32),
             "reward": float(self.reward),
             "done": bool(self.done),
             "truncated": bool(self.truncated),
@@ -124,9 +118,7 @@ class CompactReplayBuffer:
                 raise ValueError("cannot sample from an empty replay buffer")
             indices = self._rng.integers(0, len(self._items), size=int(batch_size))
             compact_batch = [self._items[int(index)] for index in indices]
-        batch = RolloutBatch(transitions=[transition.to_transition() for transition in compact_batch])
-        batch.validate()
-        return batch
+        return RolloutBatch(transitions=[transition.to_transition() for transition in compact_batch])
 
     @property
     def latest_env_steps(self) -> int:
@@ -139,7 +131,7 @@ class CompactReplayBuffer:
 
 
 def _copy_agent_obs(value: dict[str, np.ndarray]) -> dict[str, np.ndarray]:
-    return {str(key): np.asarray(array, dtype=np.float32).reshape(-1).copy() for key, array in value.items()}
+    return {str(key): np.asarray(array, dtype=np.float32).copy() for key, array in value.items()}
 
 
 def _validate_agent_obs(name: str, value: dict[str, np.ndarray]) -> None:

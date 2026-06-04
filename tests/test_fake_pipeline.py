@@ -6,9 +6,9 @@ import numpy as np
 from vla_rl.algorithms.fake import FakeAlgorithm
 from vla_rl.data import RolloutBatch, Transition
 from vla_rl.envs.fake import FakeEnvBackend
-from vla_rl.runtime.local_actor_learner import LocalActorLearnerRunner
+from examples.fake_debug.local_actor_learner import LocalActorLearnerRunner
 from vla_rl.policies.fake import FakePolicyBackend
-from vla_rl.runtime.local_runner import LocalRunner
+from examples.fake_debug.local_runner import LocalRunner
 
 
 def test_fake_components_individually():

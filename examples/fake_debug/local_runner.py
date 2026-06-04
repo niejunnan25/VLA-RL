@@ -38,7 +38,8 @@ class LocalRunner(Runner):
             self.metrics_path.write_text("")
 
         for step in range(self.max_steps):
-            features = self.policy.extract_features(obs)
+            reference = self.policy.sample_actions(obs, task=obs.task)
+            features = self.policy.extract_features(obs, actions=reference)
             action_chunk = self.algorithm.act(obs, features=features)
             action = action_chunk.actions[0]
             next_obs, reward, done, truncated, info = self.env.step(action)

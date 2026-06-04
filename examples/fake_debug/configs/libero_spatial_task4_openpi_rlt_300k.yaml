@@ -85,7 +85,7 @@ eval_env:
   timeout: 120.0
 
 runtime:
-  _target_: vla_rl.runtime.local_actor_learner.LocalActorLearnerRunner
+  _target_: examples.fake_debug.local_actor_learner.LocalActorLearnerRunner
   max_env_steps: 300000
   max_update_steps: 300000
   warmup_steps: 0

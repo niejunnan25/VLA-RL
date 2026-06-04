@@ -1,12 +1,18 @@
-from pathlib import Path
-
 import numpy as np
 
-from vla_rl.algorithms.rlt import RLTAgent, RLTFeatureProcessor, RLTokenEncoder
 from vla_rl.data import CompactReplayBuffer, CompactTransition
-from vla_rl.envs.fake import FakeEnvBackend
-from vla_rl.policies.fake import FakePolicyBackend
-from vla_rl.runtime.agentlace import AgentlaceActorRuntime, AgentlaceLearnerRuntime
+from vla_rl.runtime.agentlace import json_sanitize, make_agentlace_replay_store, make_trainer_config
+
+
+class FakeAgentlace:
+    class DataStoreBase:
+        pass
+
+    class TrainerConfig:
+        def __init__(self, port_number, broadcast_port, request_types):
+            self.port_number = port_number
+            self.broadcast_port = broadcast_port
+            self.request_types = request_types
 
 
 def make_agent_obs(value: float = 0.0) -> dict[str, np.ndarray]:
@@ -65,37 +71,34 @@ def test_compact_terminal_transition_has_no_next_agent_obs():
     assert transition.discount == 0.0
 
 
-def test_agentlace_runtime_constructors_do_not_import_agentlace(tmp_path: Path):
-    agent = RLTAgent(
-        z_rl_dim=16,
-        action_dim=2,
-        chunk_size=4,
-        execute_horizon=2,
-        actor_hidden_dims=(32, 32),
-        critic_hidden_dims=(32, 32),
-        num_critics=2,
-        device="cpu",
-    )
-    learner = AgentlaceLearnerRuntime(
-        algorithm=agent,
-        max_update_steps=1,
-        batch_size=1,
-        run_dir=str(tmp_path / "learner"),
-        trainer_port=15588,
-        broadcast_port=15589,
-    )
-    encoder = RLTokenEncoder(input_dim=16, rl_token_dim=16, num_layers=1, num_heads=4, ff_dim=32)
-    actor = AgentlaceActorRuntime(
-        env=FakeEnvBackend(action_dim=7, proprio_dim=8),
-        policy=FakePolicyBackend(action_dim=7, chunk_size=4, embedding_dim=16),
-        algorithm=agent,
-        feature_processor=RLTFeatureProcessor(device="cpu", chunk_size=4, action_dim=7, encoder=encoder),
-        max_env_steps=1,
-        execute_horizon=1,
-        trainer_port=15588,
-        broadcast_port=15589,
-        run_dir=str(tmp_path / "actor"),
+def test_agentlace_replay_store_helper_inserts_into_replay():
+    replay = CompactReplayBuffer(capacity=8, seed=0)
+    store = make_agentlace_replay_store(FakeAgentlace, replay)
+    transition = CompactTransition(
+        agent_obs=make_agent_obs(0.0),
+        next_agent_obs=make_agent_obs(1.0),
+        action=np.zeros((8,), dtype=np.float32),
+        reward=1.0,
+        done=False,
+        truncated=False,
+        discount=0.99,
+        executed_steps=1,
+        env_steps=1,
     )
 
-    assert learner.max_update_steps == 1
-    assert actor.max_env_steps == 1
+    store.insert(transition.to_payload())
+
+    assert len(store) == 1
+    assert len(replay) == 1
+    assert store.latest_data_id() == 1
+    assert store.get_latest_data(0) == []
+
+
+def test_trainer_config_and_json_sanitize_helpers():
+    cfg = make_trainer_config(FakeAgentlace, 1234, 1235, ["send-stats"])
+    assert cfg.port_number == 1234
+    assert cfg.broadcast_port == 1235
+    assert cfg.request_types == ["send-stats"]
+
+    value = json_sanitize({"x": np.array([1, 2]), "y": np.float32(1.5)})
+    assert value == {"x": [1, 2], "y": 1.5}

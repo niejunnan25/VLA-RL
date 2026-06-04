@@ -5,7 +5,7 @@ import threading
 
 import numpy as np
 
-from vla_rl.algorithms.rlt.reference_policy import ReferencePolicyClient
+from vla_rl.policies.reference import ReferencePolicyClient
 from vla_rl.data import Observation, PolicyFeatures
 from vla_rl.runtime.remote_http import make_pickle_rpc_handler
 

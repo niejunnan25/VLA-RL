@@ -11,7 +11,7 @@ PROJECT_ROOT = Path(__file__).resolve().parents[1]
 if str(PROJECT_ROOT) not in sys.path:
     sys.path.insert(0, str(PROJECT_ROOT))
 
-from vla_rl.algorithms.rlt.reference_policy import create_reference_policy
+from vla_rl.policies.reference import create_reference_policy
 from vla_rl.runtime.remote_http import make_pickle_rpc_handler
 
 

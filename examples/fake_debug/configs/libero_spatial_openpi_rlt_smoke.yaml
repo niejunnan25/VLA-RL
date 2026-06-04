@@ -60,7 +60,7 @@ algorithm:
   device: cuda
 
 runtime:
-  _target_: vla_rl.runtime.local_actor_learner.LocalActorLearnerRunner
+  _target_: examples.fake_debug.local_actor_learner.LocalActorLearnerRunner
   max_env_steps: 200
   max_update_steps: 200
   warmup_steps: 0
