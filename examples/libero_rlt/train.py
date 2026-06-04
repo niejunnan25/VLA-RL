@@ -546,7 +546,7 @@ def create_env(cfg: DictConfig) -> LiberoRemoteEnvBackend:
 def build_reference_policy(cfg: DictConfig) -> ReferencePolicyClient:
     return ReferencePolicyClient(
         **_section_kwargs(
-            _cfg_section(cfg, "reference_policy", "policy"),
+            _cfg_section(cfg, "policy"),
             expected_target="vla_rl.policies.ReferencePolicyClient",
         )
     )
@@ -604,7 +604,7 @@ def encode_rlt_obs(
 def create_rlt_agent(cfg: DictConfig) -> RLTAgent:
     return RLTAgent(
         **_section_kwargs(
-            _cfg_section(cfg, "agent", "algorithm"),
+            _cfg_section(cfg, "algorithm"),
             expected_target="vla_rl.algorithms.rlt.RLTAgent",
         )
     )
@@ -612,7 +612,7 @@ def create_rlt_agent(cfg: DictConfig) -> RLTAgent:
 
 def _validate_rlt_cfg(cfg: DictConfig) -> None:
     rlt_cfg = _rlt_cfg(cfg)
-    agent_cfg = _cfg_section(cfg, "agent", "algorithm")
+    agent_cfg = _cfg_section(cfg, "algorithm")
     runtime = _cfg_section(cfg, "runtime")
     if "execute_horizon" in agent_cfg or "execute_horizon" in runtime:
         raise ValueError("RLT v0 uses chunk_size only; remove execute_horizon from config")

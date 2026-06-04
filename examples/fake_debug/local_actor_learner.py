@@ -130,6 +130,10 @@ class LocalActorLearnerRunner:
             if not terminal and self.feature_processor is not None:
                 next_features = self.policy.extract_features(next_obs)
                 next_processed_obs = self._process_features(next_obs, next_features)
+            if algorithm_state is not None:
+                action_mask = np.zeros_like(actions, dtype=np.float32)
+                action_mask[:executed_steps] = 1.0
+                algorithm_state["action_mask"] = action_mask.reshape(-1)
             transition_obs = algorithm_state if algorithm_state is not None else obs
             transition_next_obs = None if terminal else (next_processed_obs if algorithm_state is not None else next_obs)
             transition = Transition(

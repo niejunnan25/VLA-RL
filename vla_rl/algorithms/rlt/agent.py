@@ -111,19 +111,11 @@ class RLTAgent(Algorithm):
 
     def _convert_batch(self, batch: RolloutBatch) -> dict[str, torch.Tensor]:
         transitions = batch.transitions
-        for transition in transitions:
-            if not isinstance(transition.obs, dict):
-                raise ValueError("RLT replay transition obs must be a dict")
-            if transition.next_obs is None and not (transition.done or transition.truncated):
-                raise ValueError("non-terminal RLT replay transition requires next_obs")
-            if transition.next_obs is not None and not isinstance(transition.next_obs, dict):
-                raise ValueError("RLT replay transition next_obs must be a dict or None")
-
         z_rl = self._stack_obs_key(transitions, "z_rl")
         next_z_rl = self._stack_next_key(transitions, "z_rl")
         ref_action = self._stack_obs_key(transitions, "reference_action")
         next_ref_action = self._stack_next_key(transitions, "reference_action")
-        action_mask = self._stack_action_mask(transitions, ref_action.shape[-1])
+        action_mask = self._stack_action_mask(transitions)
         actions = np.stack([transition.action for transition in transitions]).astype(np.float32)
         actions = actions * action_mask
         rewards = np.asarray([transition.reward for transition in transitions], dtype=np.float32)[:, None]
@@ -188,7 +180,6 @@ class RLTAgent(Algorithm):
     def _stack_obs_key(transitions, key: str) -> np.ndarray:
         values = []
         for transition in transitions:
-            assert isinstance(transition.obs, dict)
             values.append(np.asarray(transition.obs[key], dtype=np.float32).reshape(-1))
         return np.stack(values)
 
@@ -196,18 +187,13 @@ class RLTAgent(Algorithm):
         values = []
         for transition in transitions:
             source = transition.next_obs if transition.next_obs is not None else transition.obs
-            assert isinstance(source, dict)
             values.append(np.asarray(source[key], dtype=np.float32).reshape(-1))
         return np.stack(values)
 
-    def _stack_action_mask(self, transitions, action_dim: int) -> np.ndarray:
+    def _stack_action_mask(self, transitions) -> np.ndarray:
         values = []
         for transition in transitions:
-            assert isinstance(transition.obs, dict)
-            mask = transition.obs.get("action_mask")
-            if mask is None:
-                mask = np.ones((int(action_dim),), dtype=np.float32)
-            values.append(np.asarray(mask, dtype=np.float32).reshape(-1))
+            values.append(np.asarray(transition.obs["action_mask"], dtype=np.float32).reshape(-1))
         return np.stack(values)
 
     def state_dict(self) -> dict:

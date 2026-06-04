@@ -45,8 +45,6 @@ def test_transition_replay_samples_dict_obs_batch():
 
     assert len(replay) == 1
     assert replay.latest_env_steps == 2
-    assert isinstance(transition.obs, dict)
-    assert isinstance(transition.next_obs, dict)
     np.testing.assert_allclose(transition.obs["z_rl"], np.zeros((16,), dtype=np.float32))
     np.testing.assert_allclose(transition.next_obs["z_rl"], np.ones((16,), dtype=np.float32))
 

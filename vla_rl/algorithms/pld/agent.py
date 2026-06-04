@@ -153,6 +153,7 @@ class PLDSACAgent(Algorithm):
         return self.residual_spec.compose_chunk_torch(batch["base_action_chunk"], residual)
 
     def update(self, batch: RolloutBatch) -> dict:
+        batch.validate()
         fb = self._convert_batch(batch)
         info: dict[str, float] = {}
         total_critic_steps = max(1, int(self.utd_ratio))
@@ -175,6 +176,7 @@ class PLDSACAgent(Algorithm):
         calql_n_actions: int | None = None,
         calql_temperature: float | None = None,
     ) -> dict:
+        batch.validate()
         fb = self._convert_batch(batch)
         return self._critic_step(
             fb,
@@ -192,12 +194,10 @@ class PLDSACAgent(Algorithm):
     ) -> dict[str, float]:
         obs = fb["obs"]
         next_obs = fb["next_obs"]
-        assert isinstance(obs, dict) and isinstance(next_obs, dict)
         action = fb["action"]
         reward = fb["reward"]
         done = fb["done"]
         discount = fb["discount"]
-        assert isinstance(action, torch.Tensor)
         with torch.no_grad():
             next_residual, next_log_prob = self.actor.sample(next_obs)
             next_final = self.residual_spec.compose_chunk_torch(next_obs["base_action_chunk"], next_residual).reshape(action.shape[0], -1)
@@ -237,7 +237,6 @@ class PLDSACAgent(Algorithm):
 
     def _actor_step(self, fb: dict[str, torch.Tensor | dict[str, torch.Tensor]]) -> dict[str, float]:
         obs = fb["obs"]
-        assert isinstance(obs, dict)
         residual, log_prob = self.actor.sample(obs)
         final = self.residual_spec.compose_chunk_torch(obs["base_action_chunk"], residual).reshape(residual.shape[0], -1)
         q_values = [critic(obs, final) for critic in self.critics]
@@ -296,11 +295,6 @@ class PLDSACAgent(Algorithm):
 
     def _convert_batch(self, batch: RolloutBatch) -> dict[str, torch.Tensor | dict[str, torch.Tensor]]:
         transitions = batch.transitions
-        for transition in transitions:
-            if not isinstance(transition.obs, dict):
-                raise ValueError("PLD replay transition obs must be a dict")
-            if transition.next_obs is not None and not isinstance(transition.next_obs, dict):
-                raise ValueError("PLD replay transition next_obs must be a dict or None")
         obs = self._obs_to_torch([t.obs for t in transitions])
         next_obs = self._obs_to_torch([(t.next_obs if t.next_obs is not None else t.obs) for t in transitions])
         action = np.stack([np.asarray(t.action, dtype=np.float32).reshape(-1) for t in transitions])

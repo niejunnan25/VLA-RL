@@ -34,6 +34,7 @@ def make_rlt_state(value: float = 0.0) -> dict[str, np.ndarray]:
         "z_rl": np.full((16,), value, dtype=np.float32),
         "reference_action": np.zeros((4,), dtype=np.float32),
         "proprio": np.zeros((3,), dtype=np.float32),
+        "action_mask": np.ones((4,), dtype=np.float32),
     }
 
 
@@ -202,7 +203,6 @@ def test_rlt_actor_summary_read_ignores_partial_json(tmp_path: Path):
 def test_rlt_agent_reads_action_mask_for_bc_loss():
     agent = make_agent()
     transition = make_transition()
-    assert isinstance(transition.obs, dict)
     transition.obs["action_mask"] = np.array([1.0, 1.0, 0.0, 0.0], dtype=np.float32)
     fb = agent._convert_batch(RolloutBatch(transitions=[transition, transition]))
 

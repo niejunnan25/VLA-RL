@@ -396,8 +396,6 @@ def run_actor(cfg: DictConfig) -> dict[str, Any]:
                 with chunk_timer.context("sample_action"):
                     final_actions = agent.sample_action(pld_obs)
             final_actions = np.asarray(final_actions, dtype=np.float32)
-            if final_actions.shape != base_actions.shape:
-                raise ValueError(f"final action shape {final_actions.shape} must match base action shape {base_actions.shape}")
             execute_actions = final_actions
             with chunk_timer.context("env_step_chunk"):
                 next_obs, reward, done, truncated, info = env.step_chunk(execute_actions)
