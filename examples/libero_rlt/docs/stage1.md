@@ -53,6 +53,8 @@ cd /vla/users/niejunnan/codebase/VLA-RL
 
 This 20-step command only validates dataset loading, prefix feature extraction, loss computation, and checkpoint compatibility. It does not produce a useful encoder.
 
+The default `vla.num_steps=1` is intentional for Stage 1. Prefix features are computed before OpenPI action denoising, so extra denoising steps only add cost. Do not set it to `0`: the OpenPI action sampler computes `dt = -1 / num_steps`, and a zero-step action would also make the `predict_action_with_features()` API ambiguous. Stage 2 should still use normal reference-policy inference settings.
+
 ## Stage 2 Smoke With New Checkpoint
 
 ```bash

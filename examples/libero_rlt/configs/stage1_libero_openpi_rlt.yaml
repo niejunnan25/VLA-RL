@@ -11,7 +11,7 @@ vla:
   repo_id_override: null
   lerobot_home: /vla/users/niejunnan/datasets
   device: cuda
-  num_steps: 10
+  num_steps: 1
 
 rlt:
   rl_token_dim: 2048
