@@ -6,6 +6,7 @@ from __future__ import annotations
 import argparse
 import json
 import logging
+import multiprocessing
 import os
 from pathlib import Path
 import sys
@@ -75,6 +76,11 @@ def _write_meta(output_dir: Path, meta: dict[str, Any]) -> None:
     tmp_path.replace(path)
 
 
+def _worker_init(_worker_id: int) -> None:
+    os.environ["XLA_PYTHON_CLIENT_PREALLOCATE"] = "false"
+    os.environ["XLA_PYTHON_CLIENT_ALLOCATOR"] = "platform"
+
+
 def main() -> None:
     cfg = parse_args()
     rank = int(os.environ.get("RANK", "0"))
@@ -119,12 +125,15 @@ def main() -> None:
     max_tokens = cfg.rlt.get("max_tokens", None)
     max_tokens = None if max_tokens is None else int(max_tokens)
     subset = torch.utils.data.Subset(dataset, range(start, end))
+    mp_context = multiprocessing.get_context("spawn") if num_workers > 0 else None
     loader = torch.utils.data.DataLoader(
         subset,
         batch_size=batch_size,
         shuffle=False,
         num_workers=num_workers,
+        multiprocessing_context=mp_context,
         collate_fn=_collate,
+        worker_init_fn=_worker_init,
         drop_last=False,
         persistent_workers=num_workers > 0,
     )
