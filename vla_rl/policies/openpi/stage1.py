@@ -228,6 +228,30 @@ class OpenPIStage1Backend:
             raise ValueError("OpenPI dataloader did not provide normalization stats")
         return dataloader
 
+    def create_dataset(
+        self,
+        *,
+        config_name: str,
+        assets_base_dir: str | None = None,
+        checkpoint_base_dir: str | None = None,
+        exp_name: str | None = None,
+        repo_id_override: str | None = None,
+    ) -> Any:
+        train_cfg = self.create_train_config(
+            config_name=config_name,
+            assets_base_dir=assets_base_dir,
+            checkpoint_base_dir=checkpoint_base_dir,
+            exp_name=exp_name,
+            repo_id_override=repo_id_override,
+        )
+        data_cfg = train_cfg.data.create(train_cfg.assets_dirs, train_cfg.model)
+        dataset = self._data_loader.create_torch_dataset(
+            data_cfg,
+            action_horizon=train_cfg.model.action_horizon,
+            model_config=train_cfg.model,
+        )
+        return self._data_loader.transform_dataset(dataset, data_cfg)
+
     def observation_to_device(self, observation: Any, device: str | torch.device) -> Any:
         torch_device = torch.device(device)
         if hasattr(observation, "to_dict"):
