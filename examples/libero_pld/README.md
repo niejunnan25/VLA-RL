@@ -33,3 +33,8 @@ bash examples/libero_pld/tools/launch_pld.sh \
   --run-dir /tmp/vlarl_pld_task4_smoke \
   -- runtime.max_env_steps=200 runtime.max_update_steps=200
 ```
+
+The checked-in config and launcher defaults use local cluster paths for the
+validated LIBERO server, OpenPI fork, OpenPI checkpoint, and ResNet checkpoint.
+Override `--serl-torch-root`, `--policy-root`, `--policy-checkpoint`, or the
+matching OmegaConf fields when running on another machine.

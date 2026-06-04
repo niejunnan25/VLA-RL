@@ -13,7 +13,7 @@ def parse_args() -> tuple[argparse.Namespace, list[str]]:
     )
     parser.add_argument(
         "--serl-torch-root",
-        default="/vla/users/niejunnan/codebase/serl_torch-rlt-merge",
+        default="/vla/users/niejunnan/codebase/serl_torch",
         help="Path to the validated serl_torch checkout that provides examples/libero/scripts/serve_env.py.",
     )
     args, passthrough = parser.parse_known_args()

@@ -36,3 +36,9 @@ bash examples/libero_rlt/tools/launch_rlt.sh \
 ```
 
 For long runs, remove the short-step overrides or set them to the target budget.
+
+The checked-in config and launcher defaults use local cluster paths for the
+validated LIBERO server, OpenPI fork, OpenPI checkpoint, and an external RLT
+Stage-1 encoder checkpoint. Override `--serl-torch-root`, `--policy-root`,
+`--policy-checkpoint`, or `feature.encoder_path` when using a different machine
+or a newly trained Stage-1 encoder.

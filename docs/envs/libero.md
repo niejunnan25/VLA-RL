@@ -17,7 +17,7 @@ validated server through the lightweight launcher:
 
 ```bash
 python scripts/serve_libero_env.py \
-  --serl-torch-root /vla/users/niejunnan/codebase/serl_torch-rlt-merge \
+  --serl-torch-root /vla/users/niejunnan/codebase/serl_torch \
   --host 127.0.0.1 \
   --port 23000 \
   --gpu-id 0
