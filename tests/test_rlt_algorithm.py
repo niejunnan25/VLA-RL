@@ -12,7 +12,7 @@ from vla_rl.envs.fake import FakeEnvBackend
 from vla_rl.policies.fake import FakePolicyBackend
 from vla_rl.runtime.run_utils import apply_actor_summary_file, read_actor_summary, send_actor_summary
 from examples.fake_debug.local_actor_learner import LocalActorLearnerRunner
-from examples.libero.rlt.scripts import train as rlt_train
+from examples.libero.rlt.scripts import train_stage2 as rlt_train
 
 
 def make_agent() -> RLTAgent:

@@ -46,7 +46,7 @@ Real algorithm entrypoints live under their own examples.
 ## RLT Stage 2 SERL-Style Run
 
 The default real-training path is the LIBERO RLT example. The actor and learner
-loops live directly in `examples/libero/rlt/scripts/train.py`; Agentlace is used only as
+loops live directly in `examples/libero/rlt/scripts/train_stage2.py`; Agentlace is used only as
 transport for RLT transitions and actor-weight broadcasts. The helper
 starts a LIBERO env server, OpenPI reference-policy server, learner, and actor in
 one tmux session:
@@ -136,7 +136,7 @@ a frozen HuggingFace ResNet-18 image encoder, not torchvision.
 RLT and PLD keep evaluation local to their examples:
 
 ```bash
-python examples/libero/rlt/scripts/eval.py --config <config> --checkpoint <checkpoint> --episodes 10 --output-dir <dir>
+python examples/libero/rlt/scripts/eval_stage2.py --config <config> --checkpoint <checkpoint> --episodes 10 --output-dir <dir>
 python examples/libero/pld/scripts/eval.py --config <config> --checkpoint <checkpoint> --episodes 10 --output-dir <dir>
 ```
 

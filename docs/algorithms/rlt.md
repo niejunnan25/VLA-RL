@@ -51,7 +51,7 @@ keep the frozen reference policy separate from the trainable actor/critic.
 The canonical LIBERO RLT path is centered at:
 
 ```text
-examples/libero/rlt/scripts/train.py
+examples/libero/rlt/scripts/train_stage2.py
 examples/libero/rlt/configs/libero_spatial_task4_openpi_rlt.yaml
 examples/libero/rlt/tools/launch_rlt.sh
 ```

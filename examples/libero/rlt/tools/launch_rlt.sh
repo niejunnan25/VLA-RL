@@ -108,9 +108,9 @@ if [[ "$WITH_POLICY_SERVER" == "1" ]]; then
   tmux new-window -t "$SESSION" -n policy     "cd '$ROOT' && CUDA_VISIBLE_DEVICES='$POLICY_GPU' '$POLICY_PYTHON_BIN' scripts/serve_reference_policy.py --policy openpi --policy-root '$POLICY_ROOT' --config-name '$POLICY_CONFIG' --checkpoint-path '$POLICY_CHECKPOINT' --action-dim '$ACTION_DIM' --device cuda --host 127.0.0.1 --port '$POLICY_PORT'"
 fi
 
-tmux new-window -t "$SESSION" -n learner   "cd '$ROOT' && CUDA_VISIBLE_DEVICES='$LEARNER_GPU' '$PYTHON_BIN' examples/libero/rlt/scripts/train.py --role learner --config '$CONFIG' -- ${COMMON_OVERRIDES[*]}"
+tmux new-window -t "$SESSION" -n learner   "cd '$ROOT' && CUDA_VISIBLE_DEVICES='$LEARNER_GPU' '$PYTHON_BIN' examples/libero/rlt/scripts/train_stage2.py --role learner --config '$CONFIG' -- ${COMMON_OVERRIDES[*]}"
 
-tmux new-window -t "$SESSION" -n actor   "cd '$ROOT' && '$PYTHON_BIN' examples/libero/rlt/tools/wait_for_tcp.py --host 127.0.0.1 --ports '$ENV_PORT' '$POLICY_PORT' '$TRAINER_PORT' --timeout-sec '$WAIT_TIMEOUT_SEC' && CUDA_VISIBLE_DEVICES='$ACTOR_GPU' '$PYTHON_BIN' examples/libero/rlt/scripts/train.py --role actor --config '$CONFIG' -- ${COMMON_OVERRIDES[*]}"
+tmux new-window -t "$SESSION" -n actor   "cd '$ROOT' && '$PYTHON_BIN' examples/libero/rlt/tools/wait_for_tcp.py --host 127.0.0.1 --ports '$ENV_PORT' '$POLICY_PORT' '$TRAINER_PORT' --timeout-sec '$WAIT_TIMEOUT_SEC' && CUDA_VISIBLE_DEVICES='$ACTOR_GPU' '$PYTHON_BIN' examples/libero/rlt/scripts/train_stage2.py --role actor --config '$CONFIG' -- ${COMMON_OVERRIDES[*]}"
 
 echo "Started tmux session: $SESSION"
 echo "  env:     GPU $ENV_GPU, port $ENV_PORT"

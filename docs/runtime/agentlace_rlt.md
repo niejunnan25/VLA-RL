@@ -4,7 +4,7 @@ This runbook covers the RLT Stage-2 actor/learner split in VLA-RL. The training
 loop is intentionally owned by the LIBERO example:
 
 ```text
-examples/libero/rlt/scripts/train.py
+examples/libero/rlt/scripts/train_stage2.py
 examples/libero/rlt/tools/launch_rlt.sh
 ```
 

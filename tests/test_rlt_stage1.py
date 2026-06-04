@@ -4,7 +4,7 @@ import numpy as np
 from omegaconf import OmegaConf
 import torch
 
-from examples.libero.rlt.scripts.train_stage1_from_cache import PrefixCache
+from examples.libero.rlt.scripts.train_stage1 import PrefixCache
 from examples.libero.rlt.scripts.train_stage1 import _build_modules, checkpoint_payload
 from vla_rl.algorithms.rlt.features import load_frozen_rlt_encoder
 
@@ -101,7 +101,7 @@ def test_prefix_cache_samples_memmap_rows(tmp_path: Path):
     )
 
     cache = PrefixCache(cache_dir)
-    batch = cache.sample(4, np.random.default_rng(0))
+    batch = next(cache.iter_batches(2, np.random.default_rng(0)))
 
-    assert batch.shape == (4, 2, 4)
+    assert batch.shape == (2, 2, 4)
     assert batch.dtype == torch.float16

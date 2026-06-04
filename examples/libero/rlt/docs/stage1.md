@@ -67,7 +67,7 @@ CUDA_VISIBLE_DEVICES=0,1,2,3,4,5,6,7 \
   -m torch.distributed.run \
   --standalone \
   --nproc_per_node=8 \
-  examples/libero/rlt/scripts/cache_stage1_embeddings.py \
+  examples/libero/rlt/scripts/prepare_stage1_cache.py \
   --config examples/libero/rlt/configs/stage1_libero_openpi_rlt.yaml \
   cache.output_dir=/vla/users/niejunnan/cache/vlarl/rlt_stage1/libero_openpi_prefix_512 \
   cache.batch_size=8 \
@@ -90,8 +90,9 @@ Then train Stage 1 from cached prefix embeddings:
 ```bash
 CUDA_VISIBLE_DEVICES=0 \
 /vla/miniconda3/envs/serl_torch/bin/python \
-  examples/libero/rlt/scripts/train_stage1_from_cache.py \
+  examples/libero/rlt/scripts/train_stage1.py \
   --config examples/libero/rlt/configs/stage1_libero_openpi_rlt.yaml \
+  training.source=cache \
   cache.input_dir=/vla/users/niejunnan/cache/vlarl/rlt_stage1/libero_openpi_prefix_512 \
   training.output_dir=outputs/rlt_stage1/libero_openpi_cached \
   training.steps=20000 \

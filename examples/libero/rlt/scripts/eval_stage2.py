@@ -23,7 +23,7 @@ from examples.libero.rlt.config import (
     load_rl_token_encoder,
     validate_rlt_cfg,
 )
-from examples.libero.rlt.scripts.train import encode_rlt_obs, json_sanitize
+from examples.libero.rlt.scripts.train_stage2 import encode_rlt_obs, json_sanitize
 
 
 def parse_args() -> argparse.Namespace:

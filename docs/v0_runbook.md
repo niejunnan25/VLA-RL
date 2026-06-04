@@ -55,7 +55,7 @@ obs
   -> RLTAgent.update(batch)
 ```
 
-The example owns the actor and learner loops in `examples/libero/rlt/scripts/train.py`.
+The example owns the actor and learner loops in `examples/libero/rlt/scripts/train_stage2.py`.
 `vla_rl.algorithms.rlt` owns the trainable heads and update logic.
 `RLTStateBuilder` remains only for fake/debug local runners; the formal LIBERO
 path uses the explicit `encode_rlt_obs` flow above.
