@@ -26,7 +26,7 @@ from examples.libero.pld.config import (
 )
 from vla_rl.algorithms.pld import build_pld_obs, load_pld_offline_replay
 from vla_rl.data import MixedReplaySampler, ReplayBuffer, Transition
-from vla_rl.runtime.agentlace import import_agentlace, json_sanitize, make_agentlace_replay_store, make_trainer_config
+from vla_rl.runtime.agentlace import import_agentlace, json_sanitize, make_agentlace_replay_store
 from vla_rl.runtime.checkpoint import CheckpointManager
 from vla_rl.runtime.wandb import make_wandb_logger
 from vla_rl.runtime.timer import Timer
@@ -127,10 +127,12 @@ def run_learner(cfg: DictConfig) -> dict[str, Any]:
         write_metric(stat)
         return {"ok": True}
 
-    server = agentlace.TrainerServer(
-        make_trainer_config(agentlace, int(runtime.trainer_port), int(runtime.broadcast_port), [str(runtime.request_type)]),
-        request_callback=request_callback,
+    trainer_config = agentlace.TrainerConfig(
+        port_number=int(runtime.trainer_port),
+        broadcast_port=int(runtime.broadcast_port),
+        request_types=[str(runtime.request_type)],
     )
+    server = agentlace.TrainerServer(trainer_config, request_callback=request_callback)
     server.register_data_store(str(runtime.store_name), make_agentlace_replay_store(agentlace, replay))
     server.start(threaded=True)
     sampler = MixedReplaySampler(
@@ -343,22 +345,27 @@ def run_actor(cfg: DictConfig) -> dict[str, Any]:
     write_actor_metric = make_jsonl_metric_writer(run_dir, "actor_metrics.jsonl")
 
     data_store = agentlace.QueuedDataStore(int(runtime.actor_queue_capacity))
+    trainer_config = agentlace.TrainerConfig(
+        port_number=int(runtime.trainer_port),
+        broadcast_port=int(runtime.broadcast_port),
+        request_types=[str(runtime.request_type)],
+    )
     client = agentlace.TrainerClient(
         str(runtime.actor_name),
         str(runtime.trainer_ip),
-        make_trainer_config(agentlace, int(runtime.trainer_port), int(runtime.broadcast_port), [str(runtime.request_type)]),
+        trainer_config,
         data_store,
         wait_for_server=True,
     )
     has_policy_state = False
 
-    def network_callback(payload: dict[str, Any]) -> None:
+    def update_actor(payload: dict[str, Any]) -> None:
         nonlocal has_policy_state
         if payload is not None:
             agent.load_policy_state_dict(payload)
             has_policy_state = True
 
-    client.recv_network_callback(network_callback)
+    client.recv_network_callback(update_actor)
     _wait_for_initial_weights(
         client,
         has_policy_state_fn=lambda: has_policy_state,
