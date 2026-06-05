@@ -55,9 +55,9 @@ This 20-step command only validates dataset loading, prefix feature extraction, 
 
 The default `vla.num_steps=1` is intentional for Stage 1. Prefix features are computed before OpenPI action denoising, so extra denoising steps only add cost. Do not set it to `0`: the OpenPI action sampler computes `dt = -1 / num_steps`, and a zero-step action would also make the `predict_action_with_features()` API ambiguous. Stage 2 should still use normal reference-policy inference settings.
 
-## Cached Feature Path
+## Full Online Stage 1 Run
 
-For full Stage 1 runs, cache every dataset row's frozen OpenPI prefix embedding once, then train the encoder/decoder from the cache. The cache pass is deterministic over dataset indices; sampling happens only during encoder/decoder training.
+For full Stage 1 runs, train the encoder/decoder directly from frozen OpenPI prefix features. This path keeps the OpenPI policy frozen and does not write an intermediate prefix cache.
 
 ```bash
 cd /vla/users/niejunnan/codebase/VLA-RL
@@ -67,36 +67,14 @@ CUDA_VISIBLE_DEVICES=0,1,2,3,4,5,6,7 \
   -m torch.distributed.run \
   --standalone \
   --nproc_per_node=8 \
-  examples/libero/rlt/scripts/prepare_stage1_cache.py \
-  --config examples/libero/rlt/configs/stage1_libero_openpi_rlt.yaml \
-  cache.output_dir=/vla/users/niejunnan/cache/vlarl/rlt_stage1/libero_openpi_prefix_512 \
-  cache.batch_size=8 \
-  cache.num_workers=2 \
-  rlt.max_tokens=512
-```
-
-The cache stores one memmap per rank:
-
-```text
-meta.json
-prefix_rank00.npy
-prefix_rank01.npy
-...
-prefix_rank07.npy
-```
-
-Then train Stage 1 from cached prefix embeddings:
-
-```bash
-CUDA_VISIBLE_DEVICES=0 \
-/vla/miniconda3/envs/serl_torch/bin/python \
   examples/libero/rlt/scripts/train_stage1.py \
   --config examples/libero/rlt/configs/stage1_libero_openpi_rlt.yaml \
-  training.source=cache \
-  cache.input_dir=/vla/users/niejunnan/cache/vlarl/rlt_stage1/libero_openpi_prefix_512 \
-  training.output_dir=outputs/rlt_stage1/libero_openpi_cached \
+  training.output_dir=/vla/users/niejunnan/outputs/vlarl/rlt_stage1/libero10_scene6_ours_online_ddp \
   training.steps=20000 \
-  training.batch_size=128
+  training.batch_size=16 \
+  training.save_every=2000 \
+  training.log_every=50 \
+  training.lr=4.0e-4
 ```
 
 ## Stage 2 Smoke With New Checkpoint

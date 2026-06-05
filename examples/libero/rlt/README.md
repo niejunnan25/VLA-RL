@@ -63,9 +63,9 @@ python examples/libero/rlt/scripts/eval_stage2.py \
 
 The evaluator writes `eval_summary.json` and `eval_episodes.jsonl`. Video saving is optional and disabled by default.
 
-## Stage 1 Cache, Training, and Stage 2 Commands
+## Stage 1 and Stage 2 Commands
 
-Prepare the full LIBERO prefix-feature cache with OpenPI on 8 GPUs:
+Train the Stage 1 RLToken encoder/decoder online from frozen OpenPI prefix features. This path loads OpenPI in the OpenPI-capable Python environment and does not use a prefix cache:
 
 ```bash
 cd /vla/users/niejunnan/codebase/VLA-RL
@@ -75,28 +75,9 @@ CUDA_VISIBLE_DEVICES=0,1,2,3,4,5,6,7 \
   -m torch.distributed.run \
   --standalone \
   --nproc_per_node=8 \
-  examples/libero/rlt/scripts/prepare_stage1_cache.py \
-  --config examples/libero/rlt/configs/stage1_libero_openpi_rlt.yaml \
-  cache.output_dir=/vla/users/niejunnan/cache/vlarl/rlt_stage1/libero_openpi_prefix_512 \
-  cache.batch_size=8 \
-  cache.num_workers=2 \
-  rlt.max_tokens=512
-```
-
-Train the Stage 1 RLToken encoder/decoder from the cached prefix features with 8-card DDP. `training.batch_size=16` is per GPU, so the global batch size is `16 * 8 = 128`:
-
-```bash
-cd /vla/users/niejunnan/codebase/VLA-RL
-
-CUDA_VISIBLE_DEVICES=0,1,2,3,4,5,6,7 \
-/vla/miniconda3/envs/serl_torch/bin/python -m torch.distributed.run \
-  --standalone \
-  --nproc_per_node=8 \
   examples/libero/rlt/scripts/train_stage1.py \
   --config examples/libero/rlt/configs/stage1_libero_openpi_rlt.yaml \
-  training.source=cache \
-  cache.input_dir=/vla/users/niejunnan/cache/vlarl/rlt_stage1/libero_openpi_prefix_512 \
-  training.output_dir=/vla/users/niejunnan/outputs/vlarl/rlt_stage1/libero_openpi_prefix_512_ddp_v2 \
+  training.output_dir=/vla/users/niejunnan/outputs/vlarl/rlt_stage1/libero10_scene6_ours_online_ddp \
   training.steps=20000 \
   training.batch_size=16 \
   training.save_every=2000 \
@@ -122,10 +103,8 @@ bash examples/libero/rlt/tools/launch_rlt.sh \
   --run-dir /tmp/vlarl_rlt_stage2_task4 \
   --python /vla/miniconda3/envs/serl_torch/bin/python \
   -- \
-  feature.encoder_path=/vla/users/niejunnan/outputs/vlarl/rlt_stage1/libero_openpi_prefix_512_ddp_v2/final_model.pt \
+  feature.encoder_path=/vla/users/niejunnan/outputs/vlarl/rlt_stage1/libero10_scene6_ours_online_ddp/final_model.pt \
   runtime.max_env_steps=1000 \
   runtime.max_update_steps=1000 \
   runtime.checkpoint_period=2000
 ```
-
-The cache stores prefix features as `float16` on disk. Stage 1 training moves cached prefixes to GPU as `float32`, matching the original online Stage 1 path where `_truncate_prefix(...)` also converts OpenPI prefix features to `float32`. Distributed Stage 1 defaults to `fp32` math because `bf16` autocast with DDP is unstable on the current 225 environment; single-GPU cache training can still use `bf16` autocast by default.

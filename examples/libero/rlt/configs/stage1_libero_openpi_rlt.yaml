@@ -20,10 +20,9 @@ rlt:
   num_heads: 8
   ff_dim: 2048
   dropout: 0.0
-  max_tokens: 512
+  max_tokens: null
 
 training:
-  source: online
   output_dir: outputs/rlt_stage1/libero_openpi
   steps: 20000
   batch_size: 128
@@ -35,9 +34,3 @@ training:
   num_workers: 4
   clip_grad_norm: 1.0
   shuffle: true
-
-cache:
-  output_dir: outputs/rlt_stage1_cache/libero_openpi_prefix
-  input_dir: outputs/rlt_stage1_cache/libero_openpi_prefix
-  batch_size: 8
-  num_workers: 0

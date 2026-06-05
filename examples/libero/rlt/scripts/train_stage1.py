@@ -61,41 +61,12 @@ def _lr_factor(step: int, *, total_steps: int, warmup_steps: int) -> float:
     return 0.5 * (1.0 + math.cos(math.pi * min(1.0, max(0.0, progress))))
 
 
-def _truncate_prefix(prefix: torch.Tensor, max_tokens: int | None) -> torch.Tensor:
+def _stage1_prefix_target(prefix: torch.Tensor, max_tokens: int | None) -> torch.Tensor:
     if prefix.dim() != 3:
         raise ValueError(f"prefix features must be [B, T, D], got {tuple(prefix.shape)}")
     if max_tokens is not None and max_tokens > 0:
         prefix = prefix[:, : int(max_tokens), :]
     return prefix.detach().to(torch.float32)
-
-
-class PrefixCache:
-    def __init__(self, cache_dir: str | Path) -> None:
-        self.cache_dir = Path(cache_dir).expanduser().resolve()
-        self.meta = json.loads((self.cache_dir / "meta.json").read_text())
-        self.total_samples = int(self.meta["total_samples"])
-        self.max_tokens = int(self.meta["max_tokens"])
-        self.input_dim = int(self.meta["input_dim"])
-        self._ranks = list(self.meta["ranks"])
-        self._arrays = [np.load(self.cache_dir / str(rank_meta["path"]), mmap_mode="r") for rank_meta in self._ranks]
-        self._starts = np.asarray([int(rank_meta["start"]) for rank_meta in self._ranks], dtype=np.int64)
-        self._ends = np.asarray([int(rank_meta["end"]) for rank_meta in self._ranks], dtype=np.int64)
-
-    def iter_batches(self, batch_size: int, rng: np.random.Generator, rank: int = 0, world_size: int = 1):
-        blocks = []
-        for rank_idx, array in enumerate(self._arrays):
-            local_count = int(array.shape[0])
-            for start in range(0, local_count - int(batch_size) + 1, int(batch_size)):
-                blocks.append((rank_idx, start))
-        while True:
-            rng.shuffle(blocks)
-            for block_index, (rank_idx, start) in enumerate(blocks):
-                if block_index % int(world_size) != int(rank):
-                    continue
-                array = self._arrays[rank_idx]
-                out = np.empty((int(batch_size), self.max_tokens, self.input_dim), dtype=np.float16)
-                out[:] = array[start : start + int(batch_size)]
-                yield torch.from_numpy(out)
 
 
 def _build_modules(cfg: Any, input_dim: int, device: torch.device):
@@ -177,7 +148,6 @@ def main() -> None:
 
     np.random.seed(int(cfg.global_seed) + rank)
     torch.manual_seed(int(cfg.global_seed) + rank)
-    source = str(cfg.training.get("source", "online"))
 
     lerobot_home = _optional_str(cfg.vla.get("lerobot_home", None))
     if lerobot_home:
@@ -196,50 +166,28 @@ def main() -> None:
 
     encoder = decoder = optimizer = scheduler = None
     input_dim = None
-    backend = base_policy = data_iter = None
-    cache = None
-    cache_iter = None
-    if source == "cache":
-        cache = PrefixCache(cfg.cache.input_dir)
-        cfg.rlt.max_tokens = cache.max_tokens
-        rng = np.random.default_rng(int(cfg.global_seed) + rank)
-        cache_iter = cache.iter_batches(int(cfg.training.batch_size), rng, rank=rank, world_size=world_size)
-        input_dim = cache.input_dim
-        encoder, decoder, optimizer, scheduler = _build_modules(cfg, input_dim, device)
-        if is_main:
-            logger.info(
-                "Training RLT Stage 1 from cache: samples=%d tokens=%d input_dim=%d world_size=%d per_rank_batch=%d",
-                cache.total_samples,
-                cache.max_tokens,
-                cache.input_dim,
-                world_size,
-                int(cfg.training.batch_size),
-            )
-    elif source == "online":
-        from vla_rl.policies.openpi.stage1 import OpenPIStage1Backend
+    from vla_rl.policies.openpi.stage1 import OpenPIStage1Backend
 
-        backend = OpenPIStage1Backend(openpi_root=_optional_str(cfg.vla.openpi_root))
-        base_policy = backend.load_base_policy(
-            config_name=str(cfg.vla.config_name),
-            checkpoint_path=str(cfg.vla.checkpoint_path),
-            device=device,
-            assets_base_dir=_optional_str(cfg.vla.assets_base_dir),
-            checkpoint_base_dir=_optional_str(cfg.vla.checkpoint_base_dir),
-            exp_name=_optional_str(cfg.vla.exp_name),
-        )
-        dataloader = backend.create_dataloader(
-            config_name=str(cfg.vla.config_name),
-            batch_size=int(cfg.training.batch_size),
-            num_workers=int(cfg.training.num_workers),
-            assets_base_dir=_optional_str(cfg.vla.assets_base_dir),
-            checkpoint_base_dir=_optional_str(cfg.vla.checkpoint_base_dir),
-            exp_name=_optional_str(cfg.vla.exp_name),
-            repo_id_override=_optional_str(cfg.vla.get("repo_id_override", None)),
-            shuffle=bool(cfg.training.shuffle),
-        )
-        data_iter = iter(dataloader)
-    else:
-        raise ValueError(f"training.source must be online or cache, got {source!r}")
+    backend = OpenPIStage1Backend(openpi_root=_optional_str(cfg.vla.openpi_root))
+    base_policy = backend.load_base_policy(
+        config_name=str(cfg.vla.config_name),
+        checkpoint_path=str(cfg.vla.checkpoint_path),
+        device=device,
+        assets_base_dir=_optional_str(cfg.vla.assets_base_dir),
+        checkpoint_base_dir=_optional_str(cfg.vla.checkpoint_base_dir),
+        exp_name=_optional_str(cfg.vla.exp_name),
+    )
+    dataloader = backend.create_dataloader(
+        config_name=str(cfg.vla.config_name),
+        batch_size=int(cfg.training.batch_size),
+        num_workers=int(cfg.training.num_workers),
+        assets_base_dir=_optional_str(cfg.vla.assets_base_dir),
+        checkpoint_base_dir=_optional_str(cfg.vla.checkpoint_base_dir),
+        exp_name=_optional_str(cfg.vla.exp_name),
+        repo_id_override=_optional_str(cfg.vla.get("repo_id_override", None)),
+        shuffle=bool(cfg.training.shuffle),
+    )
+    data_iter = iter(dataloader)
 
     if is_main:
         with (output_dir / "config.json").open("w", encoding="utf-8") as f:
@@ -256,29 +204,22 @@ def main() -> None:
     precision = str(cfg.training.get("precision", default_precision))
     autocast_enabled = bool(device.type == "cuda" and precision == "bf16")
 
-    if encoder is not None and distributed:
-        encoder = DistributedDataParallel(encoder, device_ids=[local_rank])
-        decoder = DistributedDataParallel(decoder, device_ids=[local_rank])
-
     if is_main:
-        logger.info("Starting RLT Stage 1 prefix reconstruction from %s for %d steps", source, steps)
+        logger.info("Starting RLT Stage 1 online prefix reconstruction for %d steps", steps)
         logger.info("Stage 1 precision=%s autocast=%s distributed=%s world_size=%d", precision, autocast_enabled, distributed, world_size)
     progress = tqdm(range(steps), desc="rlt-stage1", dynamic_ncols=True, disable=not is_main)
     for global_step in progress:
         step_started_at = time.perf_counter()
-        if source == "cache":
-            z_vla = next(cache_iter).to(device=device, dtype=torch.float32, non_blocking=True)
-        else:
-            try:
-                observation, _actions = next(data_iter)
-            except StopIteration:
-                data_iter = iter(dataloader)
-                observation, _actions = next(data_iter)
+        try:
+            observation, _actions = next(data_iter)
+        except StopIteration:
+            data_iter = iter(dataloader)
+            observation, _actions = next(data_iter)
 
-            obs_obj = backend.observation_to_device(observation, device)
-            with torch.no_grad():
-                prefix = base_policy.extract_prefix_features(obs_obj, num_steps=int(cfg.vla.num_steps))
-                z_vla = _truncate_prefix(prefix, max_tokens=max_tokens)
+        obs_obj = backend.observation_to_device(observation, device)
+        with torch.no_grad():
+            prefix = base_policy.extract_prefix_features(obs_obj, num_steps=int(cfg.vla.num_steps))
+            z_vla = _stage1_prefix_target(prefix, max_tokens=max_tokens)
 
         if encoder is None:
             input_dim = int(z_vla.shape[-1])
