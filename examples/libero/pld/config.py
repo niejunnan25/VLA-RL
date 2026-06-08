@@ -7,8 +7,8 @@ from omegaconf import DictConfig, OmegaConf
 
 from vla_rl.algorithms.pld import PLDObservationBuilder, PLDSACAgent, pld_base_action_prefix
 from vla_rl.data import Observation
-from vla_rl.envs import FakeEnvBackend, LiberoRemoteEnvBackend
-from vla_rl.policies import FakePolicyBackend, ReferencePolicyClient
+from vla_rl.envs.libero import LiberoRemoteEnvBackend
+from vla_rl.policies import ReferencePolicyClient
 
 
 def load_config(path: str, overrides: list[str]) -> DictConfig:
@@ -25,7 +25,6 @@ def create_env(cfg: DictConfig):
     return _create_from_section(
         cfg.env,
         {
-            "vla_rl.envs.fake.FakeEnvBackend": FakeEnvBackend,
             "vla_rl.envs.libero.LiberoRemoteEnvBackend": LiberoRemoteEnvBackend,
         },
     )
@@ -35,7 +34,6 @@ def create_reference_policy(cfg: DictConfig):
     return _create_from_section(
         cfg.policy,
         {
-            "vla_rl.policies.fake.FakePolicyBackend": FakePolicyBackend,
             "vla_rl.policies.ReferencePolicyClient": ReferencePolicyClient,
         },
     )

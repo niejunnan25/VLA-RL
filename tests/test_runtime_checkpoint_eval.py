@@ -2,7 +2,7 @@ from pathlib import Path
 
 import numpy as np
 
-from vla_rl.algorithms.fake import FakeAlgorithm
+from tests.fakes import FakeAlgorithm
 from vla_rl.algorithms.rlt import RLTAgent
 from vla_rl.runtime import CheckpointManager
 

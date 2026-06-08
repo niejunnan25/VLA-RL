@@ -26,7 +26,7 @@ def test_policies_root_is_training_side_only():
 import sys
 import vla_rl.policies as policies
 
-assert sorted(policies.__all__) == ["FakePolicyBackend", "PolicyBackend", "ReferencePolicyClient"]
+assert sorted(policies.__all__) == ["PolicyBackend", "ReferencePolicyClient"]
 assert not hasattr(policies, "OpenPIBackend")
 assert not hasattr(policies, "create_reference_policy")
 assert "vla_rl.policies.openpi" not in sys.modules
@@ -42,7 +42,6 @@ import sys
 import vla_rl.envs as envs
 
 assert "EnvBackend" in envs.__all__
-assert "FakeEnvBackend" in envs.__all__
 assert "LiberoRemoteEnvBackend" in envs.__all__
 
 for module_name in ("libero", "robosuite", "mujoco", "gym", "gymnasium"):
@@ -56,7 +55,7 @@ def test_algorithms_root_exports_algorithm_entrypoints_without_runners():
         """
 import vla_rl.algorithms as algorithms
 
-assert sorted(algorithms.__all__) == ["Algorithm", "FakeAlgorithm"]
+assert sorted(algorithms.__all__) == ["Algorithm"]
 for name in (
     "PLDObservationBuilder",
     "PLDSACAgent",

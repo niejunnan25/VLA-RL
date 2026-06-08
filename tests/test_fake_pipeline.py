@@ -1,9 +1,9 @@
 import numpy as np
 
-from vla_rl.algorithms.fake import FakeAlgorithm
+from tests.fakes import FakeAlgorithm
 from vla_rl.data import RolloutBatch, Transition
-from vla_rl.envs.fake import FakeEnvBackend
-from vla_rl.policies.fake import FakePolicyBackend
+from tests.fakes import FakeEnvBackend
+from tests.fakes import FakePolicyBackend
 
 
 def test_fake_components_individually():

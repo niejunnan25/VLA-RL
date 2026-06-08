@@ -7,8 +7,6 @@ from vla_rl.algorithms.pld import PLDObservationBuilder, PLDSACAgent, ResidualAc
 from vla_rl.algorithms.pld.modeling import PLDObsEncoder
 from vla_rl.algorithms.pld.replay import load_pld_offline_replay, write_pld_offline_episode
 from vla_rl.data import MixedReplaySampler, Observation, PolicyFeatures, ReplayBuffer, RolloutBatch, Transition
-from vla_rl.envs.fake import FakeEnvBackend
-from vla_rl.policies.fake import FakePolicyBackend
 from vla_rl.runtime.run_utils import apply_actor_summary_file, read_actor_summary, send_actor_summary
 from examples.libero.pld import config as pld_config
 from examples.libero.pld.scripts import train as pld_train
@@ -66,6 +64,39 @@ def make_agent() -> PLDSACAgent:
         utd_ratio=1,
         cql_n_actions=2,
         device="cpu",
+    )
+
+
+def make_pld_config():
+    return OmegaConf.create(
+        {
+            "pld_observation": {
+                "_target_": "vla_rl.algorithms.pld.PLDObservationBuilder",
+                "image_keys": ["front"],
+                "action_dim": 4,
+                "chunk_horizon": 1,
+                "alpha": 0.5,
+            },
+            "algorithm": {
+                "_target_": "vla_rl.algorithms.pld.PLDSACAgent",
+                "image_keys": ["front"],
+                "proprio_dim": 5,
+                "action_dim": 4,
+                "chunk_horizon": 1,
+                "alpha": 0.5,
+                "image_encoder_type": "small",
+                "image_feature_dim": 8,
+                "vector_latent_dim": 6,
+                "encoder_hidden_dim": 32,
+                "actor_hidden_dims": [32],
+                "critic_hidden_dims": [32],
+                "critic_actor_ratio": 1,
+                "utd_ratio": 1,
+                "cql_n_actions": 2,
+                "device": "cpu",
+            },
+            "runtime": {"execute_horizon": 1},
+        }
     )
 
 
@@ -161,7 +192,7 @@ def test_pld_agent_act_update_calql_and_terminal_no_bootstrap():
 
 
 def test_pld_train_config_uses_explicit_builders():
-    cfg = OmegaConf.load("examples/libero/pld/configs/fake_pld_smoke.yaml")
+    cfg = make_pld_config()
 
     pld_config.validate_pld_cfg(cfg)
     agent = pld_config.create_pld_agent(cfg)
@@ -172,7 +203,7 @@ def test_pld_train_config_uses_explicit_builders():
 
 
 def test_pld_config_validation_rejects_horizon_mismatch():
-    cfg = OmegaConf.load("examples/libero/pld/configs/fake_pld_smoke.yaml")
+    cfg = make_pld_config()
     cfg.runtime.execute_horizon = 2
 
     with pytest.raises(ValueError, match="chunk_horizon must match runtime.execute_horizon"):
