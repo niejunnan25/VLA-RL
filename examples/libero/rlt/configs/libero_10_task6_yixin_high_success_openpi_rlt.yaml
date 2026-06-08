@@ -19,13 +19,13 @@ policy:
   _target_: vla_rl.policies.ReferencePolicyClient
   url: http://127.0.0.1:8899
   action_dim: 7
-  timeout: 900.0
-  retries: 1
+  timeout: 120.0
+  retries: 3
   retry_sleep: 1.0
 
 rlt:
-  chunk_size: 5
-  subsample_stride: 2
+  chunk_size: 10
+  replan_steps: 5
   max_tokens: null
 
 feature:
@@ -46,7 +46,7 @@ algorithm:
   z_rl_dim: 2048
   proprio_dim: 8
   action_dim: 7
-  chunk_size: 5
+  chunk_size: 10
   actor_hidden_dims: [512, 512, 512]
   critic_hidden_dims: [512, 512, 512]
   actor_std: 0.01

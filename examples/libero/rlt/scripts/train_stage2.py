@@ -473,6 +473,7 @@ def run_actor(cfg: DictConfig) -> dict[str, Any]:
         timer = Timer()
         rlt = rlt_cfg(cfg)
         chunk_size = int(rlt.chunk_size)
+        replan_steps = int(rlt.get("replan_steps", 5))
         subsample_stride = int(rlt.get("subsample_stride", 0) or 0)
         window_replay_enabled = subsample_stride > 1
         pending_chunk: dict[str, Any] | None = None
@@ -517,7 +518,7 @@ def run_actor(cfg: DictConfig) -> dict[str, Any]:
             chunk_success = False
             window_start_rlt_obs: list[dict[str, np.ndarray]] = []
             remaining_env_steps = int(runtime.max_env_steps) - env_steps
-            actions_to_execute = actions[: min(chunk_size, remaining_env_steps)]
+            actions_to_execute = actions[: min(replan_steps, remaining_env_steps)]
 
             with timer.context("step_env"):
                 next_obs, _, done, truncated, info = env.step_chunk(actions_to_execute, return_steps=True)
@@ -614,6 +615,7 @@ def run_actor(cfg: DictConfig) -> dict[str, Any]:
                         "env_steps": env_steps,
                         "info": dict(info),
                         "chunk_start_env_steps": chunk_start_env_steps,
+                        "replan_steps": replan_steps,
                     }
                     if terminal or env_steps >= int(runtime.max_env_steps):
                         inserted_transitions += _insert_window_replay_transitions(
@@ -637,7 +639,7 @@ def run_actor(cfg: DictConfig) -> dict[str, Any]:
                         discount=0.0 if terminal else float(runtime.gamma) ** chunk_size,
                         executed_steps=executed_steps,
                         env_steps=env_steps,
-                        info={**info, "chunk_start_env_steps": chunk_start_env_steps},
+                        info={**info, "chunk_start_env_steps": chunk_start_env_steps, "replan_steps": replan_steps},
                     )
                     data_store.insert(transition.to_payload())
                     inserted_transitions = 1
