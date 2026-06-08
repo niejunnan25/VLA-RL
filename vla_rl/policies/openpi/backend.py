@@ -56,6 +56,14 @@ class _OpenPIFeatureBatch:
     reference_actions: np.ndarray
 
 
+def _openpi_feature_method(feature_source: str) -> str:
+    if feature_source == "policy_prior_prefix":
+        return "predict_action_with_features"
+    if feature_source == "self_conditioned_prefix":
+        return "predict_action_with_self_conditioned_features"
+    raise ValueError(f"OpenPI online feature_source must be policy_prior_prefix or self_conditioned_prefix, got {feature_source}")
+
+
 class _OpenPIBasePolicy:
     def __init__(self, policy: Any, observation_cls: Any, device: str | torch.device) -> None:
         self.policy = policy
@@ -82,31 +90,34 @@ class _OpenPIBasePolicy:
         return np.asarray(self.policy._output_transform(out)["actions"], dtype=np.float32)
 
     @torch.no_grad()
-    def infer_features(self, raw_obs: dict[str, Any], num_steps: int = 10) -> _OpenPIFeatureBatch:
+    def infer_features(
+        self,
+        raw_obs: dict[str, Any],
+        num_steps: int = 10,
+        feature_source: str = "policy_prior_prefix",
+    ) -> _OpenPIFeatureBatch:
         obs_torch = self.raw_obs_to_torch(raw_obs)
         obs_obj = self.to_observation(obs_torch)
-        if not hasattr(self.model, "predict_action_with_features"):
-            raise RuntimeError(
-                "OpenPI model does not expose predict_action_with_features(). "
-                "Use the OpenPI RLT branch that returns reference actions and prefix features in one forward pass."
-            )
-        out = self.model.predict_action_with_features(
+        method_name = _openpi_feature_method(str(feature_source))
+        method = getattr(self.model, method_name)
+        out = method(
             device=self.device,
             observation=obs_obj,
             noise=None,
             num_steps=num_steps,
         )
         if not isinstance(out, dict) or "actions" not in out or "features" not in out:
-            raise RuntimeError("predict_action_with_features() must return a dict with 'actions' and 'features'")
+            raise RuntimeError(f"{method_name}() must return a dict with actions and features")
         features = out["features"]
         if not isinstance(features, dict) or "prefix" not in features:
-            raise RuntimeError("predict_action_with_features()['features'] must contain 'prefix'")
+            raise RuntimeError(f"{method_name}()['features'] must contain 'prefix'")
         ref_actions = out["actions"]
         unnorm_actions = self._unnormalize_actions(obs_torch, ref_actions)
         return _OpenPIFeatureBatch(
             prefix=torch.as_tensor(features["prefix"], device=self.device).to(torch.float32),
             reference_actions=unnorm_actions,
         )
+
 
     def sample_actions(self, raw_obs: dict[str, Any], **kwargs) -> np.ndarray:
         num_steps = int(kwargs.pop("num_steps", 10))
@@ -153,41 +164,43 @@ class OpenPIBackend(PolicyBackend):
         actions: np.ndarray | None = None,
         **kwargs,
     ) -> PolicyFeatures:
+        feature_source = str(kwargs.pop("feature_source", "policy_prior_prefix"))
+        num_steps = int(kwargs.pop("num_steps", 10))
         if hasattr(self.policy, "infer_features"):
             openpi_obs = self._to_openpi_observation(obs, task=obs.task)
-            feature_batch = self.policy.infer_features(openpi_obs)
+            feature_batch = self.policy.infer_features(
+                openpi_obs,
+                num_steps=num_steps,
+                feature_source=feature_source,
+            )
             features = PolicyFeatures(
                 reference_actions=self._normalize_reference_actions(feature_batch.reference_actions),
                 embeddings={
                     "prefix": self._to_numpy(feature_batch.prefix),
                 },
                 proprio=obs.proprio.copy() if obs.proprio is not None else None,
-                metadata=self._metadata(),
+                metadata=self._metadata(feature_source=feature_source),
             )
             features.validate()
             return features
 
-        if not hasattr(self.policy, "predict_action_with_features"):
-            raise RuntimeError(
-                "OpenPI policy does not expose predict_action_with_features(). "
-                "Use the OpenPI RLT branch that returns reference actions and prefix features in one call."
-            )
-
         openpi_obs = self._to_openpi_observation(obs, task=obs.task)
         del actions
-        out = self.policy.predict_action_with_features(openpi_obs, **kwargs)
+        method_name = _openpi_feature_method(feature_source)
+        method = getattr(self.policy, method_name)
+        out = method(openpi_obs, num_steps=num_steps, **kwargs)
         if not isinstance(out, dict) or "actions" not in out or "features" not in out:
-            raise RuntimeError("predict_action_with_features() must return a dict with 'actions' and 'features'")
+            raise RuntimeError(f"{method_name}() must return a dict with actions and features")
         feature_dict = out["features"]
         if not isinstance(feature_dict, dict) or "prefix" not in feature_dict:
-            raise RuntimeError("predict_action_with_features()['features'] must contain 'prefix'")
+            raise RuntimeError(f"{method_name}()['features'] must contain 'prefix'")
         features = PolicyFeatures(
             reference_actions=self._normalize_reference_actions(out["actions"]),
             embeddings={
                 "prefix": self._to_numpy(feature_dict["prefix"]),
             },
             proprio=obs.proprio.copy() if obs.proprio is not None else None,
-            metadata=self._metadata(),
+            metadata=self._metadata(feature_source=feature_source),
         )
         features.validate()
         return features
@@ -273,12 +286,15 @@ class OpenPIBackend(PolicyBackend):
             raise ValueError(f"reference actions must be [T, D], got shape={array.shape}")
         return array
 
-    def _metadata(self) -> dict[str, Any]:
-        return {
+    def _metadata(self, *, feature_source: str | None = None) -> dict[str, Any]:
+        metadata = {
             "policy": "openpi",
             "config_name": self.config_name,
             "checkpoint_path": self.checkpoint_path,
         }
+        if feature_source is not None:
+            metadata["feature_source"] = feature_source
+        return metadata
 
     @staticmethod
     def _to_numpy(value: Any) -> np.ndarray:

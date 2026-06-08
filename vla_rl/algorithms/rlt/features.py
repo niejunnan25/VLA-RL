@@ -21,7 +21,7 @@ class RLTStateBuilder:
         num_heads: int = 8,
         ff_dim: int = 2048,
         dropout: float = 0.0,
-        max_tokens: int | None = 512,
+        max_tokens: int | None = None,
         chunk_size: int = 10,
         action_dim: int = 7,
         encoder: RLTokenEncoder | None = None,
@@ -110,6 +110,7 @@ def load_frozen_rlt_encoder(
     ff_dim: int = 2048,
     dropout: float = 0.0,
     max_tokens: int | None = None,
+    fallback_max_tokens: int | None = None,
 ) -> RLTokenEncoder:
     checkpoint = torch.load(encoder_path, map_location="cpu")
     rlt_cfg: dict[str, Any] = {}
@@ -145,8 +146,11 @@ def load_frozen_rlt_encoder(
     num_heads = int(rlt_cfg.get("num_heads", num_heads))
     ff_dim = int(rlt_cfg.get("ff_dim", ff_dim))
     dropout = float(rlt_cfg.get("dropout", dropout))
+    checkpoint_max_tokens = _normalize_max_tokens(rlt_cfg.get("max_tokens", None))
     if max_tokens is None:
-        max_tokens = _normalize_max_tokens(rlt_cfg.get("max_tokens", None))
+        max_tokens = checkpoint_max_tokens
+        if max_tokens is None:
+            max_tokens = _normalize_max_tokens(fallback_max_tokens)
     else:
         max_tokens = _normalize_max_tokens(max_tokens)
 

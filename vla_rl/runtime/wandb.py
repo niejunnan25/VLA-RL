@@ -73,6 +73,14 @@ class _NativeWandBRun:
             init_kwargs["id"] = str(run_id)
 
         self.run = wandb.init(**init_kwargs)
+        define_metric = getattr(self._wandb, "define_metric", None)
+        if callable(define_metric):
+            define_metric("rollout/episode_id")
+            define_metric("rollout/*", step_metric="rollout/episode_id")
+            define_metric("learner/update_steps")
+            define_metric("learner/*", step_metric="learner/update_steps")
+            define_metric("eval/episodes_run")
+            define_metric("eval/*", step_metric="eval/episodes_run")
 
     def log(self, data: dict[str, Any], *, step: int | None = None) -> None:
         payload = select_hil_serl_wandb_scalars(data)
@@ -160,26 +168,18 @@ def flatten_wandb_scalars(data: dict[str, Any]) -> dict[str, Any]:
 
 
 def select_hil_serl_wandb_scalars(data: dict[str, Any]) -> dict[str, Any]:
-    """Return the small metric set used by HIL-SERL-style W&B logging.
+    """Return the cloud metric set used for RLT training diagnosis.
 
-    HIL-SERL uploads learner update info, timer averages, and actor environment
-    episode info. VLA-RL keeps richer local JSONL metrics, but only this subset
-    goes to SwanLab/W&B.
+    Local JSONL files keep richer debug metrics such as timers and environment
+    internals. SwanLab/W&B only gets the groups needed to judge training:
+    rollout first, learner next, and eval last.
     """
 
     flat = flatten_wandb_scalars(data)
     selected: dict[str, Any] = {}
     for key, value in flat.items():
-        if key.startswith("train/"):
+        if key.startswith(("rollout/", "learner/", "eval/")):
             selected[key] = value
-        elif key.startswith("timer/"):
-            selected[key] = value
-        elif key.startswith("environment/"):
-            selected[key] = value
-        elif key.startswith("bc/"):
-            selected[key] = value
-        elif key.startswith("time/") and key not in {"time/publish_network_sec", "time/save_checkpoint_sec"}:
-            selected[f"timer/{key[len('time/') :]}"] = value
     return selected
 
 

@@ -25,6 +25,7 @@ PROJECT_ROOT = Path(__file__).resolve().parents[4]
 if str(PROJECT_ROOT) not in sys.path:
     sys.path.insert(0, str(PROJECT_ROOT))
 
+from examples.libero.rlt.config import feature_cfg, load_config, normalize_max_tokens
 from vla_rl.algorithms.rlt.modeling import RLTokenDecoder, RLTokenEncoder
 
 try:
@@ -41,10 +42,7 @@ def parse_args() -> Any:
     parser = argparse.ArgumentParser(description="RLT Stage 1 prefix reconstruction training")
     parser.add_argument("--config", required=True, help="Path to Stage 1 YAML config")
     args, overrides = parser.parse_known_args()
-    cfg = OmegaConf.load(args.config)
-    if overrides:
-        cfg = OmegaConf.merge(cfg, OmegaConf.from_dotlist(overrides))
-    return cfg
+    return load_config(args.config, list(overrides))
 
 
 def _optional_str(value: Any) -> str | None:
@@ -194,8 +192,10 @@ def main() -> None:
             json.dump(OmegaConf.to_container(cfg, resolve=True), f, indent=2)
 
     steps = int(cfg.training.steps)
-    max_tokens = cfg.rlt.get("max_tokens", None)
-    max_tokens = None if max_tokens is None else int(max_tokens)
+    max_tokens = normalize_max_tokens(cfg.rlt.get("max_tokens", None))
+    feature = feature_cfg(cfg)
+    feature_source = str(feature.get("source", "policy_prior_prefix"))
+    feature_num_steps = int(feature.get("num_steps", cfg.vla.get("num_steps", 10)))
     metrics_path = output_dir / "metrics.jsonl"
     if is_main:
         metrics_path.write_text("")
@@ -211,14 +211,21 @@ def main() -> None:
     for global_step in progress:
         step_started_at = time.perf_counter()
         try:
-            observation, _actions = next(data_iter)
+            observation, actions = next(data_iter)
         except StopIteration:
             data_iter = iter(dataloader)
-            observation, _actions = next(data_iter)
+            observation, actions = next(data_iter)
 
         obs_obj = backend.observation_to_device(observation, device)
         with torch.no_grad():
-            prefix = base_policy.extract_prefix_features(obs_obj, num_steps=int(cfg.vla.num_steps))
+            if feature_source == "policy_prior_prefix":
+                prefix, _ = base_policy.extract_policy_prior_prefix(obs_obj, num_steps=feature_num_steps)
+            elif feature_source == "self_conditioned_prefix":
+                prefix, _ = base_policy.extract_self_conditioned_prefix(obs_obj, num_steps=feature_num_steps)
+            elif feature_source == "expert_conditioned_prefix":
+                prefix = base_policy.extract_expert_conditioned_prefix(obs_obj, actions)
+            else:
+                raise ValueError(f"unsupported feature.source: {feature_source}")
             z_vla = _stage1_prefix_target(prefix, max_tokens=max_tokens)
 
         if encoder is None:
@@ -257,6 +264,7 @@ def main() -> None:
             "lr": lr,
             "tokens": int(z_vla.shape[1]),
             "input_dim": int(z_vla.shape[-1]),
+            "feature_source": feature_source,
             "step_time_sec": float(time.perf_counter() - step_started_at),
         }
         if is_main:

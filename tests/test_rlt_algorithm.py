@@ -1,7 +1,6 @@
 from pathlib import Path
 
 import numpy as np
-import pytest
 import torch
 from omegaconf import OmegaConf
 
@@ -10,6 +9,12 @@ from vla_rl.algorithms.rlt.features import load_frozen_rlt_encoder
 from vla_rl.data import Observation, PolicyFeatures, RolloutBatch, Transition
 from vla_rl.envs.fake import FakeEnvBackend
 from vla_rl.policies.fake import FakePolicyBackend
+from vla_rl.runtime.async_eval import (
+    AsyncEvalRuntime,
+    append_async_eval_request,
+    append_async_eval_stop,
+    load_new_async_eval_results,
+)
 from vla_rl.runtime.run_utils import apply_actor_summary_file, read_actor_summary, send_actor_summary
 from examples.fake_debug.local_actor_learner import LocalActorLearnerRunner
 from examples.libero.rlt.scripts import train_stage2 as rlt_train
@@ -105,6 +110,7 @@ def test_rlt_config_uses_chunk_size_without_execute_horizon():
     cfg = OmegaConf.load(repo_root / "examples/libero/rlt/configs/libero_spatial_task4_openpi_rlt.yaml")
     assert "rlt" in cfg
     assert int(cfg.rlt.chunk_size) == 10
+    assert int(cfg.rlt.get("replan_steps", 5)) == 5
     assert "execute_horizon" not in cfg.runtime
     assert "execute_horizon" not in cfg.algorithm
     agent_cfg = dict(OmegaConf.to_container(cfg.algorithm, resolve=True))
@@ -195,6 +201,28 @@ def test_rlt_actor_summary_failure_is_persisted_and_readable(tmp_path: Path):
     assert env_steps == 12
 
 
+def test_async_eval_queue_and_result_roundtrip(tmp_path: Path):
+    runtime = AsyncEvalRuntime(
+        enabled=True,
+        queue_path=tmp_path / "eval_queue.jsonl",
+        summary_jsonl_path=tmp_path / "eval_summary.jsonl",
+    )
+
+    append_async_eval_request(runtime, {"eval_index": 0, "checkpoint_path": "ckpt.pt"})
+    append_async_eval_stop(runtime)
+
+    queue_lines = runtime.queue_path.read_text().splitlines()
+    assert len(queue_lines) == 2
+    assert '"type": "eval"' in queue_lines[0]
+    assert '"type": "stop"' in queue_lines[1]
+
+    runtime.summary_jsonl_path.write_text('{"eval/success_rate": 1.0, "eval_index": 0}\n')
+    results = load_new_async_eval_results(runtime)
+
+    assert results == [{"eval/success_rate": 1.0, "eval_index": 0}]
+    assert load_new_async_eval_results(runtime) == []
+
+
 def test_rlt_actor_summary_read_ignores_partial_json(tmp_path: Path):
     (tmp_path / "actor_summary.json").write_text("{")
     assert read_actor_summary(tmp_path) is None
@@ -213,3 +241,99 @@ def test_rlt_agent_reads_action_mask_for_bc_loss():
     )
     metrics = agent.update(RolloutBatch(transitions=[transition, transition]))
     assert "bc_loss" in metrics
+
+
+class ListDataStore:
+    def __init__(self):
+        self.payloads = []
+
+    def insert(self, payload):
+        self.payloads.append(payload)
+
+
+def test_rlt_subsample_flush_uses_cross_chunk_actions():
+    store = ListDataStore()
+    current_actions = np.arange(10, dtype=np.float32).reshape(5, 2)
+    next_actions = np.arange(10, 20, dtype=np.float32).reshape(5, 2)
+    pending = {
+        "rlt_obs": make_rlt_state(0.0),
+        "sub_rlt_obs": [make_rlt_state(2.0), make_rlt_state(4.0)],
+        "actions": current_actions,
+        "next_actions": next_actions,
+        "reward": 1.0,
+        "done": False,
+        "truncated": False,
+        "terminal": False,
+        "executed_steps": 5,
+        "env_steps": 5,
+        "info": {},
+        "chunk_start_env_steps": 0,
+        "replan_steps": 5,
+    }
+
+    sent = rlt_train._flush_subsampled_rlt_chunk(
+        pending,
+        next_rlt_obs=make_rlt_state(10.0),
+        next_sub_rlt_obs=[make_rlt_state(12.0), make_rlt_state(14.0)],
+        data_store=store,
+        subsample_stride=2,
+        chunk_size=5,
+        gamma=0.99,
+    )
+
+    assert sent == 3
+    transitions = [Transition.from_payload(payload) for payload in store.payloads]
+    assert [t.info["subsample_position"] for t in transitions] == [0, 2, 4]
+    np.testing.assert_allclose(transitions[0].action.reshape(5, 2), current_actions)
+    np.testing.assert_allclose(
+        transitions[1].action.reshape(5, 2),
+        np.concatenate([current_actions[2:], next_actions[:2]], axis=0),
+    )
+    np.testing.assert_allclose(
+        transitions[2].action.reshape(5, 2),
+        np.concatenate([current_actions[4:], next_actions[:4]], axis=0),
+    )
+
+
+
+def test_rlt_rollout_metric_aliases_match_wandb_names():
+    metrics = rlt_train.rlt_rollout_metric_aliases(
+        episode_id=3,
+        episode_return=2.5,
+        episode_steps=40,
+        success=True,
+        recent_success_rate_50=0.25,
+    )
+
+    assert metrics == {
+        "rollout/episode_id": 3,
+        "rollout/episode_return": 2.5,
+        "rollout/episode_steps": 40,
+        "rollout/success": 1,
+        "rollout/recent_success_rate_50": 0.25,
+    }
+
+
+def test_rlt_learner_metric_aliases_keep_available_losses_only():
+    metrics = rlt_train.rlt_learner_metric_aliases(
+        {
+            "loss_critic": 1.0,
+            "target_q_mean": 0.5,
+            "predicted_q_mean": 0.25,
+            "bc_loss": 0.1,
+            "updates": 5,
+        },
+        update_steps=7,
+        env_steps=70,
+        replay_size=32,
+    )
+
+    assert metrics == {
+        "learner/update_steps": 7,
+        "learner/env_steps": 70,
+        "learner/replay_size": 32,
+        "learner/loss_critic": 1.0,
+        "learner/target_q_mean": 0.5,
+        "learner/predicted_q_mean": 0.25,
+        "learner/bc_loss": 0.1,
+    }

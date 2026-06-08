@@ -11,6 +11,14 @@ from vla_rl.envs.libero import LiberoRemoteEnvBackend
 from vla_rl.policies import ReferencePolicyClient
 
 
+RLT_FEATURE_SOURCES = {
+    "policy_prior_prefix",
+    "self_conditioned_prefix",
+    "expert_conditioned_prefix",
+}
+RLT_ONLINE_FEATURE_SOURCES = {"auto", "policy_prior_prefix", "self_conditioned_prefix"}
+
+
 def load_config(path: str, overrides: list[str]) -> DictConfig:
     dotlist = list(overrides)
     if dotlist and dotlist[0] == "--":
@@ -30,8 +38,19 @@ def validate_rlt_cfg(cfg: DictConfig) -> None:
     chunk_size = int(rlt.chunk_size)
     if chunk_size <= 0:
         raise ValueError(f"rlt.chunk_size must be positive, got {chunk_size}")
+    replan_steps = int(rlt.get("replan_steps", 5))
+    if replan_steps <= 0 or replan_steps > chunk_size:
+        raise ValueError(f"rlt.replan_steps must be in [1, chunk_size], got {replan_steps}")
+    subsample_stride = int(rlt.get("subsample_stride", 0) or 0)
+    if subsample_stride > 0 and (subsample_stride <= 1 or subsample_stride > chunk_size):
+        raise ValueError(f"rlt.subsample_stride must be 0 or in [2, chunk_size], got {subsample_stride}")
     if int(agent_cfg.chunk_size) != chunk_size:
         raise ValueError("algorithm.chunk_size must match rlt.chunk_size")
+    feature = feature_cfg(cfg)
+    source = str(feature.get("source", "policy_prior_prefix"))
+    if source not in RLT_FEATURE_SOURCES:
+        raise ValueError(f"feature.source must be one of {sorted(RLT_FEATURE_SOURCES)}, got {source}")
+    resolve_online_feature_source(feature)
 
 
 def create_env(cfg: DictConfig) -> LiberoRemoteEnvBackend:
@@ -63,7 +82,7 @@ def load_rl_token_encoder(cfg: DictConfig) -> RLTokenEncoder:
         num_heads=int(feature.get("num_heads", 8)),
         ff_dim=int(feature.get("ff_dim", 2048)),
         dropout=float(feature.get("dropout", 0.0)),
-        max_tokens=normalize_max_tokens(feature.get("max_tokens", 512)),
+        fallback_max_tokens=normalize_max_tokens(rlt_cfg(cfg).get("max_tokens", None)),
     )
     encoder.eval()
     encoder.requires_grad_(False)
@@ -85,6 +104,23 @@ def rlt_cfg(cfg: DictConfig) -> DictConfig:
 
 def feature_cfg(cfg: DictConfig) -> DictConfig:
     return cfg_section(cfg, "feature")
+
+
+def resolve_online_feature_source(feature: DictConfig) -> str:
+    source = str(feature.get("source", "policy_prior_prefix"))
+    online_source = str(feature.get("online_source", "auto"))
+    if source not in RLT_FEATURE_SOURCES:
+        raise ValueError(f"feature.source must be one of {sorted(RLT_FEATURE_SOURCES)}, got {source}")
+    if online_source == "auto":
+        if source == "expert_conditioned_prefix":
+            return "self_conditioned_prefix"
+        return source
+    if online_source not in RLT_ONLINE_FEATURE_SOURCES:
+        raise ValueError(
+            "feature.online_source must be auto, policy_prior_prefix, or self_conditioned_prefix; "
+            f"got {online_source}"
+        )
+    return online_source
 
 
 def cfg_section(cfg: DictConfig, *names: str) -> DictConfig:

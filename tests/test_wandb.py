@@ -28,7 +28,7 @@ def test_flatten_wandb_scalars_keeps_small_metrics_and_skips_arrays() -> None:
     assert "raw_action" not in payload
 
 
-def test_hil_serl_wandb_filter_keeps_only_update_timer_and_environment() -> None:
+def test_hil_serl_wandb_filter_keeps_readable_rlt_aliases() -> None:
     payload = select_hil_serl_wandb_scalars(
         {
             "role": "learner",
@@ -36,6 +36,9 @@ def test_hil_serl_wandb_filter_keeps_only_update_timer_and_environment() -> None
             "replay_size": 50,
             "speed": {"updates_per_sec": 4.0},
             "train/loss_critic": 1.0,
+            "rollout": {"episode_id": 3, "success": 1, "recent_success_rate_50": 0.35},
+            "learner": {"loss_actor": 2.0, "bc_loss": 0.4},
+            "eval": {"success_rate": 0.5, "episodes_run": 10},
             "time/algorithm_update_sec": 0.02,
             "time/publish_network_sec": 0.03,
             "time/save_checkpoint_sec": 0.04,
@@ -46,11 +49,13 @@ def test_hil_serl_wandb_filter_keeps_only_update_timer_and_environment() -> None
     )
 
     assert payload == {
-        "train/loss_critic": 1.0,
-        "timer/algorithm_update_sec": 0.02,
-        "timer/sample_actions": 0.1,
-        "environment/episode/return": 1.0,
-        "environment/episode/success": True,
+        "rollout/episode_id": 3,
+        "rollout/success": 1,
+        "rollout/recent_success_rate_50": 0.35,
+        "learner/loss_actor": 2.0,
+        "learner/bc_loss": 0.4,
+        "eval/success_rate": 0.5,
+        "eval/episodes_run": 10,
     }
 
 
@@ -74,7 +79,15 @@ def test_wandb_logger_falls_back_to_native_wandb_when_swanlab_is_missing(monkeyp
     def fake_finish():
         calls["finished"] = True
 
-    fake_wandb = types.SimpleNamespace(init=fake_init, log=fake_log, finish=fake_finish)
+    def fake_define_metric(*args, **kwargs):
+        calls.setdefault("defined", []).append((args, kwargs))
+
+    fake_wandb = types.SimpleNamespace(
+        init=fake_init,
+        log=fake_log,
+        finish=fake_finish,
+        define_metric=fake_define_metric,
+    )
     monkeypatch.setitem(sys.modules, "swanlab", None)
     monkeypatch.setitem(sys.modules, "wandb", fake_wandb)
 
@@ -89,14 +102,22 @@ def test_wandb_logger_falls_back_to_native_wandb_when_swanlab_is_missing(monkeyp
         variant={"runtime": {"max_env_steps": 10}},
         run_dir=tmp_path,
     )
-    wandb_logger.log({"train": {"actor_loss": 2.0}, "big": np.zeros((3, 3))}, step=7)
+    wandb_logger.log({"learner": {"loss_actor": 2.0}, "big": np.zeros((3, 3))}, step=7)
     wandb_logger.finish()
 
     assert calls["init"]["project"] == "vla-rl-test"
     assert calls["init"]["name"] == "unit-test"
     assert calls["init"]["mode"] == "online"
     assert "id" not in calls["init"]
-    assert calls["logs"] == [({"train/actor_loss": 2.0}, 7)]
+    assert calls["defined"] == [
+        (("rollout/episode_id",), {}),
+        (("rollout/*",), {"step_metric": "rollout/episode_id"}),
+        (("learner/update_steps",), {}),
+        (("learner/*",), {"step_metric": "learner/update_steps"}),
+        (("eval/episodes_run",), {}),
+        (("eval/*",), {"step_metric": "eval/episodes_run"}),
+    ]
+    assert calls["logs"] == [({"learner/loss_actor": 2.0}, 7)]
     assert calls["finished"] is True
 
 
@@ -125,14 +146,14 @@ def test_wandb_logger_prefers_swanlab(monkeypatch, tmp_path) -> None:
         variant={},
         run_dir=tmp_path,
     )
-    wandb_logger.log({"timer": {"step_env": 0.2}, "speed": {"env_per_sec": 3.0}}, step=5)
+    wandb_logger.log({"timer": {"step_env": 0.2}, "rollout": {"success": 1}}, step=5)
     wandb_logger.finish()
 
     assert calls["init"]["project"] == "vla-rl-test"
     assert calls["init"]["experiment_name"] == "swanlab-unit-test"
     assert calls["init"]["mode"] == "cloud"
     assert "id" not in calls["init"]
-    assert calls["logs"] == [({"timer/step_env": 0.2}, 5)]
+    assert calls["logs"] == [({"rollout/success": 1}, 5)]
     assert calls["finished"] is True
 
 

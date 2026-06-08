@@ -23,6 +23,8 @@ def test_reference_policy_client_returns_policy_features():
         assert method == "predict_action_with_features"
         obs = kwargs["obs"]
         assert obs.task == "pick object"
+        if kwargs["kwargs"]:
+            assert kwargs["kwargs"] == {"feature_source": "self_conditioned_prefix"}
         return PolicyFeatures(
             reference_actions=np.ones((2, 3), dtype=np.float32),
             embeddings={"prefix": np.zeros((1, 4, 5), dtype=np.float32)},
@@ -38,6 +40,7 @@ def test_reference_policy_client_returns_policy_features():
         features = client.extract_features(make_obs())
         actions = client.sample_actions(make_obs())
         base_actions, prefix_tokens, proprio = client.predict_actions_and_prefix(make_obs())
+        client.predict_actions_and_prefix(make_obs(), feature_source="self_conditioned_prefix")
     finally:
         server.shutdown()
         thread.join(timeout=2)

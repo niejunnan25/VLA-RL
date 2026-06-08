@@ -3,6 +3,7 @@ from pathlib import Path
 from omegaconf import OmegaConf
 import torch
 
+from examples.libero.rlt.config import resolve_online_feature_source
 from examples.libero.rlt.scripts.train_stage1 import _build_modules, checkpoint_payload
 from vla_rl.algorithms.rlt.features import load_frozen_rlt_encoder
 
@@ -70,3 +71,14 @@ def test_stage1_checkpoint_loads_in_stage2(tmp_path: Path):
 
     assert loaded(torch.zeros(1, 3, 8)).shape == (1, 8)
     assert getattr(loaded, "max_tokens") == 3
+
+
+def test_rlt_feature_source_online_resolution():
+    cfg = OmegaConf.create({"source": "policy_prior_prefix", "online_source": "auto"})
+    assert resolve_online_feature_source(cfg) == "policy_prior_prefix"
+
+    cfg = OmegaConf.create({"source": "self_conditioned_prefix", "online_source": "auto"})
+    assert resolve_online_feature_source(cfg) == "self_conditioned_prefix"
+
+    cfg = OmegaConf.create({"source": "expert_conditioned_prefix", "online_source": "auto"})
+    assert resolve_online_feature_source(cfg) == "self_conditioned_prefix"

@@ -7,15 +7,16 @@ vla:
   checkpoint_path: /vla/users/niejunnan/assets/openpi-assets/checkpoints/pi0_libero_pytorch
   assets_base_dir: /vla/users/niejunnan/assets/openpi-assets/checkpoints/pi0_libero_pytorch
   checkpoint_base_dir: ./checkpoints
-  exp_name: rlt_stage1
+  exp_name: rlt_stage1_self_conditioned_prefix_512
   repo_id_override: null
-  lerobot_home: /vla/users/niejunnan/datasets
+  lerobot_home: /vla/users/yixin/LIBERO/libero10_lerobot_dataset
   device: cuda
-  num_steps: 1
+  num_steps: 10
 
 feature:
-  source: policy_prior_prefix
+  source: self_conditioned_prefix
   online_source: auto
+  num_steps: 10
 
 rlt:
   rl_token_dim: 2048
@@ -24,10 +25,10 @@ rlt:
   num_heads: 8
   ff_dim: 2048
   dropout: 0.0
-  max_tokens: null
+  max_tokens: 512
 
 training:
-  output_dir: outputs/rlt_stage1/libero_openpi
+  output_dir: /vla/users/niejunnan/outputs/vlarl/rlt_stage1/libero10_task6_self_conditioned_prefix_512
   steps: 20000
   batch_size: 128
   lr: 4.0e-4

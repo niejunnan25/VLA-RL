@@ -91,24 +91,40 @@ class OpenPIStage1Policy:
             param.requires_grad = False
 
     @torch.no_grad()
-    def extract_prefix_features(self, observation: Any, *, num_steps: int = 10) -> torch.Tensor:
-        if not hasattr(self.model, "predict_action_with_features"):
-            raise RuntimeError(
-                "OpenPI model does not expose predict_action_with_features(). "
-                "Use the OpenPI RLT branch with prefix feature support."
-            )
+    def extract_policy_prior_prefix(self, observation: Any, *, num_steps: int = 10) -> tuple[torch.Tensor, torch.Tensor]:
         out = self.model.predict_action_with_features(
             device=self.device,
             observation=observation,
             noise=None,
             num_steps=int(num_steps),
         )
-        if not isinstance(out, dict) or "features" not in out:
-            raise RuntimeError("predict_action_with_features() must return a dict with a features field")
+        return self._prefix_and_actions(out, method_name="predict_action_with_features")
+
+    @torch.no_grad()
+    def extract_self_conditioned_prefix(self, observation: Any, *, num_steps: int = 10) -> tuple[torch.Tensor, torch.Tensor]:
+        out = self.model.predict_action_with_self_conditioned_features(
+            device=self.device,
+            observation=observation,
+            noise=None,
+            num_steps=int(num_steps),
+        )
+        return self._prefix_and_actions(out, method_name="predict_action_with_self_conditioned_features")
+
+    @torch.no_grad()
+    def extract_expert_conditioned_prefix(self, observation: Any, actions: Any) -> torch.Tensor:
+        actions = torch.as_tensor(actions, device=self.device, dtype=torch.float32)
+        prefix, _ = self.model.extract_embeddings(observation, actions=actions)
+        return prefix.to(device=self.device, dtype=torch.float32)
+
+    def _prefix_and_actions(self, out: Any, *, method_name: str) -> tuple[torch.Tensor, torch.Tensor]:
+        if not isinstance(out, dict) or "actions" not in out or "features" not in out:
+            raise RuntimeError(f"{method_name}() must return a dict with actions and features")
         features = out["features"]
         if not isinstance(features, dict) or "prefix" not in features:
-            raise RuntimeError("predict_action_with_features()['features'] must contain 'prefix'")
-        return torch.as_tensor(features["prefix"], device=self.device, dtype=torch.float32)
+            raise RuntimeError(f"{method_name}()['features'] must contain 'prefix'")
+        prefix = torch.as_tensor(features["prefix"], device=self.device, dtype=torch.float32)
+        actions = torch.as_tensor(out["actions"], device=self.device, dtype=torch.float32)
+        return prefix, actions
 
 
 class OpenPIStage1Backend:

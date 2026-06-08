@@ -12,6 +12,10 @@ ENV_GPU=""
 POLICY_GPU=""
 ENV_PORT="23000"
 POLICY_PORT="8899"
+WITH_EVAL="0"
+EVAL_GPU=""
+EVAL_ENV_PORT="24000"
+EVAL_POLICY_PORT="8999"
 TRAINER_PORT="5488"
 BROADCAST_PORT="5489"
 RUN_DIR="$ROOT/outputs/libero_spatial_task4_openpi_rlt"
@@ -38,6 +42,10 @@ Options:
   --policy-gpu ID              GPU for reference-policy server. Defaults to actor GPU.
   --env-port PORT              LIBERO env server port.
   --policy-port PORT           Reference-policy server port.
+  --with-eval                  Start dedicated async-eval env/policy services.
+  --eval-gpu ID                GPU for async eval env and policy. Defaults to actor GPU.
+  --eval-env-port PORT         Async eval LIBERO env server port.
+  --eval-policy-port PORT      Async eval reference-policy server port.
   --trainer-port PORT          Agentlace trainer port.
   --broadcast-port PORT        Agentlace broadcast port.
   --run-dir PATH               Run directory.
@@ -65,6 +73,10 @@ while [[ $# -gt 0 ]]; do
     --policy-gpu) POLICY_GPU="$2"; shift 2 ;;
     --env-port) ENV_PORT="$2"; shift 2 ;;
     --policy-port) POLICY_PORT="$2"; shift 2 ;;
+    --with-eval) WITH_EVAL="1"; shift ;;
+    --eval-gpu) EVAL_GPU="$2"; shift 2 ;;
+    --eval-env-port) EVAL_ENV_PORT="$2"; shift 2 ;;
+    --eval-policy-port) EVAL_POLICY_PORT="$2"; shift 2 ;;
     --trainer-port) TRAINER_PORT="$2"; shift 2 ;;
     --broadcast-port) BROADCAST_PORT="$2"; shift 2 ;;
     --run-dir) RUN_DIR="$2"; shift 2 ;;
@@ -86,6 +98,7 @@ done
 
 if [[ -z "$ENV_GPU" ]]; then ENV_GPU="$ACTOR_GPU"; fi
 if [[ -z "$POLICY_GPU" ]]; then POLICY_GPU="$ACTOR_GPU"; fi
+if [[ -z "$EVAL_GPU" ]]; then EVAL_GPU="$ACTOR_GPU"; fi
 
 COMMON_OVERRIDES=(
   "env.url=http://127.0.0.1:${ENV_PORT}"
@@ -95,6 +108,14 @@ COMMON_OVERRIDES=(
   "runtime.run_dir=${RUN_DIR}"
   "${OVERRIDES[@]}"
 )
+
+if [[ "$WITH_EVAL" == "1" ]]; then
+  COMMON_OVERRIDES+=(
+    "runtime.async_eval.enabled=true"
+    "runtime.async_eval.env_url=http://127.0.0.1:${EVAL_ENV_PORT}"
+    "runtime.async_eval.policy_url=http://127.0.0.1:${EVAL_POLICY_PORT}"
+  )
+fi
 
 tmux kill-session -t "$SESSION" 2>/dev/null || true
 
@@ -108,13 +129,27 @@ if [[ "$WITH_POLICY_SERVER" == "1" ]]; then
   tmux new-window -t "$SESSION" -n policy     "cd '$ROOT' && CUDA_VISIBLE_DEVICES='$POLICY_GPU' '$POLICY_PYTHON_BIN' scripts/serve_reference_policy.py --policy openpi --policy-root '$POLICY_ROOT' --config-name '$POLICY_CONFIG' --checkpoint-path '$POLICY_CHECKPOINT' --action-dim '$ACTION_DIM' --device cuda --host 127.0.0.1 --port '$POLICY_PORT'"
 fi
 
+if [[ "$WITH_EVAL" == "1" ]]; then
+  tmux new-window -t "$SESSION" -n eval-env     "cd '$SERL_TORCH_ROOT' && LIBERO_CONDA_PREFIX='$LIBERO_CONDA_PREFIX' bash examples/libero/tools/serve_env.sh --host 127.0.0.1 --port '$EVAL_ENV_PORT' --gpu-id '$EVAL_GPU'"
+  tmux new-window -t "$SESSION" -n eval-policy     "cd '$ROOT' && CUDA_VISIBLE_DEVICES='$EVAL_GPU' '$POLICY_PYTHON_BIN' scripts/serve_reference_policy.py --policy openpi --policy-root '$POLICY_ROOT' --config-name '$POLICY_CONFIG' --checkpoint-path '$POLICY_CHECKPOINT' --action-dim '$ACTION_DIM' --device cuda --host 127.0.0.1 --port '$EVAL_POLICY_PORT'"
+fi
+
 tmux new-window -t "$SESSION" -n learner   "cd '$ROOT' && CUDA_VISIBLE_DEVICES='$LEARNER_GPU' '$PYTHON_BIN' examples/libero/rlt/scripts/train_stage2.py --role learner --config '$CONFIG' -- ${COMMON_OVERRIDES[*]}"
 
-tmux new-window -t "$SESSION" -n actor   "cd '$ROOT' && '$PYTHON_BIN' examples/libero/rlt/tools/wait_for_tcp.py --host 127.0.0.1 --ports '$ENV_PORT' '$POLICY_PORT' '$TRAINER_PORT' --timeout-sec '$WAIT_TIMEOUT_SEC' && CUDA_VISIBLE_DEVICES='$ACTOR_GPU' '$PYTHON_BIN' examples/libero/rlt/scripts/train_stage2.py --role actor --config '$CONFIG' -- ${COMMON_OVERRIDES[*]}"
+WAIT_PORTS=("$ENV_PORT" "$POLICY_PORT" "$TRAINER_PORT")
+if [[ "$WITH_EVAL" == "1" ]]; then
+  WAIT_PORTS+=("$EVAL_ENV_PORT" "$EVAL_POLICY_PORT")
+fi
+WAIT_PORT_ARGS="${WAIT_PORTS[*]}"
+
+tmux new-window -t "$SESSION" -n actor   "cd '$ROOT' && '$PYTHON_BIN' examples/libero/rlt/tools/wait_for_tcp.py --host 127.0.0.1 --ports $WAIT_PORT_ARGS --timeout-sec '$WAIT_TIMEOUT_SEC' && CUDA_VISIBLE_DEVICES='$ACTOR_GPU' '$PYTHON_BIN' examples/libero/rlt/scripts/train_stage2.py --role actor --config '$CONFIG' -- ${COMMON_OVERRIDES[*]}"
 
 echo "Started tmux session: $SESSION"
 echo "  env:     GPU $ENV_GPU, port $ENV_PORT"
 echo "  policy:  GPU $POLICY_GPU, port $POLICY_PORT"
+if [[ "$WITH_EVAL" == "1" ]]; then
+  echo "  eval:    GPU $EVAL_GPU, env=$EVAL_ENV_PORT policy=$EVAL_POLICY_PORT"
+fi
 echo "  learner: GPU $LEARNER_GPU, trainer=$TRAINER_PORT broadcast=$BROADCAST_PORT"
 echo "  actor:   GPU $ACTOR_GPU"
 echo "  run_dir: $RUN_DIR"
