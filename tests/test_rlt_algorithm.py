@@ -4,11 +4,9 @@ import numpy as np
 import torch
 from omegaconf import OmegaConf
 
-from vla_rl.algorithms.rlt import RLTAgent, RLTStateBuilder, RLTokenEncoder
+from vla_rl.algorithms.rlt import RLTAgent, RLTokenEncoder, encode_rlt_obs
 from vla_rl.algorithms.rlt.features import load_frozen_rlt_encoder
-from vla_rl.data import Observation, PolicyFeatures, RolloutBatch, Transition
-from vla_rl.envs.fake import FakeEnvBackend
-from vla_rl.policies.fake import FakePolicyBackend
+from vla_rl.data import RolloutBatch, Transition
 from vla_rl.runtime.async_eval import (
     AsyncEvalRuntime,
     append_async_eval_request,
@@ -16,7 +14,6 @@ from vla_rl.runtime.async_eval import (
     load_new_async_eval_results,
 )
 from vla_rl.runtime.run_utils import apply_actor_summary_file, read_actor_summary, send_actor_summary
-from examples.fake_debug.local_actor_learner import LocalActorLearnerRunner
 from examples.libero.rlt.scripts import train_stage2 as rlt_train
 
 
@@ -82,35 +79,29 @@ def test_rlt_encoder_checkpoint_loading_and_max_tokens(tmp_path: Path):
     assert loaded(torch.zeros(1, 3, 8)).shape == (1, 8)
 
 
-def test_rlt_state_builder_outputs_rlt_state():
+def test_encode_rlt_obs_outputs_rlt_state():
     encoder = RLTokenEncoder(input_dim=8, rl_token_dim=8, num_layers=1, num_heads=2, ff_dim=16)
-    state_builder = RLTStateBuilder(
-        device="cpu",
-        chunk_size=2,
-        action_dim=2,
-        max_tokens=3,
-        encoder=encoder,
-    )
-    features = PolicyFeatures(
-        reference_actions=np.ones((5, 4), dtype=np.float32),
-        embeddings={"prefix": np.zeros((1, 6, 8), dtype=np.float32)},
-        proprio=np.ones((3,), dtype=np.float32),
-    )
+    encoder.max_tokens = 3
 
-    rlt_state = state_builder.process(Observation(), features)
+    rlt_state = encode_rlt_obs(
+        np.zeros((1, 6, 8), dtype=np.float32),
+        np.ones((2, 2), dtype=np.float32),
+        np.ones((3,), dtype=np.float32),
+        rl_token_encoder=encoder,
+    )
 
     assert rlt_state["z_rl"].shape == (8,)
     assert rlt_state["reference_action"].shape == (4,)
     assert rlt_state["proprio"].shape == (3,)
+    np.testing.assert_allclose(rlt_state["action_mask"], np.ones((4,), dtype=np.float32))
 
 
-def test_rlt_config_uses_chunk_size_without_execute_horizon():
+def test_rlt_config_uses_chunk_size_without_execution_horizon():
     repo_root = Path(__file__).resolve().parents[1]
 
     cfg = OmegaConf.load(repo_root / "examples/libero/rlt/configs/libero_spatial_task4_openpi_rlt.yaml")
     assert "rlt" in cfg
     assert int(cfg.rlt.chunk_size) == 10
-    assert int(cfg.rlt.get("replan_steps", 5)) == 5
     assert "execute_horizon" not in cfg.runtime
     assert "execute_horizon" not in cfg.algorithm
     agent_cfg = dict(OmegaConf.to_container(cfg.algorithm, resolve=True))
@@ -139,40 +130,6 @@ def test_rlt_agent_uses_transition_discount_and_terminal_no_bootstrap():
     np.testing.assert_allclose(fb["discount"].cpu().numpy(), np.ones((4, 1), dtype=np.float32))
     _, target_q_mean, _ = agent._critic_step(fb)
     assert abs(target_q_mean - 1.0) < 1e-6
-
-
-def test_local_actor_learner_with_rlt_cpu_small_model(tmp_path: Path):
-    encoder = RLTokenEncoder(input_dim=16, rl_token_dim=16, num_layers=1, num_heads=4, ff_dim=32)
-    processor = RLTStateBuilder(device="cpu", chunk_size=2, action_dim=7, max_tokens=3, encoder=encoder)
-    env = FakeEnvBackend(action_dim=7, proprio_dim=8, max_steps=20)
-    policy = FakePolicyBackend(action_dim=7, chunk_size=2, embedding_dim=16)
-    agent = RLTAgent(
-        z_rl_dim=16,
-        proprio_dim=8,
-        action_dim=7,
-        chunk_size=2,
-        actor_hidden_dims=(32, 32),
-        critic_hidden_dims=(32, 32),
-        policy_update_freq=1,
-        device="cpu",
-    )
-    runner = LocalActorLearnerRunner(
-        env=env,
-        policy=policy,
-        algorithm=agent,
-        feature_processor=processor,
-        max_env_steps=10,
-        max_update_steps=10,
-        execute_horizon=2,
-        batch_size=1,
-        metrics_path=str(tmp_path / "metrics.jsonl"),
-    )
-
-    summary = runner.run()
-
-    assert summary["env_steps"] == 10
-    assert summary["update_steps"] == 10
-    assert summary["replay_size"] == 5
 
 
 class FailingSummaryClient:
@@ -228,7 +185,6 @@ def test_rlt_actor_summary_read_ignores_partial_json(tmp_path: Path):
     assert read_actor_summary(tmp_path) is None
 
 
-
 def test_rlt_agent_reads_action_mask_for_bc_loss():
     agent = make_agent()
     transition = make_transition()
@@ -253,47 +209,42 @@ class ListDataStore:
 
 def test_rlt_subsample_flush_uses_cross_chunk_actions():
     store = ListDataStore()
-    current_actions = np.arange(10, dtype=np.float32).reshape(5, 2)
-    next_actions = np.arange(10, 20, dtype=np.float32).reshape(5, 2)
+    current_actions = np.arange(20, dtype=np.float32).reshape(10, 2)
+    next_actions = np.arange(20, 40, dtype=np.float32).reshape(10, 2)
     pending = {
         "rlt_obs": make_rlt_state(0.0),
-        "sub_rlt_obs": [make_rlt_state(2.0), make_rlt_state(4.0)],
+        "sub_rlt_obs": [make_rlt_state(2.0), make_rlt_state(4.0), make_rlt_state(6.0), make_rlt_state(8.0)],
         "actions": current_actions,
         "next_actions": next_actions,
         "reward": 1.0,
         "done": False,
         "truncated": False,
         "terminal": False,
-        "executed_steps": 5,
-        "env_steps": 5,
+        "executed_steps": 10,
+        "env_steps": 10,
         "info": {},
         "chunk_start_env_steps": 0,
-        "replan_steps": 5,
     }
 
     sent = rlt_train._flush_subsampled_rlt_chunk(
         pending,
         next_rlt_obs=make_rlt_state(10.0),
-        next_sub_rlt_obs=[make_rlt_state(12.0), make_rlt_state(14.0)],
+        next_sub_rlt_obs=[make_rlt_state(12.0), make_rlt_state(14.0), make_rlt_state(16.0), make_rlt_state(18.0)],
         data_store=store,
         subsample_stride=2,
-        chunk_size=5,
+        chunk_size=10,
         gamma=0.99,
     )
 
-    assert sent == 3
+    assert sent == 5
     transitions = [Transition.from_payload(payload) for payload in store.payloads]
-    assert [t.info["subsample_position"] for t in transitions] == [0, 2, 4]
-    np.testing.assert_allclose(transitions[0].action.reshape(5, 2), current_actions)
-    np.testing.assert_allclose(
-        transitions[1].action.reshape(5, 2),
-        np.concatenate([current_actions[2:], next_actions[:2]], axis=0),
-    )
-    np.testing.assert_allclose(
-        transitions[2].action.reshape(5, 2),
-        np.concatenate([current_actions[4:], next_actions[:4]], axis=0),
-    )
-
+    assert [t.info["subsample_position"] for t in transitions] == [0, 2, 4, 6, 8]
+    np.testing.assert_allclose(transitions[0].action.reshape(10, 2), current_actions)
+    for idx, position in enumerate((2, 4, 6, 8), start=1):
+        np.testing.assert_allclose(
+            transitions[idx].action.reshape(10, 2),
+            np.concatenate([current_actions[position:], next_actions[:position]], axis=0),
+        )
 
 
 def test_rlt_rollout_metric_aliases_match_wandb_names():

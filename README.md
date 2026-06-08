@@ -31,13 +31,11 @@ example lines rather than variants hidden behind a universal runner.
 - `vla_rl.runtime`: thin transport helpers, checkpointing, and HTTP/RPC utilities. Algorithm training loops live in examples.
 - `examples/*/configs`: example-owned configuration files.
 
-## Debug Smoke
+## Quick Checks
 
-The old single-process runner is now a debug example, not a framework-level
-training entrypoint:
+Use unit tests for library-level checks and short real example runs for end-to-end validation:
 
 ```bash
-python examples/fake_debug/train.py --config examples/fake_debug/configs/fake_local.yaml
 pytest -q
 ```
 
@@ -83,8 +81,8 @@ See `docs/runtime/agentlace_rlt.md` for the full RLT runbook and the exact
 actor/learner data path.
 
 W&B logging follows the lightweight HIL-SERL pattern: the
-learner owns one W&B-compatible run and uploads learner update metrics, timer averages,
-and actor episode summaries forwarded through Agentlace. Formal LIBERO configs enable it by default:
+learner owns one W&B-compatible run and uploads only `rollout/*`, `learner/*`,
+and `eval/*` metrics. Formal LIBERO configs enable it by default:
 VLA-RL tries SwanLab first and falls back to W&B if SwanLab is unavailable.
 Install the logging dependencies for formal online runs:
 

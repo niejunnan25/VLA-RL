@@ -62,10 +62,6 @@ for name in (
     "PLDSACAgent",
     "ResidualActionSpec",
     "RLTAgent",
-    "RLTStateBuilder",
-    "RLTFeatureProcessor",
-    "LocalRunner",
-    "LocalActorLearnerRunner",
 ):
     assert not hasattr(algorithms, name), name
 """

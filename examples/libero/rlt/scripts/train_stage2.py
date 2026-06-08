@@ -17,7 +17,7 @@ PROJECT_ROOT = Path(__file__).resolve().parents[4]
 if str(PROJECT_ROOT) not in sys.path:
     sys.path.insert(0, str(PROJECT_ROOT))
 
-from vla_rl.algorithms.rlt import RLTokenEncoder
+from vla_rl.algorithms.rlt.features import encode_rlt_obs
 from vla_rl.data import ReplayBuffer, Transition
 from agentlace.data.data_store import QueuedDataStore
 from agentlace.trainer import TrainerClient, TrainerConfig, TrainerServer
@@ -473,7 +473,6 @@ def run_actor(cfg: DictConfig) -> dict[str, Any]:
         timer = Timer()
         rlt = rlt_cfg(cfg)
         chunk_size = int(rlt.chunk_size)
-        replan_steps = int(rlt.get("replan_steps", 5))
         subsample_stride = int(rlt.get("subsample_stride", 0) or 0)
         use_subsample = subsample_stride > 1
         pending_chunk: dict[str, Any] | None = None
@@ -519,7 +518,7 @@ def run_actor(cfg: DictConfig) -> dict[str, Any]:
             sub_rlt_obs: list[dict[str, np.ndarray]] = []
 
             with timer.context("step_env"):
-                for action in actions[:replan_steps]:
+                for action in actions[:chunk_size]:
                     next_obs, step_reward, done, truncated, step_info = env.step(action)
                     info = dict(step_info)
                     chunk_reward += float(step_reward)
@@ -602,7 +601,6 @@ def run_actor(cfg: DictConfig) -> dict[str, Any]:
                         "env_steps": env_steps,
                         "info": dict(info),
                         "chunk_start_env_steps": chunk_start_env_steps,
-                        "replan_steps": replan_steps,
                     }
                     if terminal or env_steps >= int(runtime.max_env_steps):
                         sent_transitions += _flush_subsampled_rlt_chunk(
@@ -626,7 +624,7 @@ def run_actor(cfg: DictConfig) -> dict[str, Any]:
                         discount=0.0 if terminal else float(runtime.gamma) ** chunk_size,
                         executed_steps=executed_steps,
                         env_steps=env_steps,
-                        info={**info, "chunk_start_env_steps": chunk_start_env_steps, "replan_steps": replan_steps},
+                        info={**info, "chunk_start_env_steps": chunk_start_env_steps},
                     )
                     data_store.insert(transition.to_payload())
                     sent_transitions = 1
@@ -769,7 +767,6 @@ def _flush_subsampled_rlt_chunk(
             info={
                 **dict(pending_chunk["info"]),
                 "chunk_start_env_steps": int(pending_chunk["chunk_start_env_steps"]),
-                "replan_steps": int(pending_chunk["replan_steps"]),
                 "subsample_stride": int(subsample_stride),
                 "subsample_position": int(position),
             },
@@ -829,36 +826,6 @@ def start_async_eval_worker(runtime: DictConfig, *, run_dir: Path | None) -> Asy
     )
 
 
-def encode_rlt_obs(
-    prefix_tokens: np.ndarray,
-    base_actions: np.ndarray,
-    proprio: np.ndarray,
-    *,
-    rl_token_encoder: RLTokenEncoder,
-) -> dict[str, np.ndarray]:
-    z_vla = torch.as_tensor(
-        prefix_tokens,
-        dtype=torch.float32,
-        device=next(rl_token_encoder.parameters()).device,
-    )
-    if z_vla.dim() == 2:
-        z_vla = z_vla.unsqueeze(0)
-    if z_vla.dim() != 3:
-        raise ValueError(f"prefix embeddings must be [B, T, D] or [T, D], got {tuple(z_vla.shape)}")
-
-    max_tokens = getattr(rl_token_encoder, "max_tokens", None)
-    if max_tokens is not None:
-        z_vla = z_vla[:, : int(max_tokens), :]
-
-    z_rl = rl_token_encoder(z_vla).squeeze(0).detach().cpu().numpy().astype(np.float32)
-
-    reference_action = np.asarray(base_actions, dtype=np.float32).reshape(-1)
-    return {
-        "z_rl": z_rl,
-        "reference_action": reference_action,
-        "proprio": np.asarray(proprio, dtype=np.float32).reshape(-1),
-        "action_mask": np.ones_like(reference_action, dtype=np.float32),
-    }
 
 def rlt_rollout_metric_aliases(
     *,

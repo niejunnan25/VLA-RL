@@ -27,7 +27,8 @@ from examples.libero.rlt.config import (
     resolve_online_feature_source,
     validate_rlt_cfg,
 )
-from examples.libero.rlt.scripts.train_stage2 import encode_rlt_obs, json_sanitize
+from vla_rl.algorithms.rlt.features import encode_rlt_obs
+from vla_rl.runtime.agentlace import json_sanitize
 
 
 def parse_args() -> argparse.Namespace:
@@ -82,7 +83,6 @@ def run_eval(
         feature = feature_cfg(cfg)
         online_feature_source = resolve_online_feature_source(feature)
         feature_num_steps = int(feature.get("num_steps", 10))
-        replan_steps = int(cfg.rlt.get("replan_steps", cfg.rlt.chunk_size))
         encoder = load_rl_token_encoder(cfg)
         agent = create_rlt_agent(cfg)
         checkpoint = torch.load(Path(checkpoint_path), map_location=agent.device)
@@ -114,7 +114,7 @@ def run_eval(
                 base_actions = np.asarray(base_actions, dtype=np.float32)[: int(cfg.rlt.chunk_size)]
                 rlt_obs = encode_rlt_obs(prefix_tokens, base_actions, proprio, rl_token_encoder=encoder)
                 actions = agent.sample_action(rlt_obs, deterministic=True)
-                eval_actions = actions[:replan_steps]
+                eval_actions = actions[: int(cfg.rlt.chunk_size)]
                 obs, reward, done, truncated, info = env.step_chunk(eval_actions)
                 info = dict(info)
                 executed_steps = int(info.get("executed_steps", len(eval_actions)))

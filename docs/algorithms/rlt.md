@@ -21,27 +21,22 @@ LIBERO Observation
 ```
 
 The canonical `examples/libero/rlt` path builds RLT observations explicitly in
-the actor loop. `RLTStateBuilder` is kept only for fake/debug local runners.
-The reference-policy client/server lives under `vla_rl.policies`, while
-trainable actor/critic code lives under `vla_rl.algorithms.rlt`.
+the actor loop using `vla_rl.algorithms.rlt.encode_rlt_obs`. The reference-policy
+client/server lives under `vla_rl.policies`, while trainable actor/critic code
+lives under `vla_rl.algorithms.rlt`.
 
-The model-side hook is:
-
-```python
-predict_actions_and_prefix(...)
-```
-
-It returns base VLA actions, prefix tokens, and proprio. Future StarVLA/JoyRA
-integrations should expose the same semantics while RLT training continues to
-keep the frozen reference policy separate from the trainable actor/critic.
+The model-side OpenPI hooks are `predict_action_with_features()` and
+`predict_action_with_self_conditioned_features()`. The training-side
+`ReferencePolicyClient.predict_actions_and_prefix()` returns base VLA actions,
+prefix tokens, and proprio to the actor loop.
 
 ## Algorithm Semantics
 
 - `RLTAgent.sample_action()` outputs `(chunk_size, action_dim)`.
-- RLT v0 intentionally has no separate `execute_horizon`: actor output, env execution, critic action input, replay action chunk, and BC target all use `chunk_size`.
-- The actor stores one replay transition per executed chunk. This keeps the online path simple and avoids per-step VLA backfill.
-- Terminal tails shorter than `chunk_size` carry `action_mask`; actor BC loss and actor Q loss ignore padded action dimensions.
-- Chunk transition discount is `gamma ** executed_steps`; terminal chunks do not bootstrap.
+- RLT v0 has no separate execution horizon: actor output, env execution, critic action input, replay action chunk, and BC target all use `chunk_size`.
+- `subsample_stride` controls window replay density. With `chunk_size=10` and `subsample_stride=2`, each pair of adjacent chunks can produce windows at `0,2,4,6,8` using `action_chunk[p:] + next_action_chunk[:p]`.
+- Terminal chunks only flush windows that can be constructed without crossing into a new episode.
+- Chunk transition discount is `gamma ** chunk_size` for non-terminal windows; terminal chunks do not bootstrap.
 - The actor loss is `-Q + bc_reg_coeff * masked_mse(action, reference_action)`.
 - The actor/critic state currently uses `z_rl` only; `proprio` remains part of
   the explicit observation schema for future variants.

@@ -39,7 +39,7 @@ self_conditioned_prefix_full
 
 `expert_conditioned_prefix_512` is a yixin-style Stage 1/offline baseline, not an online rollout feature source.
 
-RLT v0 uses a single `chunk_size`: actor output length, environment execution length, critic action input, replay action, and BC target all use the same action chunk. Terminal tails carry `action_mask` so padded action dimensions do not affect BC loss or actor Q loss.
+RLT v0 uses `chunk_size` as the action chunk length: actor output, environment execution, critic action input, replay action, and BC target all use the same action chunk. `subsample_stride` controls window replay density; for example `chunk_size=10, subsample_stride=2` yields windows at `0,2,4,6,8` using `action_chunk[p:] + next_action_chunk[:p]`. Terminal chunks only flush windows that can be constructed within the episode.
 
 ## 1000-Step Smoke
 

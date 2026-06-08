@@ -38,9 +38,6 @@ def validate_rlt_cfg(cfg: DictConfig) -> None:
     chunk_size = int(rlt.chunk_size)
     if chunk_size <= 0:
         raise ValueError(f"rlt.chunk_size must be positive, got {chunk_size}")
-    replan_steps = int(rlt.get("replan_steps", 5))
-    if replan_steps <= 0 or replan_steps > chunk_size:
-        raise ValueError(f"rlt.replan_steps must be in [1, chunk_size], got {replan_steps}")
     subsample_stride = int(rlt.get("subsample_stride", 0) or 0)
     if subsample_stride > 0 and (subsample_stride <= 1 or subsample_stride > chunk_size):
         raise ValueError(f"rlt.subsample_stride must be 0 or in [2, chunk_size], got {subsample_stride}")

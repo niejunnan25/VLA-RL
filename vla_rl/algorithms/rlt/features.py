@@ -7,96 +7,39 @@ import numpy as np
 import torch
 
 from vla_rl.algorithms.rlt.modeling import RLTokenEncoder
-from vla_rl.data import Observation, PolicyFeatures
 
 
-class RLTStateBuilder:
-    def __init__(
-        self,
-        encoder_path: str | None = None,
-        device: str = "cpu",
-        input_dim: int = 2048,
-        rl_token_dim: int = 2048,
-        num_encoder_layers: int = 4,
-        num_heads: int = 8,
-        ff_dim: int = 2048,
-        dropout: float = 0.0,
-        max_tokens: int | None = None,
-        chunk_size: int = 10,
-        action_dim: int = 7,
-        encoder: RLTokenEncoder | None = None,
-    ) -> None:
-        self.device = torch.device(device)
-        self.chunk_size = int(chunk_size)
-        self.action_dim = int(action_dim)
-        if self.chunk_size <= 0:
-            raise ValueError(f"chunk_size must be positive, got {chunk_size}")
-        if self.action_dim <= 0:
-            raise ValueError(f"action_dim must be positive, got {action_dim}")
-        self.max_tokens = _normalize_max_tokens(max_tokens)
-        if encoder is None:
-            if encoder_path is None:
-                raise ValueError("encoder_path is required when encoder is not injected")
-            encoder = load_frozen_rlt_encoder(
-                encoder_path,
-                device=str(self.device),
-                input_dim=input_dim,
-                rl_token_dim=rl_token_dim,
-                num_encoder_layers=num_encoder_layers,
-                num_heads=num_heads,
-                ff_dim=ff_dim,
-                dropout=dropout,
-                max_tokens=self.max_tokens,
-            )
-            self.max_tokens = getattr(encoder, "max_tokens", self.max_tokens)
-        self.encoder = encoder.to(self.device)
-        self.encoder.eval()
-        self.encoder.requires_grad_(False)
-        if not hasattr(self.encoder, "max_tokens"):
-            self.encoder.max_tokens = self.max_tokens
+def encode_rlt_obs(
+    prefix_tokens: np.ndarray,
+    base_actions: np.ndarray,
+    proprio: np.ndarray,
+    *,
+    rl_token_encoder: RLTokenEncoder,
+) -> dict[str, np.ndarray]:
+    """Encode frozen VLA prefix tokens and reference actions into RLT learner obs."""
 
-    @torch.no_grad()
-    def build(self, obs: Observation, features: PolicyFeatures) -> tuple[np.ndarray, dict[str, np.ndarray]]:
-        base_actions = self._base_actions(features)
-        return base_actions, self.process(obs, features)
+    z_vla = torch.as_tensor(
+        prefix_tokens,
+        dtype=torch.float32,
+        device=next(rl_token_encoder.parameters()).device,
+    )
+    if z_vla.dim() == 2:
+        z_vla = z_vla.unsqueeze(0)
+    if z_vla.dim() != 3:
+        raise ValueError(f"prefix embeddings must be [B, T, D] or [T, D], got {tuple(z_vla.shape)}")
 
-    @torch.no_grad()
-    def process(self, obs: Observation, features: PolicyFeatures) -> dict[str, np.ndarray]:
-        del obs
-        if "prefix" not in features.embeddings:
-            raise ValueError("RLTStateBuilder requires features.embeddings['prefix']")
-        base_actions = self._base_actions(features)
-        z_vla = torch.as_tensor(features.embeddings["prefix"], dtype=torch.float32, device=self.device)
-        if z_vla.dim() == 2:
-            z_vla = z_vla.unsqueeze(0)
-        if z_vla.dim() != 3:
-            raise ValueError(f"prefix embedding must be [B, T, D] or [T, D], got {tuple(z_vla.shape)}")
-        max_tokens = getattr(self.encoder, "max_tokens", None)
-        if max_tokens is not None:
-            z_vla = z_vla[:, : int(max_tokens), :]
-        z_rl = self.encoder(z_vla).squeeze(0).detach().cpu().numpy().astype(np.float32)
-        if base_actions.ndim != 2:
-            raise ValueError(f"reference actions must be [T, A], got shape={base_actions.shape}")
-        if base_actions.shape[0] < self.chunk_size:
-            raise ValueError(
-                f"reference policy returned {base_actions.shape[0]} actions, need chunk_size={self.chunk_size}"
-            )
-        if base_actions.shape[1] < self.action_dim:
-            raise ValueError(f"reference action dim {base_actions.shape[1]} is smaller than action_dim={self.action_dim}")
-        reference = base_actions[: self.chunk_size, : self.action_dim].reshape(-1).astype(np.float32)
-        proprio = features.proprio
-        if proprio is None:
-            proprio = np.zeros((0,), dtype=np.float32)
-        return {
-            "z_rl": z_rl,
-            "reference_action": reference,
-            "proprio": np.asarray(proprio, dtype=np.float32).reshape(-1),
-        }
+    max_tokens = getattr(rl_token_encoder, "max_tokens", None)
+    if max_tokens is not None:
+        z_vla = z_vla[:, : int(max_tokens), :]
 
-    def _base_actions(self, features: PolicyFeatures) -> np.ndarray:
-        if features.reference_actions is None:
-            raise ValueError("RLTStateBuilder requires PolicyFeatures.reference_actions")
-        return np.asarray(features.reference_actions, dtype=np.float32)
+    z_rl = rl_token_encoder(z_vla).squeeze(0).detach().cpu().numpy().astype(np.float32)
+    reference_action = np.asarray(base_actions, dtype=np.float32).reshape(-1)
+    return {
+        "z_rl": z_rl,
+        "reference_action": reference_action,
+        "proprio": np.asarray(proprio, dtype=np.float32).reshape(-1),
+        "action_mask": np.ones_like(reference_action, dtype=np.float32),
+    }
 
 
 def load_frozen_rlt_encoder(

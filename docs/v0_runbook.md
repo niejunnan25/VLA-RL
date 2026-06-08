@@ -15,12 +15,13 @@ The service side owns:
 - model loading and checkpoint format;
 - model-specific preprocessing and normalization;
 - GPU placement for the frozen VLA;
-- model hooks such as `predict_actions_and_prefix()` or
-  `predict_action_with_features()`.
+- model hooks such as `predict_action_with_features()` and
+  `predict_action_with_self_conditioned_features()`.
 
-The training side sees only `PolicyFeatures` through `ReferencePolicyClient`.
-This keeps the actor and learner environment small and lets a new VLA be added
-by writing a service adapter, not by changing the RL training loop.
+The training side sees only `PolicyFeatures` or the client-side
+`predict_actions_and_prefix()` result through `ReferencePolicyClient`. This keeps
+the actor and learner environment small and lets a new VLA be added by writing a
+service adapter, not by changing the RL training loop.
 
 ## Why Env Is an External Service
 
@@ -35,8 +36,7 @@ step_chunk(actions) -> Observation, reward, done, truncated, info
 ```
 
 The RL process should not import simulator internals, rendering backends, ROS,
-MuJoCo, or task-specific environment packages unless the example explicitly
-runs a local debug env.
+MuJoCo, or task-specific environment packages in the actor or learner process.
 
 ## RLT Data Flow
 
@@ -56,9 +56,8 @@ obs
 ```
 
 The example owns the actor and learner loops in `examples/libero/rlt/scripts/train_stage2.py`.
-`vla_rl.algorithms.rlt` owns the trainable heads and update logic.
-`RLTStateBuilder` remains only for fake/debug local runners; the formal LIBERO
-path uses the explicit `encode_rlt_obs` flow above.
+`vla_rl.algorithms.rlt` owns the trainable heads, update logic, encoder loader,
+and shared `encode_rlt_obs` helper.
 
 ## PLD Data Flow
 
@@ -135,12 +134,10 @@ Disable online upload for local smoke/debug runs with:
 wandb.mode=disabled
 ```
 
-The uploaded payload is intentionally small and mirrors HIL-SERL: learner
-update metrics (`train/*`), timer averages (`timer/*`), and actor episode
-environment summaries (`environment/episode/*`). VLA-RL does not upload replay
-sizes, speed diagnostics, observations, replay batches, raw actions, videos, or
-model-specific large arrays. Those richer diagnostics remain available in the
-local JSONL files.
+The uploaded payload is intentionally small and mirrors HIL-SERL: cloud logging
+keeps only `rollout/*`, `learner/*`, and `eval/*`. Timers, environment internals,
+observations, replay batches, raw actions, videos, and model-specific large
+arrays stay in local files or are omitted.
 
 ## Public vs Example-Local
 

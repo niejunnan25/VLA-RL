@@ -25,7 +25,6 @@ policy:
 
 rlt:
   chunk_size: 5
-  replan_steps: 5
   subsample_stride: 2
   max_tokens: null
 

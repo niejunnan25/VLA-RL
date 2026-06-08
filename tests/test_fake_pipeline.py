@@ -1,14 +1,9 @@
-import json
-from pathlib import Path
-
 import numpy as np
 
 from vla_rl.algorithms.fake import FakeAlgorithm
 from vla_rl.data import RolloutBatch, Transition
 from vla_rl.envs.fake import FakeEnvBackend
-from examples.fake_debug.local_actor_learner import LocalActorLearnerRunner
 from vla_rl.policies.fake import FakePolicyBackend
-from examples.fake_debug.local_runner import LocalRunner
 
 
 def test_fake_components_individually():
@@ -41,54 +36,6 @@ def test_fake_components_individually():
     metrics = algorithm.update(RolloutBatch(transitions=[transition]))
     assert metrics["updates"] == 1
     assert metrics["batch_size"] == 1
-
-
-def test_local_runner_writes_metrics(tmp_path: Path):
-    env = FakeEnvBackend(max_steps=10)
-    policy = FakePolicyBackend()
-    algorithm = FakeAlgorithm()
-    metrics_path = tmp_path / "metrics.jsonl"
-
-    runner = LocalRunner(
-        env=env,
-        policy=policy,
-        algorithm=algorithm,
-        max_steps=10,
-        metrics_path=str(metrics_path),
-    )
-    summary = runner.run()
-
-    assert summary["steps"] == 10
-    assert summary["updates"] == 10
-    lines = [json.loads(line) for line in metrics_path.read_text().splitlines()]
-    assert len(lines) == 11
-    assert lines[-1]["summary"]["steps"] == 10
-
-
-def test_local_actor_learner_runner_uses_replay(tmp_path: Path):
-    env = FakeEnvBackend(max_steps=10)
-    policy = FakePolicyBackend()
-    algorithm = FakeAlgorithm()
-    metrics_path = tmp_path / "actor_learner.jsonl"
-
-    runner = LocalActorLearnerRunner(
-        env=env,
-        policy=policy,
-        algorithm=algorithm,
-        max_env_steps=10,
-        max_update_steps=10,
-        execute_horizon=2,
-        batch_size=1,
-        metrics_path=str(metrics_path),
-    )
-    summary = runner.run()
-
-    assert summary["env_steps"] == 10
-    assert summary["update_steps"] == 10
-    assert summary["replay_size"] == 5
-    lines = [json.loads(line) for line in metrics_path.read_text().splitlines()]
-    assert lines[-1]["summary"]["replay_size"] == 5
-
 
 
 def test_fake_env_step_chunk_returns_final_step_info():

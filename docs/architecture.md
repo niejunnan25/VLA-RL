@@ -12,8 +12,8 @@ such as OpenPI, StarVLA, and JoyRA expose only inference hooks.
 ## Boundaries
 
 - Model repositories expose frozen policy capabilities such as
-  `predict_actions_and_prefix()` or `predict_action_with_features()`. They do
-  not own replay, actor/learner loops, checkpoints, or RL losses.
+  `predict_action_with_features()` and `predict_action_with_self_conditioned_features()`.
+  They do not own replay, actor/learner loops, checkpoints, or RL losses.
 - `vla_rl.policies` contains reference-policy clients and lightweight wrappers
   around those external VLA providers. This is the boundary between model
   environments and the RL framework.
@@ -41,13 +41,13 @@ observation
   -> RLTAgent.update(batch)
 ```
 
-The model-side interface is intentionally small:
+The training-side client narrows model-specific RPC into one actor-loop call:
 
 ```python
-predict_actions_and_prefix(observation, ...) -> (base_actions, prefix_tokens, proprio)
+ReferencePolicyClient.predict_actions_and_prefix(observation, ...) -> (base_actions, prefix_tokens, proprio)
 ```
 
-The RLT actor/critic uses a single `chunk_size`: `reference_action`, sampled action, environment execution, replay action, critic action input, and BC target are all `chunk_size * action_dim`. VLA-RL v0 does not support a separate RLT execution horizon; adaptive execution should be designed as a separate method.
+The RLT actor/critic uses `chunk_size` as the action chunk length: reference action, sampled action, environment execution, replay action, critic action input, and BC target are all `chunk_size * action_dim`. `subsample_stride` only controls window replay density.
 
 ## PLD Mainline
 
