@@ -207,13 +207,13 @@ class ListDataStore:
         self.payloads.append(payload)
 
 
-def test_rlt_subsample_flush_uses_cross_chunk_actions():
+def test_rlt_window_replay_uses_cross_chunk_actions():
     store = ListDataStore()
     current_actions = np.arange(20, dtype=np.float32).reshape(10, 2)
     next_actions = np.arange(20, 40, dtype=np.float32).reshape(10, 2)
     pending = {
         "rlt_obs": make_rlt_state(0.0),
-        "sub_rlt_obs": [make_rlt_state(2.0), make_rlt_state(4.0), make_rlt_state(6.0), make_rlt_state(8.0)],
+        "window_start_rlt_obs": [make_rlt_state(2.0), make_rlt_state(4.0), make_rlt_state(6.0), make_rlt_state(8.0)],
         "actions": current_actions,
         "next_actions": next_actions,
         "reward": 1.0,
@@ -226,17 +226,17 @@ def test_rlt_subsample_flush_uses_cross_chunk_actions():
         "chunk_start_env_steps": 0,
     }
 
-    sent = rlt_train._flush_subsampled_rlt_chunk(
+    inserted = rlt_train._insert_window_replay_transitions(
         pending,
         next_rlt_obs=make_rlt_state(10.0),
-        next_sub_rlt_obs=[make_rlt_state(12.0), make_rlt_state(14.0), make_rlt_state(16.0), make_rlt_state(18.0)],
+        next_window_start_rlt_obs=[make_rlt_state(12.0), make_rlt_state(14.0), make_rlt_state(16.0), make_rlt_state(18.0)],
         data_store=store,
         subsample_stride=2,
         chunk_size=10,
         gamma=0.99,
     )
 
-    assert sent == 5
+    assert inserted == 5
     transitions = [Transition.from_payload(payload) for payload in store.payloads]
     assert [t.info["subsample_position"] for t in transitions] == [0, 2, 4, 6, 8]
     np.testing.assert_allclose(transitions[0].action.reshape(10, 2), current_actions)
