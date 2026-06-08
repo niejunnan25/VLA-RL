@@ -92,20 +92,34 @@ class LiberoRemoteEnvBackend(EnvBackend):
         obs = build_libero_observation(raw_obs, task=self._task_from_meta(meta), image_size=self.image_size)
         return obs, reward, done, truncated, info
 
-    def step_chunk(self, actions: np.ndarray) -> tuple[Observation, float, bool, bool, dict]:
+    def step_chunk(self, actions: np.ndarray, *, return_steps: bool = False) -> tuple[Observation, float, bool, bool, dict]:
         actions = np.asarray(actions, dtype=np.float32)
         response = self.client.call("step_chunk", actions=actions)
         meta = response.get("meta", self.meta)
         self.meta = meta
         task = self._task_from_meta(meta)
-        raw_obs = response["obs"]
-        obs = build_libero_observation(raw_obs, task=task, image_size=self.image_size)
-        reward = float(response.get("reward", response.get("reward_sum", 0.0)))
-        done = bool(response.get("done", False))
-        truncated = bool(response.get("truncated", False))
-        info = dict(response.get("info", {}))
-        info.setdefault("executed_steps", int(response.get("num_steps", len(actions))))
-        return obs, reward, done, truncated, info
+        self._task = task
+
+        obs = build_libero_observation(response["obs"], task=task, image_size=self.image_size)
+        info = dict(response["info"])
+        info["executed_steps"] = int(response["num_steps"])
+        if return_steps:
+            info["observations"] = [
+                build_libero_observation(raw_obs, task=task, image_size=self.image_size)
+                for raw_obs in response["observations"]
+            ]
+            info["rewards"] = [float(item) for item in response["rewards"]]
+            info["dones"] = [bool(item) for item in response["dones"]]
+            info["truncateds"] = [bool(step.get("truncated", False)) for step in response["steps"]]
+            info["infos"] = [dict(item) for item in response["infos"]]
+            info["num_steps"] = int(response["num_steps"])
+        return (
+            obs,
+            float(response["reward_sum"]),
+            bool(response["done"]),
+            bool(response["truncated"]),
+            info,
+        )
 
     def close(self, clear_cache: bool = False) -> None:
         try:

@@ -24,7 +24,7 @@ class EnvBackend(ABC):
     def step(self, action: np.ndarray) -> tuple[Observation, float, bool, bool, dict]:
         raise NotImplementedError
 
-    def step_chunk(self, actions: np.ndarray) -> tuple[Observation, float, bool, bool, dict]:
+    def step_chunk(self, actions: np.ndarray, *, return_steps: bool = False) -> tuple[Observation, float, bool, bool, dict]:
         actions = np.asarray(actions, dtype=np.float32)
         if actions.ndim == 1:
             actions = actions[None, :]
@@ -33,10 +33,20 @@ class EnvBackend(ABC):
         done = False
         truncated = False
         info: dict = {}
+        observations: list[Observation] = []
+        rewards: list[float] = []
+        dones: list[bool] = []
+        truncateds: list[bool] = []
+        infos: list[dict] = []
         executed_steps = 0
         for action in actions:
             next_obs, reward, done, truncated, info = self.step(action)
             total_reward += float(reward)
+            observations.append(next_obs)
+            rewards.append(float(reward))
+            dones.append(bool(done))
+            truncateds.append(bool(truncated))
+            infos.append(dict(info))
             executed_steps += 1
             if done or truncated:
                 break
@@ -44,6 +54,13 @@ class EnvBackend(ABC):
             raise ValueError("step_chunk requires at least one action")
         info = dict(info)
         info["executed_steps"] = executed_steps
+        if return_steps:
+            info["observations"] = observations
+            info["rewards"] = rewards
+            info["dones"] = dones
+            info["truncateds"] = truncateds
+            info["infos"] = infos
+            info["num_steps"] = executed_steps
         return next_obs, float(total_reward), bool(done), bool(truncated), info
 
     def close(self) -> None:

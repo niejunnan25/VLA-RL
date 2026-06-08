@@ -516,11 +516,24 @@ def run_actor(cfg: DictConfig) -> dict[str, Any]:
             executed_steps = 0
             chunk_success = False
             sub_rlt_obs: list[dict[str, np.ndarray]] = []
+            remaining_env_steps = int(runtime.max_env_steps) - env_steps
+            actions_to_execute = actions[: min(chunk_size, remaining_env_steps)]
 
             with timer.context("step_env"):
-                for action in actions[:chunk_size]:
-                    next_obs, step_reward, done, truncated, step_info = env.step(action)
-                    info = dict(step_info)
+                next_obs, _, done, truncated, info = env.step_chunk(actions_to_execute, return_steps=True)
+
+                observations = list(info["observations"])
+                rewards = list(info["rewards"])
+                dones = list(info["dones"])
+                truncateds = list(info["truncateds"])
+                infos = list(info["infos"])
+
+                for step_idx in range(int(info["num_steps"])):
+                    next_obs = observations[step_idx]
+                    step_reward = float(rewards[step_idx])
+                    done = bool(dones[step_idx])
+                    truncated = bool(truncateds[step_idx])
+                    info = dict(infos[step_idx])
                     chunk_reward += float(step_reward)
                     executed_steps += 1
                     env_steps += 1
