@@ -535,6 +535,7 @@ def run_actor(cfg: DictConfig) -> dict[str, Any]:
             executed_steps = 0
             chunk_success = False
             window_start_rlt_obs: list[dict[str, np.ndarray]] = []
+            subsample_steps: list[int] = []
             remaining_env_steps = int(runtime.max_env_steps) - env_steps
             actions_to_execute = actions[: min(replan_steps, remaining_env_steps)]
             subsample_observation_steps = _subsample_observation_steps(
@@ -576,37 +577,41 @@ def run_actor(cfg: DictConfig) -> dict[str, Any]:
                         and executed_steps % subsample_stride == 0
                         and executed_steps < chunk_size
                     ):
-                        with timer.context("subsample_vla_inference"):
-                            sub_obs = subsample_obs_by_step[executed_steps]
-                            sub_base_actions, sub_prefix_tokens, sub_proprio = reference_policy.predict_actions_and_prefix(
-                                sub_obs,
-                                feature_source=online_feature_source,
-                                num_steps=reference_policy_num_steps,
-                            )
-                            sub_base_actions = np.asarray(sub_base_actions, dtype=np.float32)[:chunk_size]
-                            window_start_rlt_obs.append(
-                                encode_rlt_obs(
-                                    sub_prefix_tokens,
-                                    sub_base_actions,
-                                    sub_proprio,
-                                    rl_token_encoder=rl_token_encoder,
-                                )
-                            )
+                        subsample_steps.append(executed_steps)
 
                     if bool(done or truncated) or env_steps >= int(runtime.max_env_steps):
                         break
+
+            batch_observations = [subsample_obs_by_step[step] for step in subsample_steps]
+            batch_observations.append(next_obs)
+            with timer.context("batch_reference_policy"):
+                batch_features = reference_policy.predict_batch_actions_and_prefix(
+                    batch_observations,
+                    feature_source=online_feature_source,
+                    num_steps=reference_policy_num_steps,
+                )
+
+            subsample_features = batch_features[:-1]
+            next_base_actions, next_prefix_tokens, next_proprio = batch_features[-1]
+            next_base_actions = np.asarray(next_base_actions, dtype=np.float32)[:chunk_size]
+
+            if subsample_features:
+                with timer.context("encode_subsample_rlt_obs"):
+                    for sub_base_actions, sub_prefix_tokens, sub_proprio in subsample_features:
+                        sub_base_actions = np.asarray(sub_base_actions, dtype=np.float32)[:chunk_size]
+                        window_start_rlt_obs.append(
+                            encode_rlt_obs(
+                                sub_prefix_tokens,
+                                sub_base_actions,
+                                sub_proprio,
+                                rl_token_encoder=rl_token_encoder,
+                            )
+                        )
 
             reward = float(chunk_reward)
             total_reward += reward
             terminal = bool(done or truncated)
 
-            with timer.context("next_reference_policy"):
-                next_base_actions, next_prefix_tokens, next_proprio = reference_policy.predict_actions_and_prefix(
-                    next_obs,
-                    feature_source=online_feature_source,
-                    num_steps=reference_policy_num_steps,
-                )
-                next_base_actions = np.asarray(next_base_actions, dtype=np.float32)[:chunk_size]
             with timer.context("next_encode_rlt_obs"):
                 next_rlt_state = encode_rlt_obs(
                     next_prefix_tokens,

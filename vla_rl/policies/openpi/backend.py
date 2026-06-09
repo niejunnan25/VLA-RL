@@ -31,6 +31,24 @@ def _numpy_to_batched_torch(tree: dict[str, Any], device: torch.device) -> dict[
     )
 
 
+def _numpy_to_torch(tree: dict[str, Any], device: torch.device) -> dict[str, Any]:
+    return _tree_map(
+        lambda value: torch.from_numpy(np.array(value, copy=True)).to(device),
+        tree,
+    )
+
+
+def _stack_numpy_trees(trees: list[Any]) -> Any:
+    first = trees[0]
+    if isinstance(first, dict):
+        return {key: _stack_numpy_trees([tree[key] for tree in trees]) for key in first}
+    if isinstance(first, tuple):
+        return tuple(_stack_numpy_trees([tree[index] for tree in trees]) for index in range(len(first)))
+    if isinstance(first, list):
+        return [_stack_numpy_trees([tree[index] for tree in trees]) for index in range(len(first))]
+    return np.stack([np.asarray(tree) for tree in trees], axis=0)
+
+
 def _to_pytorch_image_layout(image: torch.Tensor) -> torch.Tensor:
     if image.dim() == 4 and image.shape[-1] == 3 and image.dtype != torch.uint8:
         return image.permute(0, 3, 1, 2).contiguous()
@@ -79,6 +97,10 @@ class _OpenPIBasePolicy:
         processed = self.policy._input_transform(raw_obs)
         return _normalize_image_layouts(_numpy_to_batched_torch(processed, self.device))
 
+    def raw_batch_obs_to_torch(self, raw_observations: list[dict[str, Any]]) -> dict[str, Any]:
+        processed = [self.policy._input_transform(raw_obs) for raw_obs in raw_observations]
+        return _normalize_image_layouts(_numpy_to_torch(_stack_numpy_trees(processed), self.device))
+
     def to_observation(self, obs_torch: dict[str, Any]) -> Any:
         return self.observation_cls.from_dict(obs_torch)
 
@@ -88,6 +110,17 @@ class _OpenPIBasePolicy:
             "actions": actions.detach().cpu()[0],
         }
         return np.asarray(self.policy._output_transform(out)["actions"], dtype=np.float32)
+
+    def _unnormalize_action_batch(self, obs_torch: dict[str, Any], actions: torch.Tensor) -> list[np.ndarray]:
+        states = obs_torch["state"].detach().cpu()
+        action_batch = actions.detach().cpu()
+        return [
+            np.asarray(
+                self.policy._output_transform({"state": states[index], "actions": action_batch[index]})["actions"],
+                dtype=np.float32,
+            )
+            for index in range(action_batch.shape[0])
+        ]
 
     @torch.no_grad()
     def infer_features(
@@ -118,6 +151,37 @@ class _OpenPIBasePolicy:
             reference_actions=unnorm_actions,
         )
 
+
+    @torch.no_grad()
+    def infer_batch_features(
+        self,
+        raw_observations: list[dict[str, Any]],
+        num_steps: int = 10,
+        feature_source: str = "policy_prior_prefix",
+    ) -> list[_OpenPIFeatureBatch]:
+        if not raw_observations:
+            return []
+        obs_torch = self.raw_batch_obs_to_torch(raw_observations)
+        obs_obj = self.to_observation(obs_torch)
+        method_name = _openpi_feature_method(str(feature_source))
+        method = getattr(self.model, method_name)
+        out = method(
+            device=self.device,
+            observation=obs_obj,
+            noise=None,
+            num_steps=num_steps,
+        )
+        if not isinstance(out, dict) or "actions" not in out or "features" not in out:
+            raise RuntimeError(f"{method_name}() must return a dict with actions and features")
+        features = out["features"]
+        if not isinstance(features, dict) or "prefix" not in features:
+            raise RuntimeError(f"{method_name}()[features] must contain prefix")
+        prefix = torch.as_tensor(features["prefix"], device=self.device).to(torch.float32)
+        action_list = self._unnormalize_action_batch(obs_torch, out["actions"])
+        return [
+            _OpenPIFeatureBatch(prefix=prefix[index : index + 1], reference_actions=action_list[index])
+            for index in range(len(action_list))
+        ]
 
     def sample_actions(self, raw_obs: dict[str, Any], **kwargs) -> np.ndarray:
         num_steps = int(kwargs.pop("num_steps", 10))
@@ -199,6 +263,40 @@ class OpenPIBackend(PolicyBackend):
             embeddings={
                 "prefix": self._to_numpy(feature_dict["prefix"]),
             },
+            proprio=obs.proprio.copy() if obs.proprio is not None else None,
+            metadata=self._metadata(feature_source=feature_source),
+        )
+        features.validate()
+        return features
+
+    def extract_batch_features(self, observations: list[Observation], **kwargs) -> list[PolicyFeatures]:
+        feature_source = str(kwargs.pop("feature_source", "policy_prior_prefix"))
+        num_steps = int(kwargs.pop("num_steps", 10))
+        if hasattr(self.policy, "infer_batch_features"):
+            openpi_observations = [self._to_openpi_observation(obs, task=obs.task) for obs in observations]
+            feature_batches = self.policy.infer_batch_features(
+                openpi_observations,
+                num_steps=num_steps,
+                feature_source=feature_source,
+            )
+            return [
+                self._features_from_openpi_batch(obs, feature_batch, feature_source=feature_source)
+                for obs, feature_batch in zip(observations, feature_batches)
+            ]
+
+        call_kwargs = {**kwargs, "feature_source": feature_source, "num_steps": num_steps}
+        return [self.extract_features(obs, **call_kwargs) for obs in observations]
+
+    def _features_from_openpi_batch(
+        self,
+        obs: Observation,
+        feature_batch: _OpenPIFeatureBatch,
+        *,
+        feature_source: str,
+    ) -> PolicyFeatures:
+        features = PolicyFeatures(
+            reference_actions=self._normalize_reference_actions(feature_batch.reference_actions),
+            embeddings={"prefix": self._to_numpy(feature_batch.prefix)},
             proprio=obs.proprio.copy() if obs.proprio is not None else None,
             metadata=self._metadata(feature_source=feature_source),
         )
