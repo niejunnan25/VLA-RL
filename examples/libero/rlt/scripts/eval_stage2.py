@@ -87,6 +87,7 @@ def run_eval(
         agent = create_rlt_agent(cfg)
         checkpoint = torch.load(Path(checkpoint_path), map_location=agent.device)
         agent.load_state_dict(checkpoint["algorithm_state"])
+        train_episode = int(checkpoint.get("episodes", 0) or 0)
 
         episodes_path = output_dir / "eval_episodes.jsonl"
         episodes_path.write_text("")
@@ -137,6 +138,7 @@ def run_eval(
             "avg_return": float(np.mean([r["return"] for r in records])) if records else 0.0,
             "avg_length": float(np.mean([r["length"] for r in records])) if records else 0.0,
             "checkpoint_path": str(Path(checkpoint_path)),
+            "train_episode": train_episode,
             "feature_source": online_feature_source,
             "task": {"suite": cfg.env.get("task_suite_name", None), "task_id": cfg.env.get("task_id", None)},
         }
@@ -144,6 +146,7 @@ def run_eval(
         if wandb_logger is not None:
             wandb_logger.log(
                 {
+                    "eval/train_episode": summary["train_episode"],
                     "eval/success_rate": summary["success_rate"],
                     "eval/mean_return": summary["avg_return"],
                     "eval/mean_steps": summary["avg_length"],

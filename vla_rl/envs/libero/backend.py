@@ -92,9 +92,15 @@ class LiberoRemoteEnvBackend(EnvBackend):
         obs = build_libero_observation(raw_obs, task=self._task_from_meta(meta), image_size=self.image_size)
         return obs, reward, done, truncated, info
 
-    def step_chunk(self, actions: np.ndarray, *, return_steps: bool = False) -> tuple[Observation, float, bool, bool, dict]:
+    def step_chunk(
+        self,
+        actions: np.ndarray,
+        *,
+        return_steps: bool = False,
+        observation_indices: list[int] | None = None,
+    ) -> tuple[Observation, float, bool, bool, dict]:
         actions = np.asarray(actions, dtype=np.float32)
-        response = self.client.call("step_chunk", actions=actions)
+        response = self.client.call("step_chunk", actions=actions, observation_indices=observation_indices)
         meta = response.get("meta", self.meta)
         self.meta = meta
         task = self._task_from_meta(meta)
@@ -104,9 +110,12 @@ class LiberoRemoteEnvBackend(EnvBackend):
         info = dict(response["info"])
         info["executed_steps"] = int(response["num_steps"])
         if return_steps:
+            raw_observations = list(response["observations"])
+            observation_indices = response.get("observation_indices", range(1, len(raw_observations) + 1))
+            info["observation_indices"] = [int(item) for item in observation_indices]
             info["observations"] = [
                 build_libero_observation(raw_obs, task=task, image_size=self.image_size)
-                for raw_obs in response["observations"]
+                for raw_obs in raw_observations
             ]
             info["rewards"] = [float(item) for item in response["rewards"]]
             info["dones"] = [bool(item) for item in response["dones"]]

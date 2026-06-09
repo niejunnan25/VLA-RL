@@ -173,10 +173,10 @@ def test_async_eval_queue_and_result_roundtrip(tmp_path: Path):
     assert '"type": "eval"' in queue_lines[0]
     assert '"type": "stop"' in queue_lines[1]
 
-    runtime.summary_jsonl_path.write_text('{"eval/success_rate": 1.0, "eval_index": 0}\n')
+    runtime.summary_jsonl_path.write_text('{"eval/train_episode": 50, "eval/success_rate": 1.0, "eval_index": 0}\n')
     results = load_new_async_eval_results(runtime)
 
-    assert results == [{"eval/success_rate": 1.0, "eval_index": 0}]
+    assert results == [{"eval/train_episode": 50, "eval/success_rate": 1.0, "eval_index": 0}]
     assert load_new_async_eval_results(runtime) == []
 
 

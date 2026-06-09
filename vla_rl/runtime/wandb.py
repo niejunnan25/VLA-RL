@@ -79,13 +79,14 @@ class _NativeWandBRun:
             define_metric("rollout/*", step_metric="rollout/episode_id")
             define_metric("learner/update_steps")
             define_metric("learner/*", step_metric="learner/update_steps")
-            define_metric("eval/episodes_run")
-            define_metric("eval/*", step_metric="eval/episodes_run")
+            define_metric("eval/train_episode")
+            define_metric("eval/*", step_metric="eval/train_episode")
 
     def log(self, data: dict[str, Any], *, step: int | None = None) -> None:
         payload = select_hil_serl_wandb_scalars(data)
         if payload:
-            self._wandb.log(payload, step=step)
+            del step
+            self._wandb.log(payload)
 
     def finish(self) -> None:
         self._wandb.finish()
@@ -138,7 +139,7 @@ class _SwanLabRun:
     def log(self, data: dict[str, Any], *, step: int | None = None) -> None:
         payload = select_hil_serl_wandb_scalars(data)
         if payload:
-            self._swanlab.log(payload, step=step)
+            self._swanlab.log(payload, step=select_hil_serl_wandb_step(payload, default=step))
 
     def finish(self) -> None:
         self._swanlab.finish()
@@ -181,6 +182,22 @@ def select_hil_serl_wandb_scalars(data: dict[str, Any]) -> dict[str, Any]:
         if key.startswith(("rollout/", "learner/", "eval/")):
             selected[key] = value
     return selected
+
+
+def select_hil_serl_wandb_step(data: dict[str, Any], *, default: int | None = None) -> int | None:
+    """Choose the cloud x-axis for a single SERL-style metric payload."""
+
+    if _has_only_prefix(data, "rollout/") and "rollout/episode_id" in data:
+        return int(data["rollout/episode_id"])
+    if _has_only_prefix(data, "eval/") and "eval/train_episode" in data:
+        return int(data["eval/train_episode"])
+    if _has_only_prefix(data, "learner/") and "learner/update_steps" in data:
+        return int(data["learner/update_steps"])
+    return default
+
+
+def _has_only_prefix(data: dict[str, Any], prefix: str) -> bool:
+    return bool(data) and all(key.startswith(prefix) for key in data)
 
 
 def _flatten_into(flat: dict[str, Any], prefix: str, value: Any) -> None:

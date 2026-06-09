@@ -57,6 +57,16 @@ from examples.libero.rlt.config import (
 )
 
 
+def _subsample_observation_steps(action_steps: int, chunk_size: int, subsample_stride: int) -> list[int]:
+    if subsample_stride <= 1:
+        return []
+    return [
+        step
+        for step in range(subsample_stride, action_steps + 1, subsample_stride)
+        if step < chunk_size
+    ]
+
+
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description="Run LIBERO RLT actor or learner.")
     parser.add_argument("--config", required=True, help="Path to an RLT YAML config.")
@@ -477,6 +487,8 @@ def run_actor(cfg: DictConfig) -> dict[str, Any]:
         subsample_stride = int(rlt.get("subsample_stride", 0) or 0)
         window_replay_enabled = subsample_stride > 1
         pending_chunk: dict[str, Any] | None = None
+        cached_rlt_obs: dict[str, np.ndarray] | None = None
+        cached_base_actions: np.ndarray | None = None
         episode_step = 0
         recent_successes: deque[int] = deque(maxlen=50)
 
@@ -485,21 +497,27 @@ def run_actor(cfg: DictConfig) -> dict[str, Any]:
             chunk_start = time.perf_counter()
             chunk_start_env_steps = env_steps
 
-            with timer.context("reference_policy"):
-                base_actions, prefix_tokens, proprio = reference_policy.predict_actions_and_prefix(
-                    obs,
-                    feature_source=online_feature_source,
-                    num_steps=reference_policy_num_steps,
-                )
-                base_actions = np.asarray(base_actions, dtype=np.float32)[:chunk_size]
+            if cached_rlt_obs is None:
+                with timer.context("reference_policy"):
+                    base_actions, prefix_tokens, proprio = reference_policy.predict_actions_and_prefix(
+                        obs,
+                        feature_source=online_feature_source,
+                        num_steps=reference_policy_num_steps,
+                    )
+                    base_actions = np.asarray(base_actions, dtype=np.float32)[:chunk_size]
 
-            with timer.context("encode_rlt_obs"):
-                rlt_obs = encode_rlt_obs(
-                    prefix_tokens,
-                    base_actions,
-                    proprio,
-                    rl_token_encoder=rl_token_encoder,
-                )
+                with timer.context("encode_rlt_obs"):
+                    rlt_obs = encode_rlt_obs(
+                        prefix_tokens,
+                        base_actions,
+                        proprio,
+                        rl_token_encoder=rl_token_encoder,
+                    )
+            else:
+                rlt_obs = cached_rlt_obs
+                base_actions = cached_base_actions
+                cached_rlt_obs = None
+                cached_base_actions = None
 
             with timer.context("sample_actions"):
                 if env_steps < int(runtime.warmup_steps):
@@ -519,18 +537,26 @@ def run_actor(cfg: DictConfig) -> dict[str, Any]:
             window_start_rlt_obs: list[dict[str, np.ndarray]] = []
             remaining_env_steps = int(runtime.max_env_steps) - env_steps
             actions_to_execute = actions[: min(replan_steps, remaining_env_steps)]
+            subsample_observation_steps = _subsample_observation_steps(
+                action_steps=len(actions_to_execute),
+                chunk_size=chunk_size,
+                subsample_stride=subsample_stride,
+            )
 
             with timer.context("step_env"):
-                next_obs, _, done, truncated, info = env.step_chunk(actions_to_execute, return_steps=True)
+                next_obs, _, done, truncated, info = env.step_chunk(
+                    actions_to_execute,
+                    return_steps=True,
+                    observation_indices=subsample_observation_steps,
+                )
+                subsample_obs_by_step = dict(zip(info["observation_indices"], info["observations"]))
 
-                observations = list(info["observations"])
                 rewards = list(info["rewards"])
                 dones = list(info["dones"])
                 truncateds = list(info["truncateds"])
                 infos = list(info["infos"])
 
                 for step_idx in range(int(info["num_steps"])):
-                    next_obs = observations[step_idx]
                     step_reward = float(rewards[step_idx])
                     done = bool(dones[step_idx])
                     truncated = bool(truncateds[step_idx])
@@ -551,8 +577,9 @@ def run_actor(cfg: DictConfig) -> dict[str, Any]:
                         and executed_steps < chunk_size
                     ):
                         with timer.context("subsample_vla_inference"):
+                            sub_obs = subsample_obs_by_step[executed_steps]
                             sub_base_actions, sub_prefix_tokens, sub_proprio = reference_policy.predict_actions_and_prefix(
-                                next_obs,
+                                sub_obs,
                                 feature_source=online_feature_source,
                                 num_steps=reference_policy_num_steps,
                             )
@@ -651,6 +678,8 @@ def run_actor(cfg: DictConfig) -> dict[str, Any]:
             active_rollout_time_sec += chunk_time_sec
             reset_time_sec = 0.0
             if terminal:
+                cached_rlt_obs = None
+                cached_base_actions = None
                 episode_success = bool(chunk_success)
                 recent_successes.append(int(episode_success))
                 recent_success_rate_50 = float(sum(recent_successes)) / max(1, len(recent_successes))
@@ -684,6 +713,8 @@ def run_actor(cfg: DictConfig) -> dict[str, Any]:
                 reset_time_sec = time.perf_counter() - reset_start
             else:
                 obs = next_obs
+                cached_rlt_obs = next_rlt_state
+                cached_base_actions = next_base_actions
 
             wall_time_sec = time.perf_counter() - start_time
             timer.tock("total")

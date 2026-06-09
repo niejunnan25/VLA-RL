@@ -9,6 +9,7 @@ from vla_rl.runtime.wandb import (
     make_wandb_logger,
     flatten_wandb_scalars,
     select_hil_serl_wandb_scalars,
+    select_hil_serl_wandb_step,
 )
 
 
@@ -38,7 +39,7 @@ def test_hil_serl_wandb_filter_keeps_readable_rlt_aliases() -> None:
             "train/loss_critic": 1.0,
             "rollout": {"episode_id": 3, "success": 1, "recent_success_rate_50": 0.35},
             "learner": {"loss_actor": 2.0, "bc_loss": 0.4},
-            "eval": {"success_rate": 0.5, "episodes_run": 10},
+            "eval": {"train_episode": 50, "success_rate": 0.5, "episodes_run": 10},
             "time/algorithm_update_sec": 0.02,
             "time/publish_network_sec": 0.03,
             "time/save_checkpoint_sec": 0.04,
@@ -54,9 +55,17 @@ def test_hil_serl_wandb_filter_keeps_readable_rlt_aliases() -> None:
         "rollout/recent_success_rate_50": 0.35,
         "learner/loss_actor": 2.0,
         "learner/bc_loss": 0.4,
+        "eval/train_episode": 50,
         "eval/success_rate": 0.5,
         "eval/episodes_run": 10,
     }
+
+
+def test_hil_serl_wandb_step_uses_group_axes() -> None:
+    assert select_hil_serl_wandb_step({"rollout/episode_id": 3, "rollout/success": 1}, default=99) == 3
+    assert select_hil_serl_wandb_step({"eval/train_episode": 50, "eval/success_rate": 0.8}, default=99) == 50
+    assert select_hil_serl_wandb_step({"learner/update_steps": 7, "learner/loss_actor": 1.2}, default=99) == 7
+    assert select_hil_serl_wandb_step({"rollout/success": 1}, default=99) == 99
 
 
 def test_disabled_wandb_logger_is_noop() -> None:
@@ -114,10 +123,10 @@ def test_wandb_logger_falls_back_to_native_wandb_when_swanlab_is_missing(monkeyp
         (("rollout/*",), {"step_metric": "rollout/episode_id"}),
         (("learner/update_steps",), {}),
         (("learner/*",), {"step_metric": "learner/update_steps"}),
-        (("eval/episodes_run",), {}),
-        (("eval/*",), {"step_metric": "eval/episodes_run"}),
+        (("eval/train_episode",), {}),
+        (("eval/*",), {"step_metric": "eval/train_episode"}),
     ]
-    assert calls["logs"] == [({"learner/loss_actor": 2.0}, 7)]
+    assert calls["logs"] == [({"learner/loss_actor": 2.0}, None)]
     assert calls["finished"] is True
 
 

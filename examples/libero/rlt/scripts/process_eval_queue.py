@@ -104,10 +104,12 @@ def _run_request(base_cfg, request: dict[str, Any]) -> dict[str, Any]:
             "request": request,
         }
 
+    train_episode = int(request.get("train_episode_id", 0) or 0)
     return {
         "status": "ok",
         "eval_index": request.get("eval_index"),
         "request": request,
+        "eval/train_episode": train_episode,
         "eval/success_rate": summary["success_rate"],
         "eval/mean_return": summary["avg_return"],
         "eval/mean_steps": summary["avg_length"],
