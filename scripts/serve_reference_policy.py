@@ -50,12 +50,6 @@ def main() -> None:
             if kwargs:
                 call_kwargs = {**call_kwargs, **kwargs}
             return reference_policy.predict_action_with_features(obs, **call_kwargs)
-        if method == "predict_batch_action_with_features":
-            observations = kwargs.pop("observations")
-            call_kwargs = kwargs.pop("kwargs", {})
-            if kwargs:
-                call_kwargs = {**call_kwargs, **kwargs}
-            return reference_policy.predict_batch_action_with_features(observations, **call_kwargs)
         if method == "action_spec":
             return reference_policy.action_spec()
         raise ValueError(f"unsupported reference-policy RPC method: {method}")

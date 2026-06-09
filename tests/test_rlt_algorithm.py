@@ -62,13 +62,6 @@ def test_rl_token_encoder_shape():
     assert z_rl.shape == (2, 8)
 
 
-
-def test_rlt_subsample_observation_steps_skip_final_chunk_state():
-    assert rlt_train._subsample_observation_steps(action_steps=5, chunk_size=5, subsample_stride=2) == [2, 4]
-    assert rlt_train._subsample_observation_steps(action_steps=5, chunk_size=10, subsample_stride=2) == [2, 4]
-    assert rlt_train._subsample_observation_steps(action_steps=3, chunk_size=5, subsample_stride=2) == [2]
-    assert rlt_train._subsample_observation_steps(action_steps=5, chunk_size=5, subsample_stride=0) == []
-
 def test_rlt_encoder_checkpoint_loading_and_max_tokens(tmp_path: Path):
     encoder = RLTokenEncoder(input_dim=8, rl_token_dim=8, num_layers=1, num_heads=2, ff_dim=16)
     path = tmp_path / "encoder.pt"

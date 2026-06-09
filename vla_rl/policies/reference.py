@@ -22,16 +22,6 @@ class ReferencePolicy(Protocol):
     def predict_actions_and_prefix(self, obs: Observation, **kwargs: Any) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
         ...
 
-    def predict_batch_action_with_features(self, observations: list[Observation], **kwargs: Any) -> list[PolicyFeatures]:
-        ...
-
-    def predict_batch_actions_and_prefix(
-        self,
-        observations: list[Observation],
-        **kwargs: Any,
-    ) -> list[tuple[np.ndarray, np.ndarray, np.ndarray]]:
-        ...
-
 
 @dataclass(slots=True)
 class OpenPIReferencePolicy:
@@ -48,18 +38,6 @@ class OpenPIReferencePolicy:
     def predict_actions_and_prefix(self, obs: Observation, **kwargs: Any) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
         features = self.predict_action_with_features(obs, **kwargs)
         return _actions_prefix_proprio(features)
-
-    def predict_batch_action_with_features(self, observations: list[Observation], **kwargs: Any) -> list[PolicyFeatures]:
-        if hasattr(self.policy, "extract_batch_features"):
-            return self.policy.extract_batch_features(observations, **kwargs)
-        return [self.predict_action_with_features(obs, **kwargs) for obs in observations]
-
-    def predict_batch_actions_and_prefix(
-        self,
-        observations: list[Observation],
-        **kwargs: Any,
-    ) -> list[tuple[np.ndarray, np.ndarray, np.ndarray]]:
-        return [_actions_prefix_proprio(features) for features in self.predict_batch_action_with_features(observations, **kwargs)]
 
 
 class ReferencePolicyClient(PolicyBackend):
@@ -105,29 +83,6 @@ class ReferencePolicyClient(PolicyBackend):
     def predict_actions_and_prefix(self, obs: Observation, **kwargs: Any) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
         features = self.predict_action_with_features(obs, **kwargs)
         return _actions_prefix_proprio(features)
-
-    def predict_batch_action_with_features(self, observations: list[Observation], **kwargs: Any) -> list[PolicyFeatures]:
-        result = self.client.call("predict_batch_action_with_features", observations=observations, kwargs=kwargs)
-        if not isinstance(result, list):
-            raise RuntimeError(
-                "reference-policy server must return a list of PolicyFeatures for batch inference, "
-                f"got {type(result).__name__}"
-            )
-        for features in result:
-            if not isinstance(features, PolicyFeatures):
-                raise RuntimeError(
-                    "reference-policy server batch item must be vla_rl.data.PolicyFeatures, "
-                    f"got {type(features).__name__}"
-                )
-            features.validate()
-        return result
-
-    def predict_batch_actions_and_prefix(
-        self,
-        observations: list[Observation],
-        **kwargs: Any,
-    ) -> list[tuple[np.ndarray, np.ndarray, np.ndarray]]:
-        return [_actions_prefix_proprio(features) for features in self.predict_batch_action_with_features(observations, **kwargs)]
 
     def sample_actions(self, obs: Observation, task: str | None = None, **kwargs: Any) -> np.ndarray:
         if task is not None:
