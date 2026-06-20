@@ -67,6 +67,13 @@ def _subsample_observation_steps(action_steps: int, chunk_size: int, subsample_s
     ]
 
 
+def _reference_actions_for_chunk(actions: np.ndarray, chunk_size: int, stride: int) -> np.ndarray:
+    actions = np.asarray(actions, dtype=np.float32)
+    if stride > 1:
+        return actions[: chunk_size * stride : stride]
+    return actions[:chunk_size]
+
+
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description="Run LIBERO RLT actor or learner.")
     parser.add_argument("--config", required=True, help="Path to an RLT YAML config.")
@@ -482,9 +489,11 @@ def run_actor(cfg: DictConfig) -> dict[str, Any]:
         start_time = time.perf_counter()
         timer = Timer()
         rlt = rlt_cfg(cfg)
+        feature = feature_cfg(cfg)
         chunk_size = int(rlt.chunk_size)
         replan_steps = int(rlt.get("replan_steps", 5))
         subsample_stride = int(rlt.get("subsample_stride", 0) or 0)
+        reference_action_stride = int(feature.get("reference_action_stride", 1))
         window_replay_enabled = subsample_stride > 1
         pending_chunk: dict[str, Any] | None = None
         cached_rlt_obs: dict[str, np.ndarray] | None = None
@@ -504,7 +513,7 @@ def run_actor(cfg: DictConfig) -> dict[str, Any]:
                         feature_source=online_feature_source,
                         num_steps=reference_policy_num_steps,
                     )
-                    base_actions = np.asarray(base_actions, dtype=np.float32)[:chunk_size]
+                    base_actions = _reference_actions_for_chunk(base_actions, chunk_size, reference_action_stride)
 
                 with timer.context("encode_rlt_obs"):
                     rlt_obs = encode_rlt_obs(
@@ -583,7 +592,11 @@ def run_actor(cfg: DictConfig) -> dict[str, Any]:
                                 feature_source=online_feature_source,
                                 num_steps=reference_policy_num_steps,
                             )
-                            sub_base_actions = np.asarray(sub_base_actions, dtype=np.float32)[:chunk_size]
+                            sub_base_actions = _reference_actions_for_chunk(
+                                sub_base_actions,
+                                chunk_size,
+                                reference_action_stride,
+                            )
                             window_start_rlt_obs.append(
                                 encode_rlt_obs(
                                     sub_prefix_tokens,
@@ -606,7 +619,7 @@ def run_actor(cfg: DictConfig) -> dict[str, Any]:
                     feature_source=online_feature_source,
                     num_steps=reference_policy_num_steps,
                 )
-                next_base_actions = np.asarray(next_base_actions, dtype=np.float32)[:chunk_size]
+                next_base_actions = _reference_actions_for_chunk(next_base_actions, chunk_size, reference_action_stride)
             with timer.context("next_encode_rlt_obs"):
                 next_rlt_state = encode_rlt_obs(
                     next_prefix_tokens,

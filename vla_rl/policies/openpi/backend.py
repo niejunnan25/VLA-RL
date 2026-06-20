@@ -99,13 +99,23 @@ class _OpenPIBasePolicy:
         obs_torch = self.raw_obs_to_torch(raw_obs)
         obs_obj = self.to_observation(obs_torch)
         method_name = _openpi_feature_method(str(feature_source))
-        method = getattr(self.model, method_name)
-        out = method(
-            device=self.device,
-            observation=obs_obj,
-            noise=None,
-            num_steps=num_steps,
-        )
+        if method_name == "predict_action_with_self_conditioned_features" and not hasattr(self.model, method_name):
+            ref_actions = self.model.sample_actions(
+                device=self.device,
+                observation=obs_obj,
+                noise=None,
+                num_steps=num_steps,
+            )
+            prefix, _ = self.model.extract_embeddings(obs_obj, actions=ref_actions)
+            out = {"actions": ref_actions, "features": {"prefix": prefix.to(torch.float32)}}
+        else:
+            method = getattr(self.model, method_name)
+            out = method(
+                device=self.device,
+                observation=obs_obj,
+                noise=None,
+                num_steps=num_steps,
+            )
         if not isinstance(out, dict) or "actions" not in out or "features" not in out:
             raise RuntimeError(f"{method_name}() must return a dict with actions and features")
         features = out["features"]
