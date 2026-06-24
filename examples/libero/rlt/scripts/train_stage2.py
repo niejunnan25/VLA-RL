@@ -651,6 +651,7 @@ def run_actor(cfg: DictConfig) -> dict[str, Any]:
                         "done": bool(done),
                         "truncated": bool(truncated),
                         "terminal": terminal,
+                        "critic_terminal": bool(chunk_success),
                         "executed_steps": executed_steps,
                         "env_steps": env_steps,
                         "info": dict(info),
@@ -676,16 +677,18 @@ def run_actor(cfg: DictConfig) -> dict[str, Any]:
                         reward=reward,
                         done=bool(done),
                         truncated=bool(truncated),
-                        discount=0.0 if terminal else float(runtime.gamma) ** chunk_size,
+                        discount=0.0 if bool(chunk_success) else float(runtime.gamma) ** chunk_size,
                         executed_steps=executed_steps,
                         env_steps=env_steps,
-                        info={**info, "chunk_start_env_steps": chunk_start_env_steps, "replan_steps": replan_steps},
+                        info={
+                            **info,
+                            "chunk_start_env_steps": chunk_start_env_steps,
+                            "replan_steps": replan_steps,
+                            "critic_terminal": bool(chunk_success),
+                        },
                     )
                     data_store.insert(transition.to_payload())
                     inserted_transitions = 1
-                if inserted_transitions > 0:
-                    client.update()
-
             metric_episode = episodes
             chunk_time_sec = time.perf_counter() - chunk_start
             active_rollout_time_sec += chunk_time_sec
@@ -717,6 +720,7 @@ def run_actor(cfg: DictConfig) -> dict[str, Any]:
                         ),
                     },
                 )
+                client.update()
                 episodes += 1
                 episode_step = 0
                 episode_return = 0.0
@@ -821,6 +825,7 @@ def _insert_window_replay_transitions(
                 head = np.asarray(next_action_chunk, dtype=np.float32)[:position]
             action = np.concatenate([tail, head], axis=0)
 
+        critic_terminal = bool(pending_chunk.get("critic_terminal", pending_chunk["terminal"]))
         transition = Transition(
             obs=obs,
             next_obs=next_obs,
@@ -828,7 +833,7 @@ def _insert_window_replay_transitions(
             reward=float(pending_chunk["reward"]),
             done=bool(pending_chunk["done"]),
             truncated=bool(pending_chunk["truncated"]),
-            discount=0.0 if bool(pending_chunk["terminal"]) else float(gamma) ** int(chunk_size),
+            discount=0.0 if critic_terminal else float(gamma) ** int(chunk_size),
             executed_steps=int(pending_chunk["executed_steps"]),
             env_steps=int(pending_chunk["env_steps"]),
             info={
@@ -836,6 +841,7 @@ def _insert_window_replay_transitions(
                 "chunk_start_env_steps": int(pending_chunk["chunk_start_env_steps"]),
                 "subsample_stride": int(subsample_stride),
                 "subsample_position": int(position),
+                "critic_terminal": critic_terminal,
             },
         )
         data_store.insert(transition.to_payload())

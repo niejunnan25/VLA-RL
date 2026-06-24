@@ -30,6 +30,8 @@ class RLTAgent(Algorithm):
         bc_reg_coeff: float = 3.0,
         ref_dropout: float = 0.5,
         clip_grad_norm: float = 10.0,
+        target_noise_std: float = 0.01,
+        target_noise_clip: float = 0.3,
         policy_update_freq: int = 2,
         utd_ratio: int = 1,
         device: str = "cpu",
@@ -52,6 +54,8 @@ class RLTAgent(Algorithm):
         self.bc_reg_coeff = float(bc_reg_coeff)
         self.ref_dropout = float(ref_dropout)
         self.clip_grad_norm = float(clip_grad_norm)
+        self.target_noise_std = float(target_noise_std)
+        self.target_noise_clip = float(target_noise_clip)
         self.policy_update_freq = int(policy_update_freq)
         self.utd_ratio = int(utd_ratio)
         self.update_count = 0
@@ -64,6 +68,8 @@ class RLTAgent(Algorithm):
             hidden_dims=list(self.actor_hidden_dims),
             std=self.actor_std,
         ).to(self.device)
+        self.actor_target = copy.deepcopy(self.actor).to(self.device)
+        self.actor_target.requires_grad_(False)
         self.critics = torch.nn.ModuleList(
             [RLTCritic(self.z_rl_dim, action_chunk_dim, list(self.critic_hidden_dims)) for _ in range(self.num_critics)]
         ).to(self.device)
@@ -101,10 +107,11 @@ class RLTAgent(Algorithm):
                     "predicted_q_mean": predicted_q_mean,
                 }
             )
-            self._update_target_networks()
+            self._update_critic_target_networks()
             self._critic_step_count += 1
             if self._critic_step_count % self.policy_update_freq == 0:
                 info.update(self._actor_step(fb))
+                self._update_actor_target_network()
         self.update_count += 1
         info["updates"] = self.update_count
         return info
@@ -119,7 +126,10 @@ class RLTAgent(Algorithm):
         actions = np.stack([transition.action for transition in transitions]).astype(np.float32)
         actions = actions * action_mask
         rewards = np.asarray([transition.reward for transition in transitions], dtype=np.float32)[:, None]
-        dones = np.asarray([transition.done or transition.truncated for transition in transitions], dtype=np.float32)[:, None]
+        dones = np.asarray(
+            [transition.info.get("critic_terminal", transition.done or transition.truncated) for transition in transitions],
+            dtype=np.float32,
+        )[:, None]
         discounts = np.asarray([transition.discount for transition in transitions], dtype=np.float32)[:, None]
         return {
             "state": torch.as_tensor(z_rl, dtype=torch.float32, device=self.device),
@@ -141,7 +151,13 @@ class RLTAgent(Algorithm):
         done = fb["done"]
         discount = fb["discount"]
         with torch.no_grad():
-            next_action = self.actor(next_state, fb["next_reference_action"])
+            next_ref = fb["next_reference_action"]
+            if self.ref_dropout > 0.0:
+                ref_mask = (torch.rand(next_ref.shape[0], 1, device=self.device) > self.ref_dropout).float()
+                next_ref = next_ref * ref_mask
+            next_action = self.actor_target(next_state, next_ref)
+            target_noise = torch.randn_like(next_action) * self.target_noise_std
+            next_action = next_action + target_noise.clamp(-self.target_noise_clip, self.target_noise_clip)
             target_qs = [target(next_state, next_action) for target in self.critic_targets]
             min_target_q = torch.min(torch.cat(target_qs, dim=-1), dim=-1, keepdim=True).values
             td_target = reward + (1.0 - done) * discount * min_target_q
@@ -171,10 +187,14 @@ class RLTAgent(Algorithm):
         self.actor_optimizer.step()
         return {"loss_actor": loss.item(), "bc_loss": bc_loss.item(), "q_value_mean": q_value.mean().item()}
 
-    def _update_target_networks(self) -> None:
+    def _update_critic_target_networks(self) -> None:
         for critic, target in zip(self.critics, self.critic_targets):
             for param, target_param in zip(critic.parameters(), target.parameters()):
                 target_param.data.mul_(1.0 - self.tau).add_(param.data, alpha=self.tau)
+
+    def _update_actor_target_network(self) -> None:
+        for param, target_param in zip(self.actor.parameters(), self.actor_target.parameters()):
+            target_param.data.mul_(1.0 - self.tau).add_(param.data, alpha=self.tau)
 
     @staticmethod
     def _stack_obs_key(transitions, key: str) -> np.ndarray:
@@ -199,6 +219,7 @@ class RLTAgent(Algorithm):
     def state_dict(self) -> dict:
         return {
             "actor": self.actor.state_dict(),
+            "actor_target": self.actor_target.state_dict(),
             "critics": self.critics.state_dict(),
             "critic_targets": self.critic_targets.state_dict(),
             "actor_optimizer": self.actor_optimizer.state_dict(),
@@ -212,6 +233,8 @@ class RLTAgent(Algorithm):
                 "actor_hidden_dims": self.actor_hidden_dims,
                 "critic_hidden_dims": self.critic_hidden_dims,
                 "actor_std": self.actor_std,
+                "target_noise_std": self.target_noise_std,
+                "target_noise_clip": self.target_noise_clip,
                 "num_critics": self.num_critics,
                 "actor_lr": self.actor_lr,
                 "critic_lr": self.critic_lr,
@@ -227,6 +250,7 @@ class RLTAgent(Algorithm):
 
     def load_state_dict(self, state: dict) -> None:
         self.actor.load_state_dict(state["actor"])
+        self.actor_target.load_state_dict(state.get("actor_target", state["actor"]))
         self.critics.load_state_dict(state["critics"])
         self.critic_targets.load_state_dict(state["critic_targets"])
         self.actor_optimizer.load_state_dict(state["actor_optimizer"])

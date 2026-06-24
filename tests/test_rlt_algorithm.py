@@ -1,3 +1,5 @@
+import inspect
+
 from pathlib import Path
 
 import numpy as np
@@ -120,6 +122,17 @@ def test_rlt_agent_act_and_update():
     metrics = agent.update(RolloutBatch(transitions=[make_transition() for _ in range(4)]))
 
     assert set(metrics) >= {"loss_critic", "target_q_mean", "predicted_q_mean", "loss_actor", "bc_loss", "updates"}
+
+
+def test_rlt_agent_state_config_matches_constructor():
+    agent = make_agent()
+    config = agent.state_dict()["config"]
+    constructor_params = set(inspect.signature(RLTAgent).parameters)
+
+    assert not (set(config) - constructor_params)
+    restored = RLTAgent(**config, device="cpu")
+    assert restored.target_noise_std == agent.target_noise_std
+    assert restored.target_noise_clip == agent.target_noise_clip
 
 
 def test_rlt_agent_uses_transition_discount_and_terminal_no_bootstrap():
