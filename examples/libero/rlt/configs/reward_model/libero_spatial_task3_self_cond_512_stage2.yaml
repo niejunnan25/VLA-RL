@@ -75,8 +75,8 @@ runtime:
   store_name: actor_env
   actor_name: actor_env
   request_type: send-stats
-  max_env_steps: 600000
-  max_update_steps: 1200000
+  max_env_steps: 300000
+  max_update_steps: 30000
   warmup_steps: 2500
   batch_size: 128
   replay_capacity: 100000
@@ -88,14 +88,14 @@ runtime:
   checkpoint_period: 2000
   actor_queue_capacity: 2000
   resume_from: null
-  run_dir: /vla/users/niejunnan/codebase/VLA-RL/outputs/libero_spatial_task3_self_conditioned_prefix_512_chunk5_sparse_rlt
+  run_dir: /vla/users/niejunnan/codebase/VLA-RL/outputs/libero_spatial_task3_sparse
 
 wandb:
   project: vla-rl
   entity: null
   workspace: null
   group: null
-  exp_name: libero_spatial_task3_self_conditioned_prefix_512_chunk5_sparse_rlt
+  exp_name: libero_spatial_task3_sparse
   tags: [libero, rlt, libero_spatial, sparse]
   mode: online
   debug: false
