@@ -273,6 +273,86 @@ Use the two templates above with the following concrete values.
 | 8 | `libero_spatial_task8_self_cond_512_stage2.yaml` | `rlt_spatial_task8_sparse` | actor/policy/eval `0`, learner `1` | trainer/broadcast `61080/61081`, policy/eval `41080/41081` | `libero_spatial_task8_self_cond_512_reward_model_pbrs_stage2.yaml` | `rlt_spatial_task8_pbrs` | actor/policy/eval `2`, learner/reward `3` | trainer/broadcast `62080/62081`, policy/eval `42080/42081` | `rlt_spatial_task8_robodopamine_50060` |
 | 9 | `libero_spatial_task9_self_cond_512_stage2.yaml` | `rlt_spatial_task9_sparse` | actor/policy/eval `4`, learner `5` | trainer/broadcast `61090/61091`, policy/eval `41090/41091` | `libero_spatial_task9_self_cond_512_reward_model_pbrs_stage2.yaml` | `rlt_spatial_task9_pbrs` | actor/policy/eval `6`, learner/reward `7` | trainer/broadcast `62090/62091`, policy/eval `42090/42091` | `rlt_spatial_task9_robodopamine_50061` |
 
+## RoboMeter Stage 2 Reward Model
+
+RoboMeter is exposed to RLT through the same `remote_progress` contract as
+Robo-Dopamine: the trainer calls `predict_progress(request)` and receives
+absolute progress values. The RLT reward code does not call RoboMeter directly.
+Use a two-process reward stack per RoboMeter run:
+
+1. RoboMeter official eval server, running in the RoboMeter environment.
+2. VLA-RL RoboMeter adapter, running in the VLA-RL environment and exposing
+   `predict_progress` on the port recorded in the YAML.
+
+RoboMeter does not use an expert goal image. The adapter sends the task prompt
+and a server-side cached trajectory prefix to RoboMeter. For LIBERO RLT the
+default view mode is `average_two`: `image_rgb_0` and `image_rgb_1` are evaluated
+as separate videos and their progress values are averaged.
+
+RoboMeter adapter ports use `50152..50161` so they do not conflict with the
+Robo-Dopamine ports `50052..50061`. The suggested RoboMeter eval-server ports
+are `8410..8419`.
+
+| task | RoboMeter YAML | eval server port | adapter port |
+| --- | --- | --- | --- |
+| 0 | `libero_spatial_task0_self_cond_512_reward_model_robometer_pbrs_stage2.yaml` | `8410` | `50152` |
+| 1 | `libero_spatial_task1_self_cond_512_reward_model_robometer_pbrs_stage2.yaml` | `8411` | `50153` |
+| 2 | `libero_spatial_task2_self_cond_512_reward_model_robometer_pbrs_stage2.yaml` | `8412` | `50154` |
+| 3 | `libero_spatial_task3_self_cond_512_reward_model_robometer_pbrs_stage2.yaml` | `8413` | `50155` |
+| 4 | `libero_spatial_task4_self_cond_512_reward_model_robometer_pbrs_stage2.yaml` | `8414` | `50156` |
+| 5 | `libero_spatial_task5_self_cond_512_reward_model_robometer_pbrs_stage2.yaml` | `8415` | `50157` |
+| 6 | `libero_spatial_task6_self_cond_512_reward_model_robometer_pbrs_stage2.yaml` | `8416` | `50158` |
+| 7 | `libero_spatial_task7_self_cond_512_reward_model_robometer_pbrs_stage2.yaml` | `8417` | `50159` |
+| 8 | `libero_spatial_task8_self_cond_512_reward_model_robometer_pbrs_stage2.yaml` | `8418` | `50160` |
+| 9 | `libero_spatial_task9_self_cond_512_reward_model_robometer_pbrs_stage2.yaml` | `8419` | `50161` |
+
+Task 0 example, RoboMeter eval server on GPU3:
+
+```bash
+tmux new-session -d -s rlt_spatial_task0_robometer_eval_8410 -n robometer_eval \
+  "bash -lc 'cd /vla/users/niejunnan/workspace/robometer && export CUDA_VISIBLE_DEVICES=3 PYTHONUNBUFFERED=1 CUDA_DEVICE_ORDER=PCI_BUS_ID HF_ENDPOINT=https://hf-mirror.com HF_HOME=/vla/users/niejunnan/assets/hf_cache HF_HUB_CACHE=/vla/users/niejunnan/assets/hf_cache/hub TOKENIZERS_PARALLELISM=false TRANSFORMERS_NO_TF=1 USE_TF=0 USE_FLAX=0 && /vla/users/niejunnan/workspace/robometer/.venv/bin/python robometer/evals/eval_server.py model_path=/vla/users/niejunnan/assets/Robometer-4B server_url=0.0.0.0 server_port=8410 num_gpus=1 max_workers=1'"
+```
+
+Task 0 adapter, exposing the YAML-configured `predict_progress` port `50152`:
+
+```bash
+tmux new-session -d -s rlt_spatial_task0_robometer_adapter_50152 -n reward_adapter \
+  "bash -lc 'cd /vla/users/niejunnan/codebase/VLA-RL && /vla/users/niejunnan/envs/serl_torch/bin/python scripts/serve_robometer_progress_http.py --robometer-url http://127.0.0.1:8410 --host 127.0.0.1 --port 50152 --image-keys image_rgb_0 image_rgb_1 --view-mode average_two --max-history-frames 8 --use-frame-steps'"
+```
+
+Wait for the adapter before launching RoboMeter PBRS training:
+
+```bash
+/vla/users/niejunnan/envs/serl_torch/bin/python \
+  examples/libero/rlt/tools/wait_for_tcp.py \
+  --host 127.0.0.1 \
+  --ports 50152 \
+  --timeout-sec 900
+```
+
+Then launch stage 2 with the RoboMeter YAML:
+
+```bash
+bash examples/libero/rlt/tools/launch_rlt.sh \
+  --config examples/libero/rlt/configs/reward_model/libero_spatial_task0_self_cond_512_reward_model_robometer_pbrs_stage2.yaml \
+  --session rlt_spatial_task0_robometer_pbrs \
+  --actor-gpu 2 \
+  --learner-gpu 3 \
+  --policy-gpu 2 \
+  --with-eval \
+  --eval-gpu 2 \
+  --trainer-port 63000 \
+  --broadcast-port 63001 \
+  --policy-port 43000 \
+  --eval-policy-port 43001 \
+  --run-dir /vla/users/niejunnan/codebase/VLA-RL/outputs/libero_spatial_task0_self_conditioned_prefix_512_chunk5_reward_model_robometer_pbrs_rlt \
+  --policy-checkpoint /vla/users/niejunnan/assets/openpi-assets/serl_torch_ckpt/pi0_10000_pytorch
+```
+
+For other tasks, keep the task-specific YAML and adapter port from the table.
+Use separate trainer/broadcast/policy/eval-policy ports if running RoboMeter and
+Robo-Dopamine experiments on the same host at the same time.
+
 ## Monitoring
 
 Check tmux sessions:
