@@ -1,4 +1,4 @@
 from vla_rl.envs.base import EnvBackend
-from vla_rl.envs.libero import LiberoRemoteEnvBackend
+from vla_rl.envs.libero import LiberoLocalEnvBackend, LiberoRemoteEnvBackend
 
-__all__ = ["EnvBackend", "LiberoRemoteEnvBackend"]
+__all__ = ["EnvBackend", "LiberoLocalEnvBackend", "LiberoRemoteEnvBackend"]

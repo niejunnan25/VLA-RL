@@ -18,20 +18,16 @@ if str(PROJECT_ROOT) not in sys.path:
     sys.path.insert(0, str(PROJECT_ROOT))
 
 from vla_rl.algorithms.rlt.features import encode_rlt_obs
-from vla_rl.data import ReplayBuffer, Transition
+from vla_rl.data import ReplayBuffer
 from agentlace.data.data_store import QueuedDataStore
 from agentlace.trainer import TrainerClient, TrainerConfig, TrainerServer
 
 from vla_rl.runtime.agentlace import json_sanitize, make_agentlace_replay_store
 from vla_rl.runtime.async_eval import (
-    AsyncEvalRuntime,
     append_async_eval_request,
     append_async_eval_stop,
     check_async_eval_worker,
-    count_jsonl_lines,
-    launch_async_eval_worker,
     load_new_async_eval_results,
-    resolve_async_eval_path,
     wait_for_async_eval_worker,
 )
 from vla_rl.runtime.checkpoint import CheckpointManager
@@ -51,27 +47,30 @@ from examples.libero.rlt.config import (
     load_config,
     feature_cfg,
     load_rl_token_encoder,
+    reference_action_policy_horizon,
+    reference_action_stride,
     resolve_online_feature_source,
     rlt_cfg,
     validate_rlt_cfg,
 )
-
-
-def _subsample_observation_steps(action_steps: int, chunk_size: int, subsample_stride: int) -> list[int]:
-    if subsample_stride <= 1:
-        return []
-    return [
-        step
-        for step in range(subsample_stride, action_steps + 1, subsample_stride)
-        if step < chunk_size
-    ]
-
-
-def _reference_actions_for_chunk(actions: np.ndarray, chunk_size: int, stride: int) -> np.ndarray:
-    actions = np.asarray(actions, dtype=np.float32)
-    if stride > 1:
-        return actions[: chunk_size * stride : stride]
-    return actions[:chunk_size]
+from examples.libero.rlt.async_eval import start_async_eval_worker
+from examples.libero.rlt.learner import learner_should_stop
+from examples.libero.rlt.metrics import (
+    actor_chunk_metric,
+    actor_episode_metric,
+    actor_speed_stats,
+    rlt_learner_metric_aliases,
+)
+from examples.libero.rlt.reward import PendingRLTRewardTransition, build_rlt_reward_processor
+from examples.libero.rlt.rollout import (
+    insert_window_replay_transitions,
+    make_chunk_transition,
+    make_window_replay_chunk,
+    predict_reference_actions_for_chunk,
+    should_collect_window_start,
+    step_info_success,
+    subsample_observation_steps,
+)
 
 
 def parse_args() -> argparse.Namespace:
@@ -241,7 +240,9 @@ def run_learner(cfg: DictConfig) -> dict[str, Any]:
                 "episodes": int(async_cfg.get("episodes", 50)),
                 "max_env_steps_per_episode": int(async_cfg.get("max_env_steps_per_episode", 0) or 0),
                 "save_videos": bool(async_cfg.get("save_videos", False)),
-                "env_url": str(async_cfg.get("env_url")),
+                "env_url": None
+                if async_cfg.get("env_url", None) is None
+                else str(async_cfg.get("env_url")),
                 "policy_url": str(async_cfg.get("policy_url")),
             },
         )
@@ -262,7 +263,7 @@ def run_learner(cfg: DictConfig) -> dict[str, Any]:
             refresh_actor_summary_file()
             env_steps = current_env_steps(env_steps)
             maybe_queue_async_eval()
-            if _learner_should_stop(
+            if learner_should_stop(
                 update_steps=update_steps,
                 env_steps=env_steps,
                 max_update_steps=int(runtime.max_update_steps),
@@ -351,7 +352,12 @@ def run_learner(cfg: DictConfig) -> dict[str, Any]:
                 check_async_eval_worker(async_eval)
                 for eval_result in load_new_async_eval_results(async_eval):
                     write_metric(eval_result)
-            if checkpoints is not None and checkpoint_period > 0 and update_steps > 0 and update_steps % checkpoint_period == 0:
+            if (
+                checkpoints is not None
+                and checkpoint_period > 0
+                and update_steps > 0
+                and update_steps % checkpoint_period == 0
+            ):
                 ckpt_start = time.perf_counter()
                 save_checkpoint(
                     checkpoints,
@@ -420,7 +426,16 @@ def run_learner(cfg: DictConfig) -> dict[str, Any]:
     }
     try:
         if checkpoints is not None:
-            save_checkpoint(checkpoints, agent, env_steps, update_steps, episodes, total_reward, config_snapshot, tag="final.pt")
+            save_checkpoint(
+                checkpoints,
+                agent,
+                env_steps,
+                update_steps,
+                episodes,
+                total_reward,
+                config_snapshot,
+                tag="final.pt",
+            )
         if run_dir is not None:
             (run_dir / "summary.json").write_text(json.dumps(json_sanitize(summary), indent=2, sort_keys=True) + "\n")
         write_metric({"summary": summary})
@@ -442,7 +457,7 @@ def run_actor(cfg: DictConfig) -> dict[str, Any]:
     reference_policy = build_reference_policy(cfg)
     feature = feature_cfg(cfg)
     online_feature_source = resolve_online_feature_source(feature)
-    reference_policy_num_steps = int(feature.get("num_steps", 10))
+    reference_policy_horizon = reference_action_policy_horizon(cfg)
     rl_token_encoder = load_rl_token_encoder(cfg)
     agent = create_rlt_agent(cfg)
     run_dir = run_dir_from_runtime(runtime)
@@ -469,6 +484,8 @@ def run_actor(cfg: DictConfig) -> dict[str, Any]:
             agent.load_policy_state_dict(payload)
             has_policy_state = True
 
+    reward_processor = None
+
     client.recv_network_callback(update_actor)
     deadline = time.perf_counter() + float(runtime.get("initial_weight_timeout_sec", 300.0))
     while not has_policy_state:
@@ -489,17 +506,29 @@ def run_actor(cfg: DictConfig) -> dict[str, Any]:
         start_time = time.perf_counter()
         timer = Timer()
         rlt = rlt_cfg(cfg)
-        feature = feature_cfg(cfg)
         chunk_size = int(rlt.chunk_size)
         replan_steps = int(rlt.get("replan_steps", 5))
         subsample_stride = int(rlt.get("subsample_stride", 0) or 0)
-        reference_action_stride = int(feature.get("reference_action_stride", 1))
+        reference_action_stride_value = reference_action_stride(cfg)
         window_replay_enabled = subsample_stride > 1
+        reward_processor = build_rlt_reward_processor(
+            cfg,
+            data_store=data_store,
+            gamma=float(runtime.gamma),
+            metric_writer=write_actor_metric,
+        )
+        if window_replay_enabled and reward_processor.requires_single_transition_replay:
+            raise ValueError(
+                "remote progress rewards require rlt.subsample_stride=0 "
+                "to avoid window replay augmentation"
+            )
         pending_chunk: dict[str, Any] | None = None
         cached_rlt_obs: dict[str, np.ndarray] | None = None
         cached_base_actions: np.ndarray | None = None
         episode_step = 0
         recent_successes: deque[int] = deque(maxlen=50)
+        actor_chunk_index = 0
+        last_reward_committed = 0
 
         while env_steps < int(runtime.max_env_steps):
             timer.tick("total")
@@ -508,12 +537,16 @@ def run_actor(cfg: DictConfig) -> dict[str, Any]:
 
             if cached_rlt_obs is None:
                 with timer.context("reference_policy"):
-                    base_actions, prefix_tokens, proprio = reference_policy.predict_actions_and_prefix(
-                        obs,
-                        feature_source=online_feature_source,
-                        num_steps=reference_policy_num_steps,
+                    base_actions, prefix_tokens, proprio = (
+                        predict_reference_actions_for_chunk(
+                            reference_policy,
+                            obs,
+                            feature_source=online_feature_source,
+                            num_steps=reference_policy_horizon,
+                            chunk_size=chunk_size,
+                            action_stride=reference_action_stride_value,
+                        )
                     )
-                    base_actions = _reference_actions_for_chunk(base_actions, chunk_size, reference_action_stride)
 
                 with timer.context("encode_rlt_obs"):
                     rlt_obs = encode_rlt_obs(
@@ -546,7 +579,7 @@ def run_actor(cfg: DictConfig) -> dict[str, Any]:
             window_start_rlt_obs: list[dict[str, np.ndarray]] = []
             remaining_env_steps = int(runtime.max_env_steps) - env_steps
             actions_to_execute = actions[: min(replan_steps, remaining_env_steps)]
-            subsample_observation_steps = _subsample_observation_steps(
+            observation_indices = subsample_observation_steps(
                 action_steps=len(actions_to_execute),
                 chunk_size=chunk_size,
                 subsample_stride=subsample_stride,
@@ -556,7 +589,7 @@ def run_actor(cfg: DictConfig) -> dict[str, Any]:
                 next_obs, _, done, truncated, info = env.step_chunk(
                     actions_to_execute,
                     return_steps=True,
-                    observation_indices=subsample_observation_steps,
+                    observation_indices=observation_indices,
                 )
                 subsample_obs_by_step = dict(zip(info["observation_indices"], info["observations"]))
 
@@ -570,32 +603,33 @@ def run_actor(cfg: DictConfig) -> dict[str, Any]:
                     done = bool(dones[step_idx])
                     truncated = bool(truncateds[step_idx])
                     info = dict(infos[step_idx])
+
                     chunk_reward += float(step_reward)
                     executed_steps += 1
                     env_steps += 1
                     episode_step += 1
                     episode_return += float(step_reward)
-                    chunk_success = chunk_success or bool(
-                        info.get("success", False) or info.get("env_done", False) or info.get("is_success", False)
-                    )
+                    chunk_success = chunk_success or step_info_success(info)
 
-                    if (
-                        window_replay_enabled
-                        and not bool(done or truncated)
-                        and executed_steps % subsample_stride == 0
-                        and executed_steps < chunk_size
+                    if should_collect_window_start(
+                        window_replay_enabled=window_replay_enabled,
+                        done=done,
+                        truncated=truncated,
+                        executed_steps=executed_steps,
+                        subsample_stride=subsample_stride,
+                        chunk_size=chunk_size,
                     ):
                         with timer.context("subsample_vla_inference"):
                             sub_obs = subsample_obs_by_step[executed_steps]
-                            sub_base_actions, sub_prefix_tokens, sub_proprio = reference_policy.predict_actions_and_prefix(
-                                sub_obs,
-                                feature_source=online_feature_source,
-                                num_steps=reference_policy_num_steps,
-                            )
-                            sub_base_actions = _reference_actions_for_chunk(
-                                sub_base_actions,
-                                chunk_size,
-                                reference_action_stride,
+                            sub_base_actions, sub_prefix_tokens, sub_proprio = (
+                                predict_reference_actions_for_chunk(
+                                    reference_policy,
+                                    sub_obs,
+                                    feature_source=online_feature_source,
+                                    num_steps=reference_policy_horizon,
+                                    chunk_size=chunk_size,
+                                    action_stride=reference_action_stride_value,
+                                )
                             )
                             window_start_rlt_obs.append(
                                 encode_rlt_obs(
@@ -609,17 +643,22 @@ def run_actor(cfg: DictConfig) -> dict[str, Any]:
                     if bool(done or truncated) or env_steps >= int(runtime.max_env_steps):
                         break
 
-            reward = float(chunk_reward)
-            total_reward += reward
+            env_reward = float(chunk_reward)
+            total_reward += env_reward
             terminal = bool(done or truncated)
 
             with timer.context("next_reference_policy"):
-                next_base_actions, next_prefix_tokens, next_proprio = reference_policy.predict_actions_and_prefix(
-                    next_obs,
-                    feature_source=online_feature_source,
-                    num_steps=reference_policy_num_steps,
+                next_base_actions, next_prefix_tokens, next_proprio = (
+                    predict_reference_actions_for_chunk(
+                        reference_policy,
+                        next_obs,
+                        feature_source=online_feature_source,
+                        num_steps=reference_policy_horizon,
+                        chunk_size=chunk_size,
+                        action_stride=reference_action_stride_value,
+                    )
                 )
-                next_base_actions = _reference_actions_for_chunk(next_base_actions, chunk_size, reference_action_stride)
+
             with timer.context("next_encode_rlt_obs"):
                 next_rlt_state = encode_rlt_obs(
                     next_prefix_tokens,
@@ -629,11 +668,13 @@ def run_actor(cfg: DictConfig) -> dict[str, Any]:
                 )
 
             inserted_transitions = 0
+            submitted_transitions = 0
             with timer.context("send_transition"):
                 if window_replay_enabled:
                     if pending_chunk is not None:
                         pending_chunk["next_actions"] = actions.copy()
-                        inserted_transitions += _insert_window_replay_transitions(
+
+                        inserted_transitions += insert_window_replay_transitions(
                             pending_chunk,
                             next_rlt_obs=rlt_obs,
                             next_window_start_rlt_obs=window_start_rlt_obs,
@@ -642,24 +683,25 @@ def run_actor(cfg: DictConfig) -> dict[str, Any]:
                             chunk_size=chunk_size,
                             gamma=float(runtime.gamma),
                         )
-                    pending_chunk = {
-                        "rlt_obs": rlt_obs,
-                        "window_start_rlt_obs": window_start_rlt_obs,
-                        "actions": actions.copy(),
-                        "next_actions": None,
-                        "reward": reward,
-                        "done": bool(done),
-                        "truncated": bool(truncated),
-                        "terminal": terminal,
-                        "critic_terminal": bool(chunk_success),
-                        "executed_steps": executed_steps,
-                        "env_steps": env_steps,
-                        "info": dict(info),
-                        "chunk_start_env_steps": chunk_start_env_steps,
-                        "replan_steps": replan_steps,
-                    }
+
+                    pending_chunk = make_window_replay_chunk(
+                        rlt_obs=rlt_obs,
+                        window_start_rlt_obs=window_start_rlt_obs,
+                        actions=actions,
+                        reward=env_reward,
+                        done=done,
+                        truncated=truncated,
+                        terminal=terminal,
+                        critic_terminal=chunk_success,
+                        executed_steps=executed_steps,
+                        env_steps=env_steps,
+                        info=info,
+                        chunk_start_env_steps=chunk_start_env_steps,
+                        replan_steps=replan_steps,
+                    )
+
                     if terminal or env_steps >= int(runtime.max_env_steps):
-                        inserted_transitions += _insert_window_replay_transitions(
+                        inserted_transitions += insert_window_replay_transitions(
                             pending_chunk,
                             next_rlt_obs=next_rlt_state,
                             next_window_start_rlt_obs=[],
@@ -669,26 +711,36 @@ def run_actor(cfg: DictConfig) -> dict[str, Any]:
                             gamma=float(runtime.gamma),
                         )
                         pending_chunk = None
+                    submitted_transitions = inserted_transitions
                 else:
-                    transition = Transition(
-                        obs=rlt_obs,
-                        next_obs=next_rlt_state,
-                        action=actions.reshape(-1),
-                        reward=reward,
-                        done=bool(done),
-                        truncated=bool(truncated),
-                        discount=0.0 if bool(chunk_success) else float(runtime.gamma) ** chunk_size,
+                    transition = make_chunk_transition(
+                        rlt_obs=rlt_obs,
+                        next_rlt_obs=next_rlt_state,
+                        actions=actions,
+                        reward=env_reward,
+                        done=done,
+                        truncated=truncated,
+                        gamma=float(runtime.gamma),
+                        critic_terminal=chunk_success,
                         executed_steps=executed_steps,
                         env_steps=env_steps,
-                        info={
-                            **info,
-                            "chunk_start_env_steps": chunk_start_env_steps,
-                            "replan_steps": replan_steps,
-                            "critic_terminal": bool(chunk_success),
-                        },
+                        info=info,
+                        chunk_start_env_steps=chunk_start_env_steps,
+                        replan_steps=replan_steps,
                     )
-                    data_store.insert(transition.to_payload())
-                    inserted_transitions = 1
+                    submitted_transitions = reward_processor.submit(
+                        PendingRLTRewardTransition(
+                            episode_id=int(episodes),
+                            chunk_index=int(actor_chunk_index),
+                            start_observation=obs,
+                            end_observation=next_obs,
+                            transition=transition,
+                            env_reward=env_reward,
+                            executed_steps=executed_steps,
+                            task=next_obs.task or obs.task,
+                        )
+                    )
+                    actor_chunk_index += 1
             metric_episode = episodes
             chunk_time_sec = time.perf_counter() - chunk_start
             active_rollout_time_sec += chunk_time_sec
@@ -702,28 +754,21 @@ def run_actor(cfg: DictConfig) -> dict[str, Any]:
                 completed_episode_id = episodes + 1
                 client.request(
                     str(runtime.request_type),
-                    {
-                        "environment": {
-                            "episode": {
-                                "return": episode_return,
-                                "length": episode_step,
-                                "success": episode_success,
-                                "env_steps": env_steps,
-                            }
-                        },
-                        **rlt_rollout_metric_aliases(
-                            episode_id=completed_episode_id,
-                            episode_return=episode_return,
-                            episode_steps=episode_step,
-                            success=episode_success,
-                            recent_success_rate_50=recent_success_rate_50,
-                        ),
-                    },
+                    actor_episode_metric(
+                        episode_id=completed_episode_id,
+                        episode_return=episode_return,
+                        episode_steps=episode_step,
+                        success=episode_success,
+                        env_steps=env_steps,
+                        recent_success_rate_50=recent_success_rate_50,
+                    ),
                 )
                 client.update()
+
                 episodes += 1
                 episode_step = 0
                 episode_return = 0.0
+
                 reset_start = time.perf_counter()
                 with timer.context("reset_env"):
                     obs = env.reset()
@@ -735,46 +780,62 @@ def run_actor(cfg: DictConfig) -> dict[str, Any]:
 
             wall_time_sec = time.perf_counter() - start_time
             timer.tock("total")
-            metric = {
-                "role": "actor",
-                "env_steps": env_steps,
-                "episode": metric_episode,
-                "reward": float(reward),
-                "done": bool(done),
-                "truncated": bool(truncated),
-                "executed_steps": executed_steps,
-                "chunk_size": chunk_size,
-                "replay_transitions": inserted_transitions,
-                "wall_time_sec": wall_time_sec,
-                "chunk_time_sec": chunk_time_sec,
-                "time/reset_env_sec": reset_time_sec,
-            }
-
+            reward_stats = reward_processor.stats()
+            if not window_replay_enabled:
+                reward_committed = int(reward_stats.get("committed", 0))
+                inserted_transitions = max(0, reward_committed - last_reward_committed)
+                last_reward_committed = reward_committed
+            metric = actor_chunk_metric(
+                env_steps=env_steps,
+                episode=metric_episode,
+                reward=env_reward,
+                done=done,
+                truncated=truncated,
+                executed_steps=executed_steps,
+                chunk_size=chunk_size,
+                replay_transitions=inserted_transitions,
+                submitted_transitions=submitted_transitions,
+                wall_time_sec=wall_time_sec,
+                chunk_time_sec=chunk_time_sec,
+                reset_time_sec=reset_time_sec,
+                reward_stats=reward_stats,
+            )
             write_actor_metric(metric)
+
             if log_period > 0 and env_steps % log_period == 0:
-                actor_stats = {
-                    "env_steps": env_steps,
-                    "episodes": episodes,
-                    "total_reward": total_reward,
-                    "wall_time_sec": wall_time_sec,
-                    "active_env_steps_per_sec": env_steps / max(active_rollout_time_sec, 1e-9),
-                    "wall_env_steps_per_sec": env_steps / max(wall_time_sec, 1e-9),
-                }
-                client.request(str(runtime.request_type), {"timer": timer.get_average_times(), "actor": actor_stats})
+                client.request(
+                    str(runtime.request_type),
+                    {
+                        "timer": timer.get_average_times(),
+                        "actor": actor_speed_stats(
+                            env_steps=env_steps,
+                            episodes=episodes,
+                            total_reward=total_reward,
+                            wall_time_sec=wall_time_sec,
+                            active_rollout_time_sec=active_rollout_time_sec,
+                        ),
+                    },
+                )
+
             if steps_per_update > 0 and env_steps % steps_per_update == 0:
                 client.update()
 
+        reward_summary = reward_processor.close(drain=True)
+        client.update()
         summary = {
             "role": "actor",
             "env_steps": env_steps,
             "episodes": episodes,
             "total_reward": total_reward,
             "received_policy_state": has_policy_state,
+            "reward": reward_summary,
         }
         summary = send_actor_summary(client, str(runtime.request_type), summary, run_dir, write_actor_metric)
         write_actor_metric({"summary": summary})
         return summary
     finally:
+        if reward_processor is not None:
+            reward_processor.close(drain=True, raise_on_error=False)
         stop = getattr(client, "stop", None)
         if callable(stop):
             stop()
@@ -784,178 +845,6 @@ def run_actor(cfg: DictConfig) -> dict[str, Any]:
         close = getattr(reference_policy, "close", None)
         if callable(close):
             close()
-
-
-def _insert_window_replay_transitions(
-    pending_chunk: dict[str, Any],
-    *,
-    next_rlt_obs: dict[str, np.ndarray],
-    next_window_start_rlt_obs: list[dict[str, np.ndarray]],
-    data_store: Any,
-    subsample_stride: int,
-    chunk_size: int,
-    gamma: float,
-) -> int:
-    """Insert yixin-style RLT replay windows for one completed chunk.
-
-    Position 0 stores the original action chunk. Later positions store
-    action_chunk[p:] + next_action_chunk[:p], so the critic sees the same
-    fixed-length action window from multiple starts inside the chunk.
-    """
-
-    action_chunk = np.asarray(pending_chunk["actions"], dtype=np.float32)
-    next_action_chunk = pending_chunk.get("next_actions")
-    inserted = 0
-    for pos_idx, position in enumerate(range(0, chunk_size, subsample_stride)):
-        if position == 0:
-            obs = pending_chunk["rlt_obs"]
-            next_obs = next_rlt_obs
-            action = action_chunk
-        else:
-            sub_idx = pos_idx - 1
-            if sub_idx >= len(pending_chunk["window_start_rlt_obs"]) or sub_idx >= len(next_window_start_rlt_obs):
-                break
-            obs = pending_chunk["window_start_rlt_obs"][sub_idx]
-            next_obs = next_window_start_rlt_obs[sub_idx]
-            # Window replay uses the remaining current actions plus the next chunk prefix.
-            tail = action_chunk[position:]
-            if next_action_chunk is None:
-                head = np.zeros((position, action_chunk.shape[1]), dtype=np.float32)
-            else:
-                head = np.asarray(next_action_chunk, dtype=np.float32)[:position]
-            action = np.concatenate([tail, head], axis=0)
-
-        critic_terminal = bool(pending_chunk.get("critic_terminal", pending_chunk["terminal"]))
-        transition = Transition(
-            obs=obs,
-            next_obs=next_obs,
-            action=action.reshape(-1),
-            reward=float(pending_chunk["reward"]),
-            done=bool(pending_chunk["done"]),
-            truncated=bool(pending_chunk["truncated"]),
-            discount=0.0 if critic_terminal else float(gamma) ** int(chunk_size),
-            executed_steps=int(pending_chunk["executed_steps"]),
-            env_steps=int(pending_chunk["env_steps"]),
-            info={
-                **dict(pending_chunk["info"]),
-                "chunk_start_env_steps": int(pending_chunk["chunk_start_env_steps"]),
-                "subsample_stride": int(subsample_stride),
-                "subsample_position": int(position),
-                "critic_terminal": critic_terminal,
-            },
-        )
-        data_store.insert(transition.to_payload())
-        inserted += 1
-    return inserted
-
-
-def start_async_eval_worker(runtime: DictConfig, *, run_dir: Path | None) -> AsyncEvalRuntime:
-    async_cfg = runtime.get("async_eval", None)
-    if async_cfg is None or not bool(async_cfg.get("enabled", False)):
-        return AsyncEvalRuntime()
-    if run_dir is None:
-        raise ValueError("runtime.run_dir is required when runtime.async_eval.enabled=true")
-
-    every_episodes = int(async_cfg.get("every_episodes", 50))
-    if every_episodes <= 0:
-        raise ValueError("runtime.async_eval.every_episodes must be positive")
-    if not async_cfg.get("env_url", None) or not async_cfg.get("policy_url", None):
-        raise ValueError("runtime.async_eval.env_url and policy_url are required when async eval is enabled")
-
-    queue_path = resolve_async_eval_path(async_cfg.get("queue_file", "eval_queue.jsonl"), run_dir=run_dir)
-    summary_path = resolve_async_eval_path(async_cfg.get("summary_jsonl", "eval_summary.jsonl"), run_dir=run_dir)
-    worker_log_path = resolve_async_eval_path(async_cfg.get("worker_log_file", "eval_worker.log"), run_dir=run_dir)
-    eval_checkpoint_dir = resolve_async_eval_path(async_cfg.get("checkpoint_dir", "eval_checkpoints"), run_dir=run_dir)
-    eval_checkpoint_dir.mkdir(parents=True, exist_ok=True)
-    queue_path.parent.mkdir(parents=True, exist_ok=True)
-    summary_path.parent.mkdir(parents=True, exist_ok=True)
-    queue_path.write_text("")
-    summary_path.touch(exist_ok=True)
-
-    worker_script = Path(__file__).resolve().parent / "process_eval_queue.py"
-    cmd = [
-        sys.executable,
-        str(worker_script),
-        "--train-config",
-        str(run_dir / "config.yaml"),
-        "--queue-file",
-        str(queue_path),
-        "--summary-jsonl",
-        str(summary_path),
-        "--poll-interval-sec",
-        str(float(async_cfg.get("poll_interval_sec", 5.0))),
-    ]
-    worker_proc, worker_log_fp = launch_async_eval_worker(cmd=cmd, worker_log_path=worker_log_path)
-    return AsyncEvalRuntime(
-        enabled=True,
-        every_episodes=every_episodes,
-        queue_path=queue_path,
-        summary_jsonl_path=summary_path,
-        worker_log_path=worker_log_path,
-        worker_proc=worker_proc,
-        worker_log_fp=worker_log_fp,
-        eval_checkpoint_dir=eval_checkpoint_dir,
-        processed_summary_lines=count_jsonl_lines(summary_path),
-    )
-
-
-
-def rlt_rollout_metric_aliases(
-    *,
-    episode_id: int,
-    episode_return: float,
-    episode_steps: int,
-    success: bool,
-    recent_success_rate_50: float,
-) -> dict[str, Any]:
-    return {
-        "rollout/episode_id": int(episode_id),
-        "rollout/episode_return": float(episode_return),
-        "rollout/episode_steps": int(episode_steps),
-        "rollout/success": int(success),
-        "rollout/recent_success_rate_50": float(recent_success_rate_50),
-    }
-
-
-def rlt_learner_metric_aliases(
-    update_info: dict[str, Any],
-    *,
-    update_steps: int,
-    env_steps: int,
-    replay_size: int,
-) -> dict[str, Any]:
-    metric = {
-        "learner/update_steps": int(update_steps),
-        "learner/env_steps": int(env_steps),
-        "learner/replay_size": int(replay_size),
-    }
-    for key in (
-        "loss_critic",
-        "target_q_mean",
-        "predicted_q_mean",
-        "loss_actor",
-        "bc_loss",
-        "q_value_mean",
-    ):
-        if key in update_info:
-            metric[f"learner/{key}"] = update_info[key]
-    return metric
-
-
-def _learner_should_stop(
-    *,
-    update_steps: int,
-    env_steps: int,
-    max_update_steps: int,
-    max_env_steps: int,
-    actor_done: bool,
-) -> bool:
-    if update_steps < max_update_steps:
-        return False
-    if max_env_steps <= 0:
-        return True
-    return env_steps >= max_env_steps or actor_done
-
 
 
 if __name__ == "__main__":

@@ -24,9 +24,12 @@ from examples.libero.rlt.config import (
     feature_cfg,
     load_config,
     load_rl_token_encoder,
+    reference_action_policy_horizon,
+    reference_action_stride,
     resolve_online_feature_source,
     validate_rlt_cfg,
 )
+from examples.libero.rlt.rollout import predict_reference_actions_for_chunk
 from vla_rl.algorithms.rlt.features import encode_rlt_obs
 from vla_rl.runtime.agentlace import json_sanitize
 
@@ -82,7 +85,10 @@ def run_eval(
         reference_policy = build_reference_policy(cfg)
         feature = feature_cfg(cfg)
         online_feature_source = resolve_online_feature_source(feature)
-        feature_num_steps = int(feature.get("num_steps", 10))
+        reference_policy_horizon = reference_action_policy_horizon(cfg)
+        reference_action_stride_value = reference_action_stride(cfg)
+        chunk_size = int(cfg.rlt.chunk_size)
+        replan_steps = int(cfg.rlt.get("replan_steps", chunk_size))
         encoder = load_rl_token_encoder(cfg)
         agent = create_rlt_agent(cfg)
         checkpoint = torch.load(Path(checkpoint_path), map_location=agent.device)
@@ -107,15 +113,17 @@ def run_eval(
             while not (done or truncated):
                 if save_videos:
                     frames.append(_frame_from_obs(obs))
-                base_actions, prefix_tokens, proprio = reference_policy.predict_actions_and_prefix(
+                base_actions, prefix_tokens, proprio = predict_reference_actions_for_chunk(
+                    reference_policy,
                     obs,
                     feature_source=online_feature_source,
-                    num_steps=feature_num_steps,
+                    num_steps=reference_policy_horizon,
+                    chunk_size=chunk_size,
+                    action_stride=reference_action_stride_value,
                 )
-                base_actions = np.asarray(base_actions, dtype=np.float32)[: int(cfg.rlt.chunk_size)]
                 rlt_obs = encode_rlt_obs(prefix_tokens, base_actions, proprio, rl_token_encoder=encoder)
                 actions = agent.sample_action(rlt_obs, deterministic=True)
-                eval_actions = actions[: int(cfg.rlt.chunk_size)]
+                eval_actions = actions[:replan_steps]
                 obs, reward, done, truncated, info = env.step_chunk(eval_actions)
                 info = dict(info)
                 executed_steps = int(info.get("executed_steps", len(eval_actions)))

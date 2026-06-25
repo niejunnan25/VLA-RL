@@ -7,7 +7,8 @@ from omegaconf import DictConfig, OmegaConf
 
 from vla_rl.algorithms.rlt import RLTAgent, RLTokenEncoder
 from vla_rl.algorithms.rlt.features import load_frozen_rlt_encoder
-from vla_rl.envs.libero import LiberoRemoteEnvBackend
+from vla_rl.envs.base import EnvBackend
+from vla_rl.envs.libero import LiberoLocalEnvBackend, LiberoRemoteEnvBackend
 from vla_rl.policies import ReferencePolicyClient
 
 
@@ -38,6 +39,9 @@ def validate_rlt_cfg(cfg: DictConfig) -> None:
     chunk_size = int(rlt.chunk_size)
     if chunk_size <= 0:
         raise ValueError(f"rlt.chunk_size must be positive, got {chunk_size}")
+    replan_steps = int(rlt.get("replan_steps", chunk_size))
+    if replan_steps <= 0 or replan_steps > chunk_size:
+        raise ValueError(f"rlt.replan_steps must be in [1, chunk_size], got {replan_steps} for chunk_size={chunk_size}")
     subsample_stride = int(rlt.get("subsample_stride", 0) or 0)
     if subsample_stride > 0 and (subsample_stride <= 1 or subsample_stride > chunk_size):
         raise ValueError(f"rlt.subsample_stride must be 0 or in [2, chunk_size], got {subsample_stride}")
@@ -48,15 +52,33 @@ def validate_rlt_cfg(cfg: DictConfig) -> None:
     if source not in RLT_FEATURE_SOURCES:
         raise ValueError(f"feature.source must be one of {sorted(RLT_FEATURE_SOURCES)}, got {source}")
     resolve_online_feature_source(feature)
-
-
-def create_env(cfg: DictConfig) -> LiberoRemoteEnvBackend:
-    return LiberoRemoteEnvBackend(
-        **section_kwargs(
-            cfg_section(cfg, "env"),
-            expected_target="vla_rl.envs.libero.LiberoRemoteEnvBackend",
+    ref_horizon = reference_action_policy_horizon(cfg)
+    ref_stride = reference_action_stride(cfg)
+    if ref_horizon <= 0:
+        raise ValueError(f"reference_action.policy_horizon must be positive, got {ref_horizon}")
+    if ref_stride <= 0:
+        raise ValueError(f"reference_action.stride must be positive, got {ref_stride}")
+    required_horizon = chunk_size * ref_stride
+    if ref_horizon < required_horizon:
+        raise ValueError(
+            "reference_action.policy_horizon must be >= rlt.chunk_size * reference_action.stride; "
+            f"got {ref_horizon} < {chunk_size} * {ref_stride}"
         )
-    )
+
+
+LIBERO_ENV_BACKENDS = {
+    "vla_rl.envs.libero.LiberoLocalEnvBackend": LiberoLocalEnvBackend,
+    "vla_rl.envs.libero.LiberoRemoteEnvBackend": LiberoRemoteEnvBackend,
+}
+
+
+def create_env(cfg: DictConfig) -> EnvBackend:
+    section = cfg_section(cfg, "env")
+    target = str(section.get("_target_", "vla_rl.envs.libero.LiberoLocalEnvBackend"))
+    backend_cls = LIBERO_ENV_BACKENDS.get(target)
+    if backend_cls is None:
+        raise ValueError(f"unsupported LIBERO env backend target: {target}")
+    return backend_cls(**section_kwargs(section, expected_target=target))
 
 
 def build_reference_policy(cfg: DictConfig) -> ReferencePolicyClient:
@@ -101,6 +123,26 @@ def rlt_cfg(cfg: DictConfig) -> DictConfig:
 
 def feature_cfg(cfg: DictConfig) -> DictConfig:
     return cfg_section(cfg, "feature")
+
+
+def reference_action_cfg(cfg: DictConfig) -> DictConfig:
+    if "reference_action" in cfg:
+        return cfg["reference_action"]
+    feature = feature_cfg(cfg)
+    return OmegaConf.create(
+        {
+            "policy_horizon": int(feature.get("num_steps", 10)),
+            "stride": int(feature.get("reference_action_stride", 1)),
+        }
+    )
+
+
+def reference_action_policy_horizon(cfg: DictConfig) -> int:
+    return int(reference_action_cfg(cfg).get("policy_horizon", 10))
+
+
+def reference_action_stride(cfg: DictConfig) -> int:
+    return int(reference_action_cfg(cfg).get("stride", 1))
 
 
 def resolve_online_feature_source(feature: DictConfig) -> str:

@@ -42,7 +42,7 @@ cd /vla/users/niejunnan/codebase/VLA-RL
 
 /vla/users/niejunnan/codebase/openpi-modified/.venv/bin/python3 \
   examples/libero/rlt/scripts/train_stage1.py \
-  --config examples/libero/rlt/configs/stage1_libero_openpi_rlt.yaml \
+  --config examples/libero/rlt/configs/libero_10_task6_self_cond_512_stage1.yaml \
   vla.openpi_root=/vla/users/niejunnan/codebase/openpi-rlt-github \
   vla.lerobot_home=/vla/users/niejunnan/datasets \
   training.output_dir=/tmp/vlarl_rlt_stage1_smoke \
@@ -53,7 +53,7 @@ cd /vla/users/niejunnan/codebase/VLA-RL
 
 This 20-step command only validates dataset loading, prefix feature extraction, loss computation, and checkpoint compatibility. It does not produce a useful encoder.
 
-The default `vla.num_steps=1` is intentional for Stage 1. Prefix features are computed before OpenPI action denoising, so extra denoising steps only add cost. Do not set it to `0`: the OpenPI action sampler computes `dt = -1 / num_steps`, and a zero-step action would also make the `predict_action_with_features()` API ambiguous. Stage 2 should still use normal reference-policy inference settings.
+The current Stage 1 configs use `reference_action.policy_horizon: 10`, and `train_stage1.py` passes that value to OpenPI as `num_steps`. This keeps Stage 1 prefix extraction aligned with the Stage 2 reference-action setting. Do not set it to `0`: the OpenPI action sampler computes `dt = -1 / num_steps`, and a zero-step action would also make the `predict_action_with_features()` API ambiguous.
 
 ## Full Online Stage 1 Run
 
@@ -68,7 +68,7 @@ CUDA_VISIBLE_DEVICES=0,1,2,3,4,5,6,7 \
   --standalone \
   --nproc_per_node=8 \
   examples/libero/rlt/scripts/train_stage1.py \
-  --config examples/libero/rlt/configs/stage1_libero_openpi_rlt.yaml \
+  --config examples/libero/rlt/configs/libero_10_task6_self_cond_512_stage1.yaml \
   training.output_dir=/vla/users/niejunnan/outputs/vlarl/rlt_stage1/libero10_scene6_ours_online_ddp \
   training.steps=20000 \
   training.batch_size=16 \
@@ -84,14 +84,12 @@ bash examples/libero/rlt/tools/launch_rlt.sh \
   --session vlarl_rlt_stage1_to_stage2_smoke \
   --actor-gpu 0 \
   --learner-gpu 1 \
-  --env-gpu 0 \
   --policy-gpu 0 \
-  --env-port 23210 \
   --policy-port 8909 \
   --trainer-port 5588 \
   --broadcast-port 5589 \
   --run-dir /tmp/vlarl_rlt_stage1_to_stage2_smoke \
-  --python /vla/miniconda3/envs/serl_torch/bin/python \
+  --python /vla/users/niejunnan/envs/serl_torch/bin/python \
   -- \
   feature.encoder_path=/tmp/vlarl_rlt_stage1_smoke/final_model.pt \
   runtime.max_env_steps=1000 \

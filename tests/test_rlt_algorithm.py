@@ -3,6 +3,7 @@ import inspect
 from pathlib import Path
 
 import numpy as np
+import pytest
 import torch
 from omegaconf import OmegaConf
 
@@ -13,10 +14,18 @@ from vla_rl.runtime.async_eval import (
     AsyncEvalRuntime,
     append_async_eval_request,
     append_async_eval_stop,
+    launch_async_eval_worker,
     load_new_async_eval_results,
 )
 from vla_rl.runtime.run_utils import apply_actor_summary_file, read_actor_summary, send_actor_summary
-from examples.libero.rlt.scripts import train_stage2 as rlt_train
+from examples.libero.rlt.config import validate_rlt_cfg
+from examples.libero.rlt.metrics import (
+    actor_chunk_metric,
+    actor_episode_metric,
+    rlt_learner_metric_aliases,
+    rlt_rollout_metric_aliases,
+)
+from examples.libero.rlt.rollout import insert_window_replay_transitions, transition_discount
 
 
 def make_agent() -> RLTAgent:
@@ -70,7 +79,15 @@ def test_rlt_encoder_checkpoint_loading_and_max_tokens(tmp_path: Path):
     torch.save(
         {
             "encoder_state_dict": encoder.state_dict(),
-            "config": {"rlt": {"input_dim": 8, "rl_token_dim": 8, "num_encoder_layers": 1, "num_heads": 2, "ff_dim": 16}},
+            "config": {
+                "rlt": {
+                    "input_dim": 8,
+                    "rl_token_dim": 8,
+                    "num_encoder_layers": 1,
+                    "num_heads": 2,
+                    "ff_dim": 16,
+                }
+            },
         },
         path,
     )
@@ -101,9 +118,11 @@ def test_encode_rlt_obs_outputs_rlt_state():
 def test_rlt_config_uses_chunk_size_without_execution_horizon():
     repo_root = Path(__file__).resolve().parents[1]
 
-    cfg = OmegaConf.load(repo_root / "examples/libero/rlt/configs/libero_spatial_task4_openpi_rlt.yaml")
+    cfg = OmegaConf.load(
+        repo_root / "examples/libero/rlt/configs/reward_model/libero_spatial_task4_self_cond_512_stage2.yaml"
+    )
     assert "rlt" in cfg
-    assert int(cfg.rlt.chunk_size) == 10
+    assert int(cfg.rlt.chunk_size) > 0
     assert "execute_horizon" not in cfg.runtime
     assert "execute_horizon" not in cfg.algorithm
     agent_cfg = dict(OmegaConf.to_container(cfg.algorithm, resolve=True))
@@ -111,6 +130,29 @@ def test_rlt_config_uses_chunk_size_without_execution_horizon():
     agent_cfg["device"] = "cpu"
     agent = RLTAgent(**agent_cfg)
     assert agent.chunk_size == cfg.rlt.chunk_size
+
+
+def test_rlt_config_rejects_invalid_replan_steps():
+    repo_root = Path(__file__).resolve().parents[1]
+    cfg = OmegaConf.load(
+        repo_root / "examples/libero/rlt/configs/reward_model/libero_spatial_task4_self_cond_512_stage2.yaml"
+    )
+
+    cfg.rlt.replan_steps = 0
+    with pytest.raises(ValueError, match="rlt.replan_steps"):
+        validate_rlt_cfg(cfg)
+
+    cfg.rlt.replan_steps = int(cfg.rlt.chunk_size) + 1
+    with pytest.raises(ValueError, match="rlt.replan_steps"):
+        validate_rlt_cfg(cfg)
+
+
+def test_rlt_transition_discount_uses_executed_steps():
+    assert np.isclose(
+        transition_discount(gamma=0.9, executed_steps=5, critic_terminal=False),
+        0.9**5,
+    )
+    assert transition_discount(gamma=0.9, executed_steps=5, critic_terminal=True) == 0.0
 
 
 def test_rlt_agent_act_and_update():
@@ -193,6 +235,68 @@ def test_async_eval_queue_and_result_roundtrip(tmp_path: Path):
     assert load_new_async_eval_results(runtime) == []
 
 
+def test_launch_async_eval_worker_accepts_worker_env(monkeypatch, tmp_path: Path):
+    captured = {}
+
+    class FakePopen:
+        def __init__(self, cmd, stdout, stderr, env=None):
+            captured["cmd"] = cmd
+            captured["stdout"] = stdout
+            captured["stderr"] = stderr
+            captured["env"] = env
+
+    monkeypatch.setattr("vla_rl.runtime.async_eval.subprocess.Popen", FakePopen)
+
+    proc, log_fp = launch_async_eval_worker(
+        cmd=["python", "worker.py"],
+        worker_log_path=tmp_path / "eval_worker.log",
+        env={"CUDA_VISIBLE_DEVICES": "7", "MUJOCO_EGL_DEVICE_ID": "7"},
+    )
+    try:
+        assert isinstance(proc, FakePopen)
+        assert captured["cmd"] == ["python", "worker.py"]
+        assert captured["env"]["CUDA_VISIBLE_DEVICES"] == "7"
+        assert captured["env"]["MUJOCO_EGL_DEVICE_ID"] == "7"
+    finally:
+        log_fp.close()
+
+
+def test_start_async_eval_worker_allows_local_env_without_env_url(monkeypatch, tmp_path: Path):
+    from examples.libero.rlt.async_eval import start_async_eval_worker
+
+    captured = {}
+
+    class FakeProc:
+        pass
+
+    def fake_launch_async_eval_worker(*, cmd, worker_log_path, env=None):
+        captured["cmd"] = cmd
+        captured["env"] = env
+        return FakeProc(), worker_log_path.open("a", encoding="utf-8")
+
+    monkeypatch.setattr("examples.libero.rlt.async_eval.launch_async_eval_worker", fake_launch_async_eval_worker)
+
+    runtime = OmegaConf.create(
+        {
+            "run_dir": str(tmp_path),
+            "async_eval": {
+                "enabled": True,
+                "policy_url": "http://127.0.0.1:8999",
+                "worker_cuda_visible_devices": "2",
+                "worker_mujoco_egl_device_id": "2",
+            },
+        }
+    )
+    async_eval = start_async_eval_worker(runtime, run_dir=tmp_path)
+    try:
+        assert async_eval.enabled is True
+        assert captured["env"]["CUDA_VISIBLE_DEVICES"] == "2"
+        assert captured["env"]["MUJOCO_EGL_DEVICE_ID"] == "2"
+    finally:
+        if async_eval.worker_log_fp is not None:
+            async_eval.worker_log_fp.close()
+
+
 def test_rlt_actor_summary_read_ignores_partial_json(tmp_path: Path):
     (tmp_path / "actor_summary.json").write_text("{")
     assert read_actor_summary(tmp_path) is None
@@ -226,7 +330,12 @@ def test_rlt_window_replay_uses_cross_chunk_actions():
     next_actions = np.arange(20, 40, dtype=np.float32).reshape(10, 2)
     pending = {
         "rlt_obs": make_rlt_state(0.0),
-        "window_start_rlt_obs": [make_rlt_state(2.0), make_rlt_state(4.0), make_rlt_state(6.0), make_rlt_state(8.0)],
+        "window_start_rlt_obs": [
+            make_rlt_state(2.0),
+            make_rlt_state(4.0),
+            make_rlt_state(6.0),
+            make_rlt_state(8.0),
+        ],
         "actions": current_actions,
         "next_actions": next_actions,
         "reward": 1.0,
@@ -239,10 +348,15 @@ def test_rlt_window_replay_uses_cross_chunk_actions():
         "chunk_start_env_steps": 0,
     }
 
-    inserted = rlt_train._insert_window_replay_transitions(
+    inserted = insert_window_replay_transitions(
         pending,
         next_rlt_obs=make_rlt_state(10.0),
-        next_window_start_rlt_obs=[make_rlt_state(12.0), make_rlt_state(14.0), make_rlt_state(16.0), make_rlt_state(18.0)],
+        next_window_start_rlt_obs=[
+            make_rlt_state(12.0),
+            make_rlt_state(14.0),
+            make_rlt_state(16.0),
+            make_rlt_state(18.0),
+        ],
         data_store=store,
         subsample_stride=2,
         chunk_size=10,
@@ -261,7 +375,7 @@ def test_rlt_window_replay_uses_cross_chunk_actions():
 
 
 def test_rlt_rollout_metric_aliases_match_wandb_names():
-    metrics = rlt_train.rlt_rollout_metric_aliases(
+    metrics = rlt_rollout_metric_aliases(
         episode_id=3,
         episode_return=2.5,
         episode_steps=40,
@@ -278,8 +392,51 @@ def test_rlt_rollout_metric_aliases_match_wandb_names():
     }
 
 
+def test_rlt_actor_episode_metric_contains_env_and_rollout_aliases():
+    metric = actor_episode_metric(
+        episode_id=3,
+        episode_return=2.5,
+        episode_steps=40,
+        success=True,
+        env_steps=100,
+        recent_success_rate_50=0.25,
+    )
+
+    assert metric["environment"]["episode"] == {
+        "return": 2.5,
+        "length": 40,
+        "success": True,
+        "env_steps": 100,
+    }
+    assert metric["rollout/episode_id"] == 3
+    assert metric["rollout/recent_success_rate_50"] == 0.25
+
+
+def test_rlt_actor_chunk_metric_separates_committed_and_submitted_transitions():
+    metric = actor_chunk_metric(
+        env_steps=10,
+        episode=1,
+        reward=0.0,
+        done=False,
+        truncated=False,
+        executed_steps=5,
+        chunk_size=5,
+        replay_transitions=0,
+        submitted_transitions=1,
+        wall_time_sec=2.0,
+        chunk_time_sec=0.5,
+        reset_time_sec=0.0,
+        reward_stats={"committed": 0, "pending": 1},
+    )
+
+    assert metric["replay_transitions"] == 0
+    assert metric["submitted_transitions"] == 1
+    assert metric["reward/committed"] == 0
+    assert metric["reward/pending"] == 1
+
+
 def test_rlt_learner_metric_aliases_keep_available_losses_only():
-    metrics = rlt_train.rlt_learner_metric_aliases(
+    metrics = rlt_learner_metric_aliases(
         {
             "loss_critic": 1.0,
             "target_q_mean": 0.5,

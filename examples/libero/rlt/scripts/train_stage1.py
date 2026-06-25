@@ -25,7 +25,7 @@ PROJECT_ROOT = Path(__file__).resolve().parents[4]
 if str(PROJECT_ROOT) not in sys.path:
     sys.path.insert(0, str(PROJECT_ROOT))
 
-from examples.libero.rlt.config import feature_cfg, load_config, normalize_max_tokens
+from examples.libero.rlt.config import feature_cfg, load_config, normalize_max_tokens, reference_action_policy_horizon
 from vla_rl.algorithms.rlt.modeling import RLTokenDecoder, RLTokenEncoder
 
 try:
@@ -195,7 +195,7 @@ def main() -> None:
     max_tokens = normalize_max_tokens(cfg.rlt.get("max_tokens", None))
     feature = feature_cfg(cfg)
     feature_source = str(feature.get("source", "policy_prior_prefix"))
-    feature_num_steps = int(feature.get("num_steps", cfg.vla.get("num_steps", 10)))
+    feature_num_steps = reference_action_policy_horizon(cfg)
     metrics_path = output_dir / "metrics.jsonl"
     if is_main:
         metrics_path.write_text("")

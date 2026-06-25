@@ -1,0 +1,42 @@
+global_seed: 42
+
+vla:
+  backend: openpi
+  openpi_root: /vla/users/niejunnan/codebase/openpi-rlt-github
+  config_name: pi0_libero
+  checkpoint_path: /vla/users/niejunnan/assets/openpi-assets/serl_torch_ckpt/pi0_10000_pytorch
+  assets_base_dir: /vla/users/niejunnan/assets/openpi-assets/serl_torch_ckpt/pi0_10000_pytorch
+  checkpoint_base_dir: ./checkpoints
+  exp_name: rlt_stage1_libero_spatial_task4_self_conditioned_prefix_512
+  repo_id_override: libero_spatial/pick_up_the_black_bowl_in_the_top_drawer_of_the_wooden_cabinet_and_place_it_on_the_plate
+  lerobot_home: /vla/users/yixin/LIBERO/Libero_Lerobot
+  device: cuda
+
+feature:
+  source: self_conditioned_prefix
+  online_source: auto
+
+reference_action:
+  policy_horizon: 10
+
+rlt:
+  rl_token_dim: 2048
+  num_encoder_layers: 2
+  num_decoder_layers: 2
+  num_heads: 8
+  ff_dim: 2048
+  dropout: 0.0
+  max_tokens: 512
+
+training:
+  output_dir: /vla/users/niejunnan/outputs/vlarl/rlt_stage1/libero_spatial_task4_self_conditioned_prefix_512
+  steps: 12001
+  batch_size: 128
+  lr: 4.0e-4
+  weight_decay: 1.0e-5
+  warmup_steps: 200
+  save_every: 2000
+  log_every: 50
+  num_workers: 4
+  clip_grad_norm: 1.0
+  shuffle: true

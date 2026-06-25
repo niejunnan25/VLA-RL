@@ -41,6 +41,50 @@ self_conditioned_prefix_full
 
 RLT v0 uses `chunk_size` as the action chunk length: actor output, environment execution, critic action input, replay action, and BC target all use the same action chunk. `subsample_stride` controls window replay density; for example `chunk_size=10, subsample_stride=2` yields windows at `0,2,4,6,8` using `action_chunk[p:] + next_action_chunk[:p]`. Terminal chunks only flush windows that can be constructed within the episode.
 
+## Reward Models
+
+The default reward path is the environment sparse reward:
+
+```yaml
+reward:
+  type: sparse
+  source: env
+```
+
+Remote reward models are exposed to RLT as absolute progress services. The RLT
+actor submits completed chunk transitions to an async reward worker, and the
+worker commits only fully relabeled transitions to learner replay. This keeps
+the learner from seeing placeholder rewards while avoiding step-level VLA
+backfill. The first chunk queries both the start and end boundary; later
+chunks send only the latest boundary unless a fallback requires re-querying the
+previous boundary. Disable window replay when using remote progress rewards:
+
+```yaml
+rlt:
+  subsample_stride: 0
+
+reward:
+  type: env_plus_potential_delta
+  source: remote_progress
+  scale: 1.0
+  initial_progress: query_start
+  on_error: fallback_sparse
+  remote:
+    url: http://127.0.0.1:50052
+    method: predict_progress
+    timeout: 120.0
+  async:
+    max_pending_chunks: 64
+  trajectory:
+    image_keys: [image_rgb_0, image_rgb_1]
+```
+
+Supported reward transforms are `sparse`, `progress_abs`, `progress_delta`,
+`potential_delta`, and `env_plus_potential_delta`. Potential-based rewards use
+the transition discount consumed by the learner. Actor metrics report
+`submitted_transitions` for chunks handed to the reward processor and
+`replay_transitions` for transitions actually committed to learner replay.
+
 ## 1000-Step Smoke
 
 ```bash
@@ -50,7 +94,6 @@ bash examples/libero/rlt/tools/launch_rlt.sh \
   --session vlarl_rlt_task4_smoke \
   --actor-gpu 0 \
   --learner-gpu 1 \
-  --env-port 23200 \
   --policy-port 8899 \
   --trainer-port 5568 \
   --broadcast-port 5569 \
@@ -60,7 +103,7 @@ bash examples/libero/rlt/tools/launch_rlt.sh \
   runtime.max_update_steps=1000
 ```
 
-For formal runs, remove the short-step overrides or set them to the target budget. The checked-in config and launcher defaults use local cluster paths for the validated LIBERO server, OpenPI fork, OpenPI checkpoint, and an external RLT Stage-1 encoder checkpoint. Override `--serl-torch-root`, `--policy-root`, `--policy-checkpoint`, or `feature.encoder_path` on another machine.
+For formal runs, remove the short-step overrides or set them to the target budget. The checked-in config and launcher defaults use the local LIBERO backend in `/vla/users/niejunnan/envs/serl_torch`, the OpenPI fork, OpenPI checkpoint, and an external RLT Stage-1 encoder checkpoint. Override `--policy-root`, `--policy-checkpoint`, or `feature.encoder_path` on another machine.
 
 ## Multi-Task Example
 
@@ -78,7 +121,7 @@ Remove `--dry-run` to start one tmux session per task.
 
 ```bash
 python examples/libero/rlt/scripts/eval_stage2.py \
-  --config examples/libero/rlt/configs/libero_spatial_task4_openpi_rlt.yaml \
+  --config examples/libero/rlt/configs/reward_model/libero_spatial_task4_self_cond_512_stage2.yaml \
   --checkpoint /tmp/vlarl_rlt_task4_smoke/checkpoints/final.pt \
   --episodes 10 \
   --output-dir /tmp/vlarl_rlt_task4_eval
@@ -88,26 +131,23 @@ The evaluator writes `eval_summary.json` and `eval_episodes.jsonl`. Video saving
 
 ### Train With Async Eval
 
-`launch_rlt.sh --with-eval` starts dedicated eval env/policy services in the same tmux session. The learner queues eval checkpoints every `runtime.async_eval.every_episodes` completed training episodes. A separate eval worker writes `eval_summary.jsonl` plus `eval_runs/*`.
+`launch_rlt.sh --with-eval` starts a dedicated eval policy service in the same tmux session. With the default local LIBERO backend, the eval worker creates its own in-process env. The learner queues eval checkpoints every `runtime.async_eval.every_episodes` completed training episodes. A separate eval worker writes `eval_summary.jsonl` plus `eval_runs/*`.
 
 ```bash
 bash examples/libero/rlt/tools/launch_rlt.sh \
   --session vlarl_rlt_task6_eval \
-  --config examples/libero/rlt/configs/libero_10_task6_self_conditioned_prefix_full_openpi_rlt.yaml \
+  --config examples/libero/rlt/configs/reward_model/libero_spatial_task6_self_cond_512_stage2.yaml \
   --actor-gpu 0 \
   --learner-gpu 1 \
-  --env-gpu 0 \
   --policy-gpu 0 \
   --with-eval \
   --eval-gpu 2 \
-  --env-port 23640 \
   --policy-port 8964 \
-  --eval-env-port 24640 \
   --eval-policy-port 9064 \
   --trainer-port 5667 \
   --broadcast-port 5668 \
   --run-dir /vla/users/niejunnan/codebase/VLA-RL/outputs/rlt_task6_eval \
-  --python /vla/miniconda3/envs/serl_torch/bin/python \
+  --python /vla/users/niejunnan/envs/serl_torch/bin/python \
   --policy-python /vla/users/niejunnan/codebase/openpi-modified/.venv/bin/python3 \
   --policy-root /vla/users/niejunnan/codebase/openpi-rlt-github \
   --policy-config pi0_libero \
@@ -132,7 +172,7 @@ CUDA_VISIBLE_DEVICES=0,1,2,3,4,5,6,7 \
   --standalone \
   --nproc_per_node=8 \
   examples/libero/rlt/scripts/train_stage1.py \
-  --config examples/libero/rlt/configs/stage1_libero_openpi_rlt.yaml \
+  --config examples/libero/rlt/configs/libero_10_task6_self_cond_512_stage1.yaml \
   training.output_dir=/vla/users/niejunnan/outputs/vlarl/rlt_stage1/libero10_scene6_ours_online_ddp \
   training.steps=20000 \
   training.batch_size=16 \
@@ -153,14 +193,12 @@ bash examples/libero/rlt/tools/launch_rlt.sh \
   --session vlarl_rlt_stage2_task4 \
   --actor-gpu 0 \
   --learner-gpu 1 \
-  --env-gpu 0 \
   --policy-gpu 0 \
-  --env-port 23210 \
   --policy-port 8909 \
   --trainer-port 5588 \
   --broadcast-port 5589 \
   --run-dir /tmp/vlarl_rlt_stage2_task4 \
-  --python /vla/miniconda3/envs/serl_torch/bin/python \
+  --python /vla/users/niejunnan/envs/serl_torch/bin/python \
   -- \
   feature.encoder_path=/vla/users/niejunnan/outputs/vlarl/rlt_stage1/libero10_scene6_ours_online_ddp/final_model.pt \
   feature.source=policy_prior_prefix \

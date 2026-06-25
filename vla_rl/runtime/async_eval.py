@@ -5,7 +5,7 @@ import subprocess
 import time
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Any, IO, Sequence
+from typing import Any, IO, Mapping, Sequence
 
 from vla_rl.runtime.agentlace import json_sanitize
 
@@ -89,10 +89,16 @@ def launch_async_eval_worker(
     *,
     cmd: Sequence[str],
     worker_log_path: Path,
+    env: Mapping[str, str] | None = None,
 ) -> tuple[subprocess.Popen, IO[str]]:
     worker_log_path.parent.mkdir(parents=True, exist_ok=True)
     log_fp = worker_log_path.open("a", encoding="utf-8")
-    proc = subprocess.Popen(list(cmd), stdout=log_fp, stderr=subprocess.STDOUT)
+    proc = subprocess.Popen(
+        list(cmd),
+        stdout=log_fp,
+        stderr=subprocess.STDOUT,
+        env=None if env is None else dict(env),
+    )
     return proc, log_fp
 
 

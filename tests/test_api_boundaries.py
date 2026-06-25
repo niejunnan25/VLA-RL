@@ -42,6 +42,7 @@ import sys
 import vla_rl.envs as envs
 
 assert "EnvBackend" in envs.__all__
+assert "LiberoLocalEnvBackend" in envs.__all__
 assert "LiberoRemoteEnvBackend" in envs.__all__
 
 for module_name in ("libero", "robosuite", "mujoco", "gym", "gymnasium"):
