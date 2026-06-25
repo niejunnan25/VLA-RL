@@ -13,6 +13,7 @@ from examples.libero.rlt.reward import (
 from tests.test_rlt_algorithm import make_rlt_state
 from vla_rl.data import Observation, Transition
 from vla_rl.rewards import compute_progress_reward, normalize_progress_response
+from scripts.serve_robodopamine_progress_http import RoboDopamineProgressHttpService
 
 
 class ListDataStore:
@@ -46,6 +47,10 @@ def make_obs(task="open drawer"):
         proprio=np.zeros((8,), dtype=np.float32),
         task=task,
     )
+
+
+def observation_to_reward_request_item(obs: Observation) -> dict:
+    return {"images": dict(obs.images), "proprio": obs.proprio, "task": obs.task}
 
 
 def make_pending(env_reward=0.0, done=False, episode_id=0, chunk_index=0):
@@ -165,6 +170,51 @@ def test_async_remote_progress_processor_commits_relabelled_reward():
     assert client.requests[0]["query_indices"] == [0, 1]
 
 
+def test_async_remote_progress_writes_progress_event():
+    store = ListDataStore()
+    events = []
+    client = FakeProgressClient([{"progress": [0.2, 0.5]}])
+    processor = AsyncRemoteProgressRLTRewardProcessor(
+        data_store=store,
+        client=client,
+        reward_type="env_plus_potential_delta",
+        gamma=0.99,
+        scale=1.0,
+        image_keys=("image_rgb_0", "image_rgb_1"),
+        max_pending_chunks=4,
+        initial_progress="query_start",
+        progress_event_writer=events.append,
+        reward_remote_url="http://127.0.0.1:50055",
+    )
+
+    processor.submit(make_pending(env_reward=1.0))
+    stats = processor.close(drain=True)
+
+    assert stats["committed"] == 1
+    assert stats["progress_event_write_failed"] == 0
+    assert len(events) == 1
+    event = events[0]
+    assert event["role"] == "reward_progress"
+    assert event["status"] == "ok"
+    assert event["source"] == "remote_progress"
+    assert event["episode_id"] == 0
+    assert event["chunk_index"] == 0
+    assert event["boundary_index"] == 1
+    assert event["previous_boundary_index"] == 0
+    assert event["trajectory_indices"] == [0, 1]
+    assert event["query_indices"] == [0, 1]
+    assert event["absolute_query_indices"] == [0, 1]
+    assert event["progress_values"] == [0.2, 0.5]
+    assert event["previous_progress"] == 0.2
+    assert event["progress"] == 0.5
+    assert event["env_reward"] == 1.0
+    assert np.isclose(event["computed_reward"], store.payloads[0]["reward"])
+    assert event["reward_type"] == "env_plus_potential_delta"
+    assert event["executed_steps"] == 2
+    assert event["env_steps"] == 2
+    assert event["reward_remote_url"] == "http://127.0.0.1:50055"
+
+
 def test_async_remote_progress_sends_only_latest_boundary_after_first_chunk():
     store = ListDataStore()
     client = FakeProgressClient([{"progress": [0.2, 0.5]}, {"progress": [0.8]}])
@@ -184,12 +234,62 @@ def test_async_remote_progress_sends_only_latest_boundary_after_first_chunk():
     stats = processor.close(drain=True)
 
     assert stats["committed"] == 2
-    assert [request["query_indices"] for request in client.requests] == [[0, 1], [0]]
+    assert [request["query_indices"] for request in client.requests] == [[0, 1], [1]]
     assert [request["absolute_query_indices"] for request in client.requests] == [[0, 1], [2]]
-    assert [request["trajectory_indices"] for request in client.requests] == [[0, 1], [2]]
-    assert [len(request["trajectory"]) for request in client.requests] == [2, 1]
+    assert [request["trajectory_indices"] for request in client.requests] == [[0, 1], [0, 2]]
+    assert [len(request["trajectory"]) for request in client.requests] == [2, 2]
     assert np.isclose(store.payloads[0]["reward"], 0.3)
     assert np.isclose(store.payloads[1]["reward"], 0.3)
+
+
+def test_robodopamine_http_service_uses_compact_query_indices():
+    class FakeEngine:
+        def __init__(self):
+            self.calls = []
+
+        def predict(self, *, transitions, query_indices, trajectory_start_idx, task, goal_image, request_label):
+            self.calls.append(
+                {
+                    "step_in_episode": [item.step_in_episode for item in transitions],
+                    "query_indices": list(query_indices),
+                    "trajectory_start_idx": int(trajectory_start_idx),
+                    "task": task,
+                    "goal_image": goal_image,
+                    "request_label": request_label,
+                }
+            )
+            return [0.7]
+
+    engine = FakeEngine()
+    service = RoboDopamineProgressHttpService(
+        engine=engine,
+        goal_provider=None,
+        require_goal=False,
+        response_key="fake",
+    )
+
+    result = service.predict_progress(
+        {
+            "episode_id": 3,
+            "task": "open drawer",
+            "trajectory": [observation_to_reward_request_item(make_obs()), observation_to_reward_request_item(make_obs())],
+            "trajectory_indices": [0, 2],
+            "query_indices": [1],
+            "absolute_query_indices": [2],
+        }
+    )
+
+    assert result["progress"] == [0.7]
+    assert engine.calls == [
+        {
+            "step_in_episode": [0, 2],
+            "query_indices": [1],
+            "trajectory_start_idx": 0,
+            "task": "open drawer",
+            "goal_image": None,
+            "request_label": "3_2_2",
+        }
+    ]
 
 
 def test_async_remote_progress_processor_falls_back_to_sparse_on_error():
@@ -245,9 +345,10 @@ def test_async_remote_progress_fallback_uses_failed_end_as_next_boundary():
     stats = processor.close(drain=True)
 
     assert stats["fallback_sparse"] == 1
-    assert [request["query_indices"] for request in client.requests] == [[0, 1], [0, 1]]
+    assert [request["query_indices"] for request in client.requests] == [[0, 1], [1, 2]]
     assert [request["absolute_query_indices"] for request in client.requests] == [[0, 1], [1, 2]]
-    assert [len(request["trajectory"]) for request in client.requests] == [2, 2]
+    assert [request["trajectory_indices"] for request in client.requests] == [[0, 1], [0, 1, 2]]
+    assert [len(request["trajectory"]) for request in client.requests] == [2, 3]
     assert store.payloads[0]["reward"] == 1.0
     assert np.isclose(store.payloads[1]["reward"], 0.3)
     assert store.payloads[1]["info"]["reward_model_previous_progress"] == 0.4
@@ -286,9 +387,10 @@ def test_async_remote_progress_zero_initial_requeries_previous_after_fallback():
     stats = processor.close(drain=True)
 
     assert stats["fallback_sparse"] == 1
-    assert [request["query_indices"] for request in client.requests] == [[0], [0], [0, 1]]
+    assert [request["query_indices"] for request in client.requests] == [[1], [1], [1, 2]]
     assert [request["absolute_query_indices"] for request in client.requests] == [[1], [2], [2, 3]]
-    assert [len(request["trajectory"]) for request in client.requests] == [1, 1, 2]
+    assert [request["trajectory_indices"] for request in client.requests] == [[0, 1], [0, 2], [0, 2, 3]]
+    assert [len(request["trajectory"]) for request in client.requests] == [2, 2, 3]
     assert np.isclose(store.payloads[0]["reward"], 0.5)
     assert store.payloads[1]["reward"] == 1.0
     assert np.isclose(store.payloads[2]["reward"], 0.3)

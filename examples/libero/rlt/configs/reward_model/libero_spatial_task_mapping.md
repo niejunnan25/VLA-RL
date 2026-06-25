@@ -4,7 +4,7 @@ This file records the task mapping used by the reward-model RLT configs.
 The local HDF5 files do not store a clean prompt attribute; prompt matching is checked through the LIBERO benchmark task metadata and the matching yixin LeRobot `tasks.jsonl` files.
 
 - HDF5 root: `/vla/users/niejunnan/datasets/libero_spatial`
-- Stage1 LeRobot home: `/vla/users/yixin/LIBERO/Libero_Lerobot`
+- Stage1 LeRobot home: `/vla/users/niejunnan/datasets/libero_lerobot`
 - OpenPI checkpoint/assets: `/vla/users/niejunnan/assets/openpi-assets/serl_torch_ckpt/pi0_10000_pytorch`
 
 | task_id | prompt | HDF5 file | Stage1 repo_id_override |

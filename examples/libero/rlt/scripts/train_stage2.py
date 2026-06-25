@@ -462,6 +462,18 @@ def run_actor(cfg: DictConfig) -> dict[str, Any]:
     agent = create_rlt_agent(cfg)
     run_dir = run_dir_from_runtime(runtime)
     write_actor_metric = make_jsonl_metric_writer(run_dir, "actor_metrics.jsonl")
+    write_progress_event = None
+    reward_cfg = cfg.get("reward", None)
+    if reward_cfg is not None:
+        reward_type = str(reward_cfg.get("type", "sparse"))
+        reward_source = str(
+            reward_cfg.get(
+                "source",
+                "env" if reward_type in {"sparse", "env", "none"} else "remote_progress",
+            )
+        )
+        if reward_source == "remote_progress":
+            write_progress_event = make_jsonl_metric_writer(run_dir, "progress_events.jsonl")
 
     data_store = QueuedDataStore(int(runtime.actor_queue_capacity))
     trainer_config = TrainerConfig(
@@ -516,6 +528,7 @@ def run_actor(cfg: DictConfig) -> dict[str, Any]:
             data_store=data_store,
             gamma=float(runtime.gamma),
             metric_writer=write_actor_metric,
+            progress_event_writer=write_progress_event,
         )
         if window_replay_enabled and reward_processor.requires_single_transition_replay:
             raise ValueError(

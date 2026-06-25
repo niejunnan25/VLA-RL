@@ -34,7 +34,7 @@ reward:
   initial_progress: query_start
   on_error: fallback_sparse
   remote:
-    url: http://127.0.0.1:50052
+    url: http://127.0.0.1:50060
     method: predict_progress
     timeout: 120.0
     retries: 1

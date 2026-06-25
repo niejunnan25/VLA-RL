@@ -91,7 +91,8 @@ class AsyncRemoteProgressRLTRewardProcessor(BaseRLTRewardProcessor):
         max_pending_chunks: int = 64,
         initial_progress: str = "query_start",
         on_error: str = "fallback_sparse",
-        metric_writer: MetricWriter | None = None,
+        progress_event_writer: MetricWriter | None = None,
+        reward_remote_url: str | None = None,
     ) -> None:
         self.data_store = data_store
         self.client = client
@@ -101,7 +102,8 @@ class AsyncRemoteProgressRLTRewardProcessor(BaseRLTRewardProcessor):
         self.image_keys = tuple(str(key) for key in image_keys)
         self.initial_progress = str(initial_progress)
         self.on_error = str(on_error)
-        self.metric_writer = metric_writer
+        self.progress_event_writer = progress_event_writer
+        self.reward_remote_url = None if reward_remote_url is None else str(reward_remote_url)
         if self.initial_progress not in {"zero", "query_start"}:
             raise ValueError("reward.initial_progress must be zero or query_start")
         if self.on_error not in {"fallback_sparse", "raise"}:
@@ -120,6 +122,7 @@ class AsyncRemoteProgressRLTRewardProcessor(BaseRLTRewardProcessor):
             "last_progress": None,
             "last_reward": None,
             "last_latency_sec": 0.0,
+            "progress_event_write_failed": 0,
         }
         self._episodes: dict[int, dict[str, Any]] = {}
         self._thread = threading.Thread(target=self._worker_main, name="rlt-reward-worker", daemon=True)
@@ -174,6 +177,7 @@ class AsyncRemoteProgressRLTRewardProcessor(BaseRLTRewardProcessor):
         if episode is None:
             start_payload = observation_to_reward_payload(pending.start_observation, image_keys=self.image_keys)
             episode = {
+                "start_boundary_payload": start_payload,
                 "last_progress": None,
                 "last_progress_index": 0,
                 "last_boundary_payload": start_payload,
@@ -186,26 +190,31 @@ class AsyncRemoteProgressRLTRewardProcessor(BaseRLTRewardProcessor):
         episode["pending_boundary_payload"] = end_payload
         episode["pending_boundary_index"] = current_index
 
-        trajectory_payload: list[dict[str, Any]]
-        trajectory_indices: list[int]
-        query_indices: list[int]
-        absolute_query_indices: list[int]
         previous_index = int(episode.get("last_progress_index", max(0, current_index - 1)))
-        needs_previous_query = episode["last_progress"] is None and (
-            self.initial_progress == "query_start" or previous_index > 0
-        )
-        if needs_previous_query:
-            previous_payload = episode.get("last_boundary_payload")
-            if previous_payload is not None and previous_index != current_index:
-                trajectory_payload = [previous_payload, end_payload]
-                trajectory_indices = [previous_index, current_index]
-                query_indices = [0, 1]
+        start_payload = episode.get("start_boundary_payload")
+        previous_payload = episode.get("last_boundary_payload")
+        needs_start_query = episode["last_progress"] is None and self.initial_progress == "query_start"
+        if start_payload is not None and current_index != 0:
+            needs_previous_recovery = (
+                episode["last_progress"] is None
+                and previous_payload is not None
+                and previous_index > 0
+                and previous_index != current_index
+            )
+            if needs_previous_recovery:
+                trajectory_payload = [start_payload, previous_payload, end_payload]
+                trajectory_indices = [0, previous_index, current_index]
+                query_indices = [1, 2]
                 absolute_query_indices = [previous_index, current_index]
             else:
-                trajectory_payload = [end_payload]
-                trajectory_indices = [current_index]
-                query_indices = [0]
-                absolute_query_indices = [current_index]
+                trajectory_payload = [start_payload, end_payload]
+                trajectory_indices = [0, current_index]
+                if needs_start_query:
+                    query_indices = [0, 1]
+                    absolute_query_indices = [0, current_index]
+                else:
+                    query_indices = [1]
+                    absolute_query_indices = [current_index]
         else:
             trajectory_payload = [end_payload]
             trajectory_indices = [current_index]
@@ -254,7 +263,19 @@ class AsyncRemoteProgressRLTRewardProcessor(BaseRLTRewardProcessor):
         episode["last_boundary_payload"] = end_payload
         episode.pop("pending_boundary_payload", None)
         episode.pop("pending_boundary_index", None)
-        self._commit(pending, reward, progress=progress, previous_progress=previous_progress, latency=time.perf_counter() - start)
+        self._commit(
+            pending,
+            reward,
+            progress=progress,
+            previous_progress=previous_progress,
+            latency=time.perf_counter() - start,
+            boundary_index=current_index,
+            previous_boundary_index=previous_index,
+            trajectory_indices=trajectory_indices,
+            query_indices=query_indices,
+            absolute_query_indices=absolute_query_indices,
+            progress_values=progress_values,
+        )
         if pending.transition.done or pending.transition.truncated:
             self._episodes.pop(pending.episode_id, None)
 
@@ -267,6 +288,12 @@ class AsyncRemoteProgressRLTRewardProcessor(BaseRLTRewardProcessor):
         previous_progress: float | None,
         latency: float,
         error: str | None = None,
+        boundary_index: int | None = None,
+        previous_boundary_index: int | None = None,
+        trajectory_indices: list[int] | None = None,
+        query_indices: list[int] | None = None,
+        absolute_query_indices: list[int] | None = None,
+        progress_values: list[float] | None = None,
     ) -> None:
         info = {
             **dict(pending.transition.info),
@@ -280,11 +307,87 @@ class AsyncRemoteProgressRLTRewardProcessor(BaseRLTRewardProcessor):
             info["reward_model_error"] = error
         transition = replace(pending.transition, reward=float(reward), info=info)
         self.data_store.insert(transition.to_payload())
+        self._write_progress_event(
+            pending,
+            reward=reward,
+            progress=progress,
+            previous_progress=previous_progress,
+            latency=latency,
+            error=error,
+            boundary_index=boundary_index,
+            previous_boundary_index=previous_boundary_index,
+            trajectory_indices=trajectory_indices,
+            query_indices=query_indices,
+            absolute_query_indices=absolute_query_indices,
+            progress_values=progress_values,
+        )
         with self._lock:
             self._stats["committed"] += 1
             self._stats["last_progress"] = None if progress is None else float(progress)
             self._stats["last_reward"] = float(reward)
             self._stats["last_latency_sec"] = float(latency)
+
+    def _write_progress_event(
+        self,
+        pending: PendingRLTRewardTransition,
+        *,
+        reward: float,
+        progress: float | None,
+        previous_progress: float | None,
+        latency: float,
+        error: str | None,
+        boundary_index: int | None,
+        previous_boundary_index: int | None,
+        trajectory_indices: list[int] | None,
+        query_indices: list[int] | None,
+        absolute_query_indices: list[int] | None,
+        progress_values: list[float] | None,
+    ) -> None:
+        if self.progress_event_writer is None:
+            return
+        transition_info = dict(pending.transition.info)
+        event = {
+            "role": "reward_progress",
+            "source": "remote_progress",
+            "status": "fallback_sparse" if error is not None else "ok",
+            "episode_id": int(pending.episode_id),
+            "chunk_index": int(pending.chunk_index),
+            "task": pending.task,
+            "boundary_index": None if boundary_index is None else int(boundary_index),
+            "previous_boundary_index": None
+            if previous_boundary_index is None
+            else int(previous_boundary_index),
+            "trajectory_indices": [] if trajectory_indices is None else [int(idx) for idx in trajectory_indices],
+            "query_indices": [] if query_indices is None else [int(idx) for idx in query_indices],
+            "absolute_query_indices": []
+            if absolute_query_indices is None
+            else [int(idx) for idx in absolute_query_indices],
+            "progress_values": [] if progress_values is None else [float(value) for value in progress_values],
+            "progress": None if progress is None else float(progress),
+            "previous_progress": None if previous_progress is None else float(previous_progress),
+            "env_reward": float(pending.env_reward),
+            "computed_reward": float(reward),
+            "reward_type": self.reward_type,
+            "scale": float(self.scale),
+            "gamma": float(self.gamma),
+            "discount": float(pending.transition.discount),
+            "executed_steps": int(pending.executed_steps),
+            "env_steps": int(pending.transition.env_steps),
+            "chunk_start_env_steps": int(
+                transition_info.get("chunk_start_env_steps", pending.transition.env_steps)
+            ),
+            "done": bool(pending.transition.done),
+            "truncated": bool(pending.transition.truncated),
+            "latency_sec": float(latency),
+            "reward_remote_url": self.reward_remote_url,
+        }
+        if error is not None:
+            event["error"] = str(error)
+        try:
+            self.progress_event_writer(event)
+        except Exception:
+            with self._lock:
+                self._stats["progress_event_write_failed"] += 1
 
     def _handle_error(self, pending: PendingRLTRewardTransition, exc: Exception) -> None:
         with self._lock:
@@ -327,6 +430,7 @@ def build_rlt_reward_processor(
     data_store: Any,
     gamma: float,
     metric_writer: MetricWriter | None = None,
+    progress_event_writer: MetricWriter | None = None,
 ) -> BaseRLTRewardProcessor:
     reward_cfg = cfg.get("reward", None)
     if reward_cfg is None:
@@ -366,7 +470,8 @@ def build_rlt_reward_processor(
         max_pending_chunks=int(async_cfg.get("max_pending_chunks", 64)),
         initial_progress=str(reward_cfg.get("initial_progress", "query_start")),
         on_error=str(reward_cfg.get("on_error", "fallback_sparse")),
-        metric_writer=metric_writer,
+        progress_event_writer=progress_event_writer,
+        reward_remote_url=str(url),
     )
 
 

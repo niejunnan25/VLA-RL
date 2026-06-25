@@ -18,7 +18,8 @@ from pathlib import Path
 import signal
 import sys
 import threading
-from typing import Any, Sequence
+import types
+from typing import Any, Callable, Sequence
 
 import numpy as np
 
@@ -58,14 +59,228 @@ def _as_transition(payload: dict[str, Any], *, step_in_episode: int, task_id: in
     return _TransitionPayload(obs=obs, step_in_episode=int(step_in_episode))
 
 
-def _load_robodopamine(root: Path) -> tuple[type[Any], type[Any]]:
+def _int_list(value: Any) -> list[int]:
+    if value is None:
+        return []
+    if isinstance(value, np.ndarray):
+        return [int(item) for item in value.reshape(-1).tolist()]
+    if isinstance(value, Sequence) and not isinstance(value, (str, bytes, bytearray)):
+        return [int(item) for item in value]
+    return [int(value)]
+
+
+def _compact_query_indices(request: dict[str, Any], *, trajectory_len: int, trajectory_indices: list[int]) -> list[int]:
+    query_indices = _int_list(request.get("query_indices", []))
+    if not query_indices:
+        query_indices = list(range(trajectory_len))
+    if all(0 <= int(idx) < trajectory_len for idx in query_indices):
+        return query_indices
+
+    absolute_query_indices = _int_list(request.get("absolute_query_indices", []))
+    if absolute_query_indices:
+        index_to_local = {int(index): local for local, index in enumerate(trajectory_indices)}
+        try:
+            return [index_to_local[int(index)] for index in absolute_query_indices]
+        except KeyError as exc:
+            raise IndexError(
+                f"absolute query index {int(exc.args[0])} is not present in trajectory_indices={trajectory_indices}"
+            ) from exc
+    raise IndexError(f"query_indices={query_indices} out of range for compact trajectory length {trajectory_len}")
+
+
+def _compact_start_idx(request: dict[str, Any], *, trajectory_len: int, trajectory_indices: list[int]) -> int:
+    raw_start_idx = request.get("trajectory_start_idx", 0)
+    start_idx = int(raw_start_idx or 0)
+    if 0 <= start_idx < trajectory_len:
+        return start_idx
+    index_to_local = {int(index): local for local, index in enumerate(trajectory_indices)}
+    return int(index_to_local.get(start_idx, 0))
+
+
+GOAL_SCAN_SKIP_DIRS = frozenset({"data", "videos", ".git", "__pycache__"})
+
+
+def _install_robodopamine_examples_package(root: Path) -> None:
+    examples_dir = root / "examples"
+    if not examples_dir.is_dir():
+        return
+
+    for module_name in list(sys.modules):
+        if module_name == "examples" or module_name.startswith("examples."):
+            del sys.modules[module_name]
+
+    examples_module = types.ModuleType("examples")
+    examples_module.__file__ = str(examples_dir)
+    examples_module.__path__ = [str(examples_dir)]
+    examples_module.__package__ = "examples"
+    sys.modules["examples"] = examples_module
+
+
+def _load_robodopamine(root: Path) -> tuple[type[Any], type[Any], Callable[[str], str], type[Any]]:
     root = root.expanduser().resolve()
     if not root.exists():
         raise FileNotFoundError(f"Robo-Dopamine root does not exist: {root}")
     sys.path.insert(0, str(root))
-    from scripts.serve_grm_reward import GrmProgressEngine, LiberoGoalProvider
+    _install_robodopamine_examples_package(root)
+    from scripts.serve_grm_reward import (
+        GoalLookupResult,
+        GrmProgressEngine,
+        LiberoGoalProvider,
+        normalize_task,
+    )
 
-    return GrmProgressEngine, LiberoGoalProvider
+    return GrmProgressEngine, LiberoGoalProvider, normalize_task, GoalLookupResult
+
+
+def _is_lerobot_goal_dataset(path: Path) -> bool:
+    return (
+        (path / "meta" / "info.json").is_file()
+        and (path / "meta" / "episodes.jsonl").is_file()
+    )
+
+
+def _discover_lerobot_goal_datasets(dataset_path: Path) -> list[Path]:
+    dataset_path = dataset_path.expanduser().resolve()
+    if _is_lerobot_goal_dataset(dataset_path):
+        return [dataset_path]
+
+    roots: list[Path] = []
+    for current, dirnames, _filenames in os.walk(dataset_path):
+        current_path = Path(current)
+        if _is_lerobot_goal_dataset(current_path):
+            roots.append(current_path)
+            dirnames[:] = []
+            continue
+        dirnames[:] = [name for name in dirnames if name not in GOAL_SCAN_SKIP_DIRS]
+    return sorted(set(roots))
+
+
+class PromptRoutingLiberoGoalProvider:
+    """Route a LIBERO prompt to the matching LeRobot task dataset.
+
+    Robo-Dopamine's native ``LiberoGoalProvider`` expects one LeRobot dataset
+    root. Our LIBERO copy is organized as suite/task subdirectories, so this
+    wrapper builds a prompt index across all child datasets and then delegates
+    final-frame loading to the native provider.
+    """
+
+    def __init__(
+        self,
+        *,
+        dataset_roots: Sequence[Path],
+        provider_cls: type[Any],
+        normalize_task_fn: Callable[[str], str],
+        goal_result_cls: type[Any],
+        image_key: str,
+        allow_task_id_fallback: bool,
+    ) -> None:
+        self.normalize_task = normalize_task_fn
+        self.goal_result_cls = goal_result_cls
+        self.task_to_provider: dict[str, Any] = {}
+        self.provider_roots: dict[int, Path] = {}
+        self.task_id_to_provider: dict[int, Any] = {}
+        ambiguous_task_ids: set[int] = set()
+
+        for root in dataset_roots:
+            provider = provider_cls(
+                dataset_path=str(root),
+                image_key=str(image_key),
+                allow_task_id_fallback=bool(allow_task_id_fallback),
+            )
+            self.provider_roots[id(provider)] = root
+            for task_key in getattr(provider, "task_to_episode", {}):
+                existing = self.task_to_provider.get(task_key)
+                if existing is not None:
+                    LOGGER.warning(
+                        "duplicate LIBERO goal prompt %r in %s and %s; keeping first",
+                        task_key,
+                        self.provider_roots[id(existing)],
+                        root,
+                    )
+                    continue
+                self.task_to_provider[task_key] = provider
+
+            for task_id in getattr(provider, "task_index_to_episode", {}):
+                task_id = int(task_id)
+                existing_provider = self.task_id_to_provider.get(task_id)
+                if existing_provider is not None and existing_provider is not provider:
+                    ambiguous_task_ids.add(task_id)
+                    continue
+                self.task_id_to_provider[task_id] = provider
+
+        for task_id in ambiguous_task_ids:
+            self.task_id_to_provider.pop(task_id, None)
+
+        LOGGER.info(
+            "loaded LIBERO goal router: %d dataset roots, %d prompt entries, %d unique task-id entries, %d ambiguous task ids",
+            len(dataset_roots),
+            len(self.task_to_provider),
+            len(self.task_id_to_provider),
+            len(ambiguous_task_ids),
+        )
+
+    def _empty_result(self) -> Any:
+        return self.goal_result_cls(image=None, source=None)
+
+    def get_goal(self, task: str, task_id: int | None) -> Any:
+        task_key = self.normalize_task(str(task or ""))
+        provider = self.task_to_provider.get(task_key) if task_key else None
+        if provider is not None:
+            result = provider.get_goal(task, task_id=None)
+            if result.image is None:
+                return result
+            root = self.provider_roots.get(id(provider))
+            source = f"{root}:{result.source}" if root is not None else result.source
+            return self.goal_result_cls(image=result.image, source=source)
+
+        if task_id is not None:
+            provider = self.task_id_to_provider.get(int(task_id))
+            if provider is not None:
+                LOGGER.warning(
+                    "using unique task_id fallback for LIBERO goal lookup: task_id=%s",
+                    task_id,
+                )
+                result = provider.get_goal(task, task_id=int(task_id))
+                if result.image is None:
+                    return result
+                root = self.provider_roots.get(id(provider))
+                source = f"{root}:{result.source}" if root is not None else result.source
+                return self.goal_result_cls(image=result.image, source=source)
+
+        return self._empty_result()
+
+
+def _build_libero_goal_provider(
+    *,
+    dataset_path: str,
+    image_key: str,
+    allow_task_id_fallback: bool,
+    provider_cls: type[Any],
+    normalize_task_fn: Callable[[str], str],
+    goal_result_cls: type[Any],
+) -> Any:
+    roots = _discover_lerobot_goal_datasets(Path(dataset_path))
+    if not roots:
+        expected = "meta/info.json and meta/episodes.jsonl"
+        raise FileNotFoundError(
+            f"no LeRobot LIBERO goal datasets found under {dataset_path}; expected {expected}"
+        )
+    if len(roots) == 1:
+        LOGGER.info("using single LIBERO goal dataset: %s", roots[0])
+        return provider_cls(
+            dataset_path=str(roots[0]),
+            image_key=str(image_key),
+            allow_task_id_fallback=bool(allow_task_id_fallback),
+        )
+    LOGGER.info("using LIBERO goal dataset router over %d child datasets under %s", len(roots), dataset_path)
+    return PromptRoutingLiberoGoalProvider(
+        dataset_roots=roots,
+        provider_cls=provider_cls,
+        normalize_task_fn=normalize_task_fn,
+        goal_result_cls=goal_result_cls,
+        image_key=str(image_key),
+        allow_task_id_fallback=bool(allow_task_id_fallback),
+    )
 
 
 class RoboDopamineProgressHttpService:
@@ -81,7 +296,14 @@ class RoboDopamineProgressHttpService:
         trajectory = request.get("trajectory", [])
         if not isinstance(trajectory, Sequence) or isinstance(trajectory, (str, bytes, bytearray)):
             raise TypeError("request.trajectory must be a sequence")
-        query_indices = [int(idx) for idx in request.get("query_indices", [])]
+        trajectory_indices = _int_list(request.get("trajectory_indices", []))
+        if len(trajectory_indices) != len(trajectory):
+            trajectory_indices = list(range(len(trajectory)))
+        query_indices = _compact_query_indices(
+            request,
+            trajectory_len=len(trajectory),
+            trajectory_indices=trajectory_indices,
+        )
         if not trajectory or not query_indices:
             return {"progress": []}
 
@@ -95,10 +317,19 @@ class RoboDopamineProgressHttpService:
                     task = str(item["task"])
                     break
 
-        transitions = [_as_transition(dict(item), step_in_episode=idx, task_id=task_id) for idx, item in enumerate(trajectory)]
-        start_idx = int(request.get("trajectory_start_idx", 0) or 0)
+        transitions = [
+            _as_transition(dict(item), step_in_episode=trajectory_indices[idx], task_id=task_id)
+            for idx, item in enumerate(trajectory)
+        ]
+        start_idx = _compact_start_idx(
+            request,
+            trajectory_len=len(trajectory),
+            trajectory_indices=trajectory_indices,
+        )
+        absolute_query_indices = _int_list(request.get("absolute_query_indices", []))
+        query_label = absolute_query_indices if absolute_query_indices else query_indices
         episode_id = request.get("episode_id", "episode")
-        request_label = f"{episode_id}_{min(query_indices)}_{max(query_indices)}"
+        request_label = f"{episode_id}_{min(query_label)}_{max(query_label)}"
 
         goal_image = None
         goal_source = None
@@ -124,7 +355,7 @@ class RoboDopamineProgressHttpService:
             "request ok: episode=%s task=%r query=%s progress=%s goal=%s",
             episode_id,
             task,
-            query_indices,
+            query_label,
             [round(value, 4) for value in progress],
             goal_source,
         )
@@ -154,7 +385,7 @@ def parse_args(argv: Sequence[str] | None = None) -> argparse.Namespace:
     parser.add_argument("--goal-image-preprocess", choices=["none", "libero"], default="none")
     parser.add_argument("--eval-modes", nargs="+", choices=["forward", "incremental", "backward"], default=["forward"])
     parser.add_argument("--batch-size", type=int, default=1)
-    parser.add_argument("--goal-dataset", default="/vla/users/yixin/LIBERO/Libero_Lerobot")
+    parser.add_argument("--goal-dataset", default="/vla/users/niejunnan/datasets/libero_lerobot")
     parser.add_argument("--goal-image-key", default="image")
     parser.add_argument("--allow-task-id-fallback", action="store_true")
     parser.add_argument("--allow-missing-goal", action="store_true")
@@ -163,25 +394,36 @@ def parse_args(argv: Sequence[str] | None = None) -> argparse.Namespace:
     parser.add_argument("--no-clip-progress", action="store_true")
     parser.add_argument("--response-key", default="robodopamine")
     parser.add_argument("--cuda-visible-devices", default=None)
-    parser.add_argument("--vllm-attention-backend", default=os.environ.get("VLLM_ATTENTION_BACKEND", "TORCH_SDPA"))
+    parser.add_argument(
+        "--vllm-attention-backend",
+        default=os.environ.get("VLLM_ATTENTION_BACKEND", "TORCH_SDPA"),
+    )
     parser.add_argument("--log-level", default="INFO", choices=["DEBUG", "INFO", "WARNING", "ERROR"])
     return parser.parse_args(argv)
 
 
 def main(argv: Sequence[str] | None = None) -> int:
     args = parse_args(argv)
-    logging.basicConfig(level=getattr(logging, str(args.log_level)), format="%(asctime)s %(levelname)s %(name)s: %(message)s")
+    logging.basicConfig(
+        level=getattr(logging, str(args.log_level)),
+        format="%(asctime)s %(levelname)s %(name)s: %(message)s",
+    )
     if args.cuda_visible_devices is not None:
         os.environ["CUDA_VISIBLE_DEVICES"] = str(args.cuda_visible_devices)
     os.environ["VLLM_ATTENTION_BACKEND"] = str(args.vllm_attention_backend)
 
-    GrmProgressEngine, LiberoGoalProvider = _load_robodopamine(Path(args.robodopamine_root))
+    GrmProgressEngine, LiberoGoalProvider, normalize_task, GoalLookupResult = _load_robodopamine(
+        Path(args.robodopamine_root)
+    )
     goal_provider = None
     if args.goal_dataset:
-        goal_provider = LiberoGoalProvider(
+        goal_provider = _build_libero_goal_provider(
             dataset_path=str(args.goal_dataset),
             image_key=str(args.goal_image_key),
             allow_task_id_fallback=bool(args.allow_task_id_fallback),
+            provider_cls=LiberoGoalProvider,
+            normalize_task_fn=normalize_task,
+            goal_result_cls=GoalLookupResult,
         )
     engine = GrmProgressEngine(
         model_path=str(args.model_path),

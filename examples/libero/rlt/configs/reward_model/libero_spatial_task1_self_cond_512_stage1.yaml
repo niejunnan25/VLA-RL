@@ -9,7 +9,7 @@ vla:
   checkpoint_base_dir: ./checkpoints
   exp_name: rlt_stage1_libero_spatial_task1_self_conditioned_prefix_512
   repo_id_override: libero_spatial/pick_up_the_black_bowl_next_to_the_ramekin_and_place_it_on_the_plate
-  lerobot_home: /vla/users/yixin/LIBERO/Libero_Lerobot
+  lerobot_home: /vla/users/niejunnan/datasets/libero_lerobot
   device: cuda
 
 feature:
