@@ -1,6 +1,8 @@
 from __future__ import annotations
 
 import copy
+from contextlib import nullcontext
+import threading
 from typing import Any, Sequence
 
 import numpy as np
@@ -11,6 +13,14 @@ import torch.nn.functional as F
 from vla_rl.algorithms.base import Algorithm
 from vla_rl.nn import HFResNetImageEncoder, MLP, SmallImageEncoder, soft_update
 from vla_rl.data import RolloutBatch
+
+
+_COMPILE_KWARGS = {
+    "backend": "inductor",
+    "mode": "default",
+    "fullgraph": True,
+    "dynamic": False,
+}
 
 
 class ObsEncoder(nn.Module):
@@ -60,14 +70,10 @@ class ObsEncoder(nn.Module):
         concat_dim = len(self.image_keys) * self.image_feature_dim + self.vector_latent_dim
         self.proj = MLP(concat_dim, [hidden_dim], hidden_dim, layer_norm=True) if self.project_obs else None
         self.output_dim = int(hidden_dim if self.project_obs else concat_dim)
+        self._fuse_resnet_views = self._can_fuse_resnet_views()
 
     def forward(self, obs: dict[str, torch.Tensor], *, stop_gradient: bool = False) -> torch.Tensor:
-        pieces: list[torch.Tensor] = []
-        for key in self.image_keys:
-            image = obs[f"image_{key}"]
-            if image.ndim != 4:
-                raise ValueError(f"image_{key} must be [B,C,H,W], got {tuple(image.shape)}")
-            pieces.append(self.image_encoders[key](image.float()))
+        pieces = self._encode_image_features(obs)
         if pieces:
             batch_size = pieces[0].shape[0]
             device = pieces[0].device
@@ -84,6 +90,48 @@ class ObsEncoder(nn.Module):
         encoded = torch.cat(pieces, dim=-1)
         encoded = self.proj(encoded) if self.proj is not None else encoded
         return encoded.detach() if stop_gradient else encoded
+
+    def _can_fuse_resnet_views(self) -> bool:
+        if self.image_encoder_type not in {"hf_resnet", "resnet"} or len(self.image_keys) <= 1:
+            return False
+        encoders = [self.image_encoders[key] for key in self.image_keys]
+        if not all(isinstance(encoder, HFResNetImageEncoder) for encoder in encoders):
+            return False
+        return len({id(encoder.backbone) for encoder in encoders}) == 1
+
+    def _encode_image_features(self, obs: dict[str, torch.Tensor]) -> list[torch.Tensor]:
+        if self._fuse_resnet_views:
+            fused = self._encode_image_features_fused(obs)
+            if fused is not None:
+                return fused
+        return self._encode_image_features_loop(obs)
+
+    def _encode_image_features_loop(self, obs: dict[str, torch.Tensor]) -> list[torch.Tensor]:
+        pieces: list[torch.Tensor] = []
+        for key in self.image_keys:
+            image = obs[f"image_{key}"]
+            if image.ndim != 4:
+                raise ValueError(f"image_{key} must be [B,C,H,W], got {tuple(image.shape)}")
+            pieces.append(self.image_encoders[key](image.float()))
+        return pieces
+
+    def _encode_image_features_fused(self, obs: dict[str, torch.Tensor]) -> list[torch.Tensor] | None:
+        images = []
+        for key in self.image_keys:
+            image = obs[f"image_{key}"]
+            if image.ndim != 4:
+                raise ValueError(f"image_{key} must be [B,C,H,W], got {tuple(image.shape)}")
+            images.append(image.float())
+        first = images[0]
+        if any(image.device != first.device or image.dtype != first.dtype or tuple(image.shape) != tuple(first.shape) for image in images[1:]):
+            return None
+        batch_size = int(first.shape[0])
+        encoders = [self.image_encoders[key] for key in self.image_keys]
+        fused_features = encoders[0].encode_backbone_bchw(torch.cat(images, dim=0))
+        return [
+            encoder.pool_features(features)
+            for encoder, features in zip(encoders, fused_features.split(batch_size, dim=0))
+        ]
 
 
 class GaussianActor(nn.Module):
@@ -145,6 +193,18 @@ class Critic(nn.Module):
         return self.forward_encoded(self.obs_encoder(obs), action)
 
 
+class CriticEnsemble(nn.Module):
+    def __init__(self, critics: torch.nn.ModuleList) -> None:
+        super().__init__()
+        self.critics = critics
+
+    def forward(self, obs: dict[str, torch.Tensor], action: torch.Tensor) -> tuple[torch.Tensor, ...]:
+        if len(self.critics) > 1 and all(critic.obs_encoder is self.critics[0].obs_encoder for critic in self.critics):
+            encoded = self.critics[0].obs_encoder(obs)
+            return tuple(critic.forward_encoded(encoded, action) for critic in self.critics)
+        return tuple(critic(obs, action) for critic in self.critics)
+
+
 class SACAgent(Algorithm):
     """Torch SAC agent used for standard single-step RLPD."""
 
@@ -182,8 +242,11 @@ class SACAgent(Algorithm):
         critic_actor_ratio: int = 2,
         clip_grad_norm: float = 1.0,
         device: str = "cpu",
+        enable_compile: bool = True,
     ) -> None:
         self.device = torch.device(device)
+        self.enable_compile = bool(enable_compile)
+        self._network_lock = threading.RLock()
         self.image_keys = tuple(str(key) for key in image_keys)
         self.proprio_dim = int(proprio_dim)
         self.action_dim = int(action_dim)
@@ -245,13 +308,25 @@ class SACAgent(Algorithm):
         self.log_temperature = torch.nn.Parameter(torch.tensor(init_log_temp, dtype=torch.float32, device=self.device))
         self.temperature_optimizer = torch.optim.Adam([self.log_temperature], lr=self.temperature_lr)
         self.target_entropy = float(target_entropy) if target_entropy is not None else -float(self.action_dim)
+        self._compiled_actor: nn.Module | None = None
+        self._compiled_critics: nn.Module | None = None
+        self._compiled_critic_targets: nn.Module | None = None
 
     @torch.no_grad()
     def sample_action(self, obs: dict[str, Any], deterministic: bool = False) -> np.ndarray:
-        batch = self._obs_to_torch([obs])
-        normalized = self.actor.deterministic(batch) if deterministic else self.actor.sample(batch)[0]
-        action = self._scale_action_torch(normalized)
-        return action.detach().cpu().numpy().reshape(1, self.action_dim).astype(np.float32)
+        with self._network_lock:
+            batch = self._obs_to_torch([obs])
+            with self._autocast_context():
+                normalized = self._actor_deterministic(batch) if deterministic else self._actor_sample(batch)[0]
+            action = self._scale_action_torch(normalized)
+            return action.detach().cpu().numpy().reshape(1, self.action_dim).astype(np.float32)
+
+    def set_compile_enabled(self, enabled: bool) -> None:
+        self.enable_compile = bool(enabled)
+        if not self.enable_compile:
+            self._compiled_actor = None
+            self._compiled_critics = None
+            self._compiled_critic_targets = None
 
     def random_action(self) -> np.ndarray:
         action = np.random.uniform(-1.0, 1.0, size=(1, self.action_dim)).astype(np.float32)
@@ -310,8 +385,8 @@ class SACAgent(Algorithm):
         reward = fb["reward"]
         done = fb["done"]
         discount = fb["discount"]
-        with torch.no_grad():
-            next_norm, next_log_prob = self.actor.sample(next_obs)
+        with torch.no_grad(), self._autocast_context():
+            next_norm, next_log_prob = self._actor_sample(next_obs)
             next_action = self._scale_action_torch(next_norm)
             target_qs = self._critic_values(self.critic_targets, next_obs, next_action)
             min_target_q = torch.min(torch.cat(target_qs, dim=-1), dim=-1, keepdim=True).values
@@ -319,16 +394,17 @@ class SACAgent(Algorithm):
                 min_target_q = min_target_q - self.temperature.detach() * next_log_prob
             target = reward + (1.0 - done) * discount * min_target_q
 
-        q_preds = self._critic_values(self.critics, obs, action)
-        loss = sum(F.mse_loss(q, target) for q in q_preds)
+        with self._autocast_context():
+            q_preds = self._critic_values(self.critics, obs, action)
+            loss = sum(F.mse_loss(q, target) for q in q_preds)
         self.critic_optimizer.zero_grad()
         loss.backward()
         torch.nn.utils.clip_grad_norm_(self.critics.parameters(), self.clip_grad_norm)
         self.critic_optimizer.step()
         return {
-            "loss_critic": float(loss.detach().cpu()),
-            "target_q_mean": float(target.mean().detach().cpu()),
-            "predicted_q_mean": float(torch.stack([q.mean() for q in q_preds]).mean().detach().cpu()),
+            "loss_critic": loss.detach(),
+            "target_q_mean": target.mean().detach(),
+            "predicted_q_mean": torch.stack([q.mean() for q in q_preds]).mean().detach(),
         }
 
     def _actor_step(self, fb: dict[str, torch.Tensor | dict[str, torch.Tensor]]) -> dict[str, float]:
@@ -338,11 +414,12 @@ class SACAgent(Algorithm):
         for param in critic_params:
             param.requires_grad_(False)
         try:
-            normalized, log_prob = self.actor.sample(obs, stop_encoder_gradient=self.shared_encoder)
-            action = self._scale_action_torch(normalized)
-            q_values = self._critic_values(self.critics, obs, action)
-            min_q = torch.min(torch.cat(q_values, dim=-1), dim=-1, keepdim=True).values
-            loss = (self.temperature.detach() * log_prob - min_q).mean()
+            with self._autocast_context():
+                normalized, log_prob = self._actor_sample(obs, stop_encoder_gradient=self.shared_encoder)
+                action = self._scale_action_torch(normalized)
+                q_values = self._critic_values(self.critics, obs, action)
+                min_q = torch.min(torch.cat(q_values, dim=-1), dim=-1, keepdim=True).values
+                loss = (self.temperature.detach() * log_prob - min_q).mean()
             self.actor_optimizer.zero_grad()
             loss.backward()
             torch.nn.utils.clip_grad_norm_(self._unique_parameters(self.actor_optimizer.param_groups[0]["params"]), self.clip_grad_norm)
@@ -351,18 +428,21 @@ class SACAgent(Algorithm):
             for param, requires_grad in zip(critic_params, previous_requires_grad):
                 param.requires_grad_(requires_grad)
         return {
-            "loss_actor": float(loss.detach().cpu()),
-            "actor_q_mean": float(min_q.mean().detach().cpu()),
-            "actor_log_prob_mean": float(log_prob.mean().detach().cpu()),
+            "loss_actor": loss.detach(),
+            "actor_q_mean": min_q.mean().detach(),
+            "actor_log_prob_mean": log_prob.mean().detach(),
         }
 
-    def _temperature_step(self, log_prob_mean: float) -> dict[str, float]:
-        log_prob = torch.tensor(float(log_prob_mean), device=self.device)
+    def _temperature_step(self, log_prob_mean: float | torch.Tensor) -> dict[str, torch.Tensor]:
+        if isinstance(log_prob_mean, torch.Tensor):
+            log_prob = log_prob_mean.detach().to(device=self.device, dtype=torch.float32)
+        else:
+            log_prob = torch.tensor(float(log_prob_mean), device=self.device)
         loss = -(self.log_temperature * (log_prob + self.target_entropy).detach())
         self.temperature_optimizer.zero_grad()
         loss.backward()
         self.temperature_optimizer.step()
-        return {"temperature": float(self.temperature.detach().cpu()), "loss_temperature": float(loss.detach().cpu())}
+        return {"temperature": self.temperature.detach(), "loss_temperature": loss.detach()}
 
     def _apply_drq_augmentation(
         self,
@@ -407,10 +487,82 @@ class SACAgent(Algorithm):
         obs: dict[str, torch.Tensor],
         action: torch.Tensor,
     ) -> list[torch.Tensor]:
-        if len(critics) > 1 and all(critic.obs_encoder is critics[0].obs_encoder for critic in critics):
-            encoded = critics[0].obs_encoder(obs)
-            return [critic.forward_encoded(encoded, action) for critic in critics]
-        return [critic(obs, action) for critic in critics]
+        if critics is self.critics:
+            compiled = self._ensure_critics_compiled(target=False)
+            if compiled is not None:
+                return list(compiled(obs, action))
+        if critics is self.critic_targets:
+            compiled = self._ensure_critics_compiled(target=True)
+            if compiled is not None:
+                return list(compiled(obs, action))
+        return list(CriticEnsemble(critics)(obs, action))
+
+    def _actor_forward(
+        self,
+        obs: dict[str, torch.Tensor],
+        *,
+        stop_encoder_gradient: bool = False,
+    ) -> tuple[torch.Tensor, torch.Tensor]:
+        actor = self._ensure_actor_compiled() or self.actor
+        return actor(obs, stop_encoder_gradient=stop_encoder_gradient)
+
+    def _actor_deterministic(self, obs: dict[str, torch.Tensor], *, stop_encoder_gradient: bool = False) -> torch.Tensor:
+        mean, _ = self._actor_forward(obs, stop_encoder_gradient=stop_encoder_gradient)
+        return torch.tanh(mean)
+
+    def _actor_sample(
+        self,
+        obs: dict[str, torch.Tensor],
+        *,
+        stop_encoder_gradient: bool = False,
+    ) -> tuple[torch.Tensor, torch.Tensor]:
+        mean, log_std = self._actor_forward(obs, stop_encoder_gradient=stop_encoder_gradient)
+        std = log_std.exp()
+        normal = torch.distributions.Normal(mean, std)
+        raw = normal.rsample()
+        action = torch.tanh(raw)
+        log_prob = normal.log_prob(raw) - torch.log(torch.clamp(1.0 - action.pow(2), min=1e-6))
+        return action, log_prob.sum(dim=-1, keepdim=True)
+
+    def _autocast_context(self):
+        if self.device.type != "cuda" or not torch.cuda.is_available():
+            return nullcontext()
+        return torch.autocast(device_type="cuda", dtype=torch.bfloat16)
+
+    def _compile_available(self) -> bool:
+        return bool(self.enable_compile) and self.device.type == "cuda" and torch.cuda.is_available() and hasattr(torch, "compile")
+
+    def _ensure_actor_compiled(self) -> nn.Module | None:
+        if self._compiled_actor is not None:
+            return self._compiled_actor
+        if not self._compile_available():
+            return None
+        with torch.no_grad():
+            self.actor.deterministic(self._dummy_obs_torch())
+        self._compiled_actor = torch.compile(self.actor, **_COMPILE_KWARGS)
+        return self._compiled_actor
+
+    def _ensure_critics_compiled(self, *, target: bool) -> nn.Module | None:
+        if not self._compile_available():
+            return None
+        if target:
+            if self._compiled_critic_targets is not None:
+                return self._compiled_critic_targets
+            critics = self.critic_targets
+        else:
+            if self._compiled_critics is not None:
+                return self._compiled_critics
+            critics = self.critics
+        dummy = self._dummy_obs_torch()
+        action = torch.zeros((1, self.action_dim), dtype=torch.float32, device=self.device)
+        with torch.no_grad():
+            CriticEnsemble(critics).to(self.device)(dummy, action)
+        compiled = torch.compile(CriticEnsemble(critics).to(self.device), **_COMPILE_KWARGS)
+        if target:
+            self._compiled_critic_targets = compiled
+        else:
+            self._compiled_critics = compiled
+        return compiled
 
     def _split_batch(
         self,
@@ -443,16 +595,23 @@ class SACAgent(Algorithm):
             return {key: self._index_value(child, index) for key, child in value.items()}
         return value[int(index)]
 
-    @staticmethod
-    def _mean_infos(infos: list[dict[str, float]]) -> dict[str, float]:
+    def _mean_infos(self, infos: list[dict[str, Any]]) -> dict[str, Any]:
         if not infos:
             return {}
         keys = set().union(*(info.keys() for info in infos))
-        averaged: dict[str, float] = {}
+        averaged: dict[str, Any] = {}
         for key in keys:
-            values = [float(info[key]) for info in infos if key in info]
-            if values:
-                averaged[key] = float(sum(values) / len(values))
+            values = [info[key] for info in infos if key in info]
+            if not values:
+                continue
+            if any(isinstance(value, torch.Tensor) for value in values):
+                tensors = [
+                    value if isinstance(value, torch.Tensor) else torch.tensor(float(value), device=self.device)
+                    for value in values
+                ]
+                averaged[key] = sum(tensors) / len(tensors)
+            else:
+                averaged[key] = float(sum(float(value) for value in values) / len(values))
         return averaged
 
     def _convert_batch(self, batch: RolloutBatch) -> dict[str, torch.Tensor | dict[str, torch.Tensor]]:
@@ -539,13 +698,16 @@ class SACAgent(Algorithm):
         self._move_optimizer_state_to_device(self.temperature_optimizer)
 
     def policy_state_dict(self) -> dict:
-        self._ensure_networks_initialized(actor_only=True)
-        return {"actor": self.actor.state_dict(), "update_count": self.update_count}
+        with self._network_lock:
+            self._ensure_networks_initialized(actor_only=True)
+            actor_state = {key: value.detach().cpu().clone() for key, value in self.actor.state_dict().items()}
+            return {"actor": actor_state, "update_count": self.update_count}
 
     def load_policy_state_dict(self, state: dict) -> None:
-        self._ensure_networks_initialized(actor_only=True)
-        self.actor.load_state_dict(state["actor"])
-        self.update_count = int(state.get("update_count", self.update_count))
+        with self._network_lock:
+            self._ensure_networks_initialized(actor_only=True)
+            self.actor.load_state_dict(state["actor"])
+            self.update_count = int(state.get("update_count", self.update_count))
 
     def _ensure_networks_initialized(self, actor_only: bool = False) -> None:
         dummy = self._dummy_obs_torch()

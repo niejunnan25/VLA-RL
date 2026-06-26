@@ -133,7 +133,11 @@ class PLDSACAgent(Algorithm):
         init_log_temp = float(np.log(max(float(init_temperature), 1e-6)))
         self.log_temperature = torch.nn.Parameter(torch.tensor(init_log_temp, dtype=torch.float32, device=self.device))
         self.temperature_optimizer = torch.optim.Adam([self.log_temperature], lr=self.temperature_lr)
-        self.target_entropy = float(target_entropy) if target_entropy is not None else -float(self.residual_spec.policy_action_dim)
+        self.target_entropy = (
+            float(target_entropy)
+            if target_entropy is not None
+            else -0.5 * float(self.residual_spec.policy_action_dim)
+        )
 
     @torch.no_grad()
     def sample_action(
@@ -157,15 +161,22 @@ class PLDSACAgent(Algorithm):
         batch.validate()
         fb = self._convert_batch(batch)
         info: dict[str, float] = {}
-        total_critic_steps = max(1, int(self.utd_ratio))
+        utd_ratio = max(1, int(self.utd_ratio))
         actor_update_ratio = max(1, int(self.critic_actor_ratio))
-        for _ in range(total_critic_steps):
-            info.update(self._critic_step(fb))
+        # High UTD: do `utd_ratio` critic gradient steps, each on a DISTINCT
+        # mini-batch sliced from the sampled batch, instead of reusing one batch.
+        critic_batches = self._split_batch(fb, utd_ratio)
+        critic_infos: list[dict[str, float]] = []
+        for idx in range(utd_ratio):
+            minibatch = fb if utd_ratio == 1 else self._index_batch(critic_batches, idx)
+            critic_infos.append(self._critic_step(minibatch))
             self._critic_step_count += 1
             if self._critic_step_count % actor_update_ratio == 0:
-                info.update(self._actor_step(fb))
-                info.update(self._temperature_step(info.get("actor_log_prob_mean", 0.0)))
+                actor_info = self._actor_step(minibatch)
+                info.update(actor_info)
+                info.update(self._temperature_step(actor_info.get("actor_log_prob_mean", 0.0)))
             self._update_targets()
+        info.update(self._mean_infos(critic_infos))
         self.update_count += 1
         info["updates"] = float(self.update_count)
         return info
@@ -304,7 +315,11 @@ class PLDSACAgent(Algorithm):
             "next_obs": next_obs,
             "action": torch.as_tensor(action, dtype=torch.float32, device=self.device),
             "reward": torch.tensor([[t.reward] for t in transitions], dtype=torch.float32, device=self.device),
-            "done": torch.tensor([[t.done or t.truncated] for t in transitions], dtype=torch.float32, device=self.device),
+            "done": torch.tensor(
+                [[bool(t.info.get("critic_terminal", t.done or t.truncated))] for t in transitions],
+                dtype=torch.float32,
+                device=self.device,
+            ),
             "discount": torch.tensor([[t.discount] for t in transitions], dtype=torch.float32, device=self.device),
             "mc_returns": torch.tensor([float(t.info.get("mc_returns", 0.0)) for t in transitions], dtype=torch.float32, device=self.device),
             "mc_returns_valid": torch.tensor([bool(t.info.get("mc_returns_valid", False)) for t in transitions], dtype=torch.float32, device=self.device),
@@ -317,6 +332,49 @@ class PLDSACAgent(Algorithm):
             values = [np.asarray(obs[key], dtype=np.float32) for obs in obs_list]
             result[key] = torch.as_tensor(np.stack(values), dtype=torch.float32, device=self.device)
         return result
+
+    def _split_batch(
+        self,
+        fb: dict[str, torch.Tensor | dict[str, torch.Tensor]],
+        parts: int,
+    ) -> dict[str, torch.Tensor | dict[str, torch.Tensor]]:
+        parts = int(parts)
+        if parts <= 1:
+            return fb
+        return {key: self._split_value(value, parts) for key, value in fb.items()}
+
+    def _index_batch(
+        self,
+        fb: dict[str, torch.Tensor | dict[str, torch.Tensor]],
+        index: int,
+    ) -> dict[str, torch.Tensor | dict[str, torch.Tensor]]:
+        return {key: self._index_value(value, index) for key, value in fb.items()}
+
+    def _split_value(self, value: torch.Tensor | dict[str, torch.Tensor], parts: int):
+        if isinstance(value, dict):
+            return {key: self._split_value(child, parts) for key, child in value.items()}
+        batch_size = int(value.shape[0])
+        if batch_size % int(parts) != 0:
+            raise ValueError(f"batch size {batch_size} must be divisible by utd_ratio={parts}")
+        mini_batch = batch_size // int(parts)
+        return value.reshape(int(parts), mini_batch, *value.shape[1:])
+
+    def _index_value(self, value: torch.Tensor | dict[str, torch.Tensor], index: int):
+        if isinstance(value, dict):
+            return {key: self._index_value(child, index) for key, child in value.items()}
+        return value[int(index)]
+
+    @staticmethod
+    def _mean_infos(infos: list[dict[str, float]]) -> dict[str, float]:
+        if not infos:
+            return {}
+        keys = set().union(*(info.keys() for info in infos))
+        averaged: dict[str, float] = {}
+        for key in keys:
+            values = [float(info[key]) for info in infos if key in info]
+            if values:
+                averaged[key] = float(sum(values) / len(values))
+        return averaged
 
     @property
     def temperature(self) -> torch.Tensor:

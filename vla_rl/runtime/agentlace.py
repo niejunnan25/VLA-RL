@@ -3,6 +3,7 @@ from __future__ import annotations
 from typing import Any
 
 import numpy as np
+import torch
 from agentlace.data.data_store import DataStoreBase
 
 
@@ -37,4 +38,9 @@ def json_sanitize(value: Any) -> Any:
         return value.item()
     if isinstance(value, np.ndarray):
         return value.tolist()
+    if isinstance(value, torch.Tensor):
+        detached = value.detach().cpu()
+        if detached.numel() == 1:
+            return detached.item()
+        return detached.tolist()
     return value

@@ -216,13 +216,17 @@ def run_learner(cfg: DictConfig) -> dict[str, Any]:
             if _learner_should_stop(update_steps, env_steps, int(runtime.max_update_steps), int(runtime.max_env_steps), actor_done):
                 break
             online_updates = max(0, update_steps - calql_steps_done)
-            min_online = max(int(runtime.training_starts), 1)
-            if len(replay) < min_online or online_updates >= len(replay):
+            # Gate online learning on replay size only (RLPD/SERL-style). The
+            # learner then free-runs decoupled from the actor, so the real UTD is
+            # driven by `agent.utd_ratio` (gradient steps per online sample),
+            # instead of being implicitly capped at ~1.
+            min_online = max(int(runtime.training_starts), int(runtime.batch_size))
+            if len(replay) < min_online:
                 now = time.perf_counter()
                 if actor_done:
                     write_metric({
                         "role": "learner",
-                        "event": "stopping_online_replay_exhausted",
+                        "event": "stopping_replay_below_training_starts",
                         "replay_size": len(replay),
                         "training_starts": int(runtime.training_starts),
                         "update_steps": update_steps,
@@ -405,9 +409,16 @@ def run_actor(cfg: DictConfig) -> dict[str, Any]:
             total_reward += float(reward)
             episode_return += float(reward)
             terminal = bool(done or truncated)
-            episode_success = bool(episode_success or info.get("success", False) or info.get("env_done", False))
+            step_success = bool(
+                info.get("success", False) or info.get("env_done", False) or info.get("is_success", False)
+            )
+            # Only a true success is a critic terminal (no bootstrap). Time-limit
+            # truncation is NOT terminal for the value backup: we still bootstrap
+            # from the next observation. This mirrors examples/libero/rlt.
+            critic_terminal = step_success
+            episode_success = bool(episode_success or step_success)
             next_pld_obs = None
-            if not terminal:
+            if not critic_terminal:
                 with chunk_timer.context("next_reference_policy"):
                     next_base_actions = predict_base_actions(
                         reference_policy,
@@ -424,10 +435,10 @@ def run_actor(cfg: DictConfig) -> dict[str, Any]:
                 reward=float(reward),
                 done=bool(done),
                 truncated=bool(truncated),
-                discount=0.0 if terminal else float(runtime.gamma) ** executed_steps,
+                discount=0.0 if critic_terminal else float(runtime.gamma) ** executed_steps,
                 executed_steps=executed_steps,
                 env_steps=env_steps,
-                info={**info, "base_warmup": bool(base_warmup)},
+                info={**info, "base_warmup": bool(base_warmup), "critic_terminal": bool(critic_terminal)},
             )
             with chunk_timer.context("send_transition"):
                 data_store.insert(transition.to_payload())

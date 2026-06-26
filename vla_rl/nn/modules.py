@@ -116,6 +116,15 @@ class HFResNetImageEncoder(nn.Module):
             x = x / 255.0
         return (x - self._mean) / self._std
 
+    def encode_backbone_bchw(self, image: Tensor) -> Tensor:
+        x = self._normalize(image)
+        if self.freeze_backbone:
+            with torch.no_grad():
+                out = self.backbone(pixel_values=x, return_dict=True)
+            return out.last_hidden_state.detach()
+        out = self.backbone(pixel_values=x, return_dict=True)
+        return out.last_hidden_state
+
     def _pool(self, features: Tensor) -> Tensor:
         if self.pooling_method == "spatial_learned_embeddings":
             if self.spatial_pool is None:
@@ -128,19 +137,14 @@ class HFResNetImageEncoder(nn.Module):
             return torch.amax(features, dim=(-2, -1))
         raise ValueError(f"unsupported ResNet pooling_method={self.pooling_method!r}")
 
-    def forward(self, image: Tensor) -> Tensor:
-        x = self._normalize(image)
-        if self.freeze_backbone:
-            with torch.no_grad():
-                out = self.backbone(pixel_values=x, return_dict=True)
-            features = out.last_hidden_state.detach()
-        else:
-            out = self.backbone(pixel_values=x, return_dict=True)
-            features = out.last_hidden_state
+    def pool_features(self, features: Tensor) -> Tensor:
         pooled = self._pool(features)
         projected = self.bottleneck(pooled)
         projected = torch.layer_norm(projected, projected.shape[-1:])
         return torch.tanh(projected)
+
+    def forward(self, image: Tensor) -> Tensor:
+        return self.pool_features(self.encode_backbone_bchw(image))
 
 
 def _to_bchw(image: Tensor) -> Tensor:

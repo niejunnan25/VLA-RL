@@ -58,7 +58,7 @@ algorithm:
   init_temperature: 1.0
   target_entropy: null
   backup_entropy: false
-  utd_ratio: 1
+  utd_ratio: 4
   critic_actor_ratio: 2
   clip_grad_norm: 1.0
   cql_n_actions: 10
@@ -95,7 +95,7 @@ runtime:
   offline_capacity: 250000
   offline_max_episodes: null
   offline_max_transitions: null
-  calql_pretrain_steps: 150
+  calql_pretrain_steps: 20000
   calql_alpha: 1.0
   calql_n_actions: 10
   calql_temperature: 1.0

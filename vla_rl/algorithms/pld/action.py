@@ -73,8 +73,10 @@ class ResidualActionSpec:
         delta = np.zeros_like(base, dtype=np.float32)
         delta[:, self.control_indices] = delta_selected
         final = base + delta
-        if self.clip_gripper and final.shape[-1] > 0:
-            final[:, -1] = np.clip(final[:, -1], -1.0, 1.0)
+        # The composed action is executed by the environment, whose action space
+        # is bounded to [-1, 1] on every dimension. Clip all dims (not only the
+        # gripper) so the action stored for the critic matches what the env runs.
+        final = np.clip(final, -1.0, 1.0)
         return final.astype(np.float32)
 
     def compose_chunk_torch(self, base_action_chunk: torch.Tensor, residual_action: torch.Tensor) -> torch.Tensor:
@@ -93,8 +95,8 @@ class ResidualActionSpec:
         delta = torch.zeros_like(base_action_chunk)
         delta.index_copy_(2, indices, delta_selected)
         final = base_action_chunk + delta
-        if self.clip_gripper and final.shape[-1] > 0:
-            final = torch.cat([final[..., :-1], torch.clamp(final[..., -1:], -1.0, 1.0)], dim=-1)
+        # Match the executed (env-clipped) action on every dimension, not just the gripper.
+        final = torch.clamp(final, -1.0, 1.0)
         return final
 
 

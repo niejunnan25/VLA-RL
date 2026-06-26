@@ -68,7 +68,7 @@ runtime:
   max_env_steps: 600000
   max_update_steps: 600000
   random_steps: 0
-  batch_size: 256
+  batch_size: 128
   replay_capacity: 250000
   replay_seed: 0
   gamma: 0.99

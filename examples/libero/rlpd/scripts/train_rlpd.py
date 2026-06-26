@@ -151,10 +151,11 @@ def run_learner(cfg: DictConfig) -> dict[str, Any]:
             wandb_finished = True
 
     def write_metric(metric: dict[str, Any]) -> None:
+        sanitized = json_sanitize(metric)
         if run_dir is not None:
             with (run_dir / "metrics.jsonl").open("a") as f:
-                f.write(json.dumps(json_sanitize(metric), sort_keys=True) + "\n")
-        wandb_logger.log(metric, step=update_steps)
+                f.write(json.dumps(sanitized, sort_keys=True) + "\n")
+        wandb_logger.log(sanitized, step=update_steps)
 
     async_eval = start_async_eval_worker(runtime, run_dir=run_dir)
 
@@ -354,7 +355,9 @@ def run_learner(cfg: DictConfig) -> dict[str, Any]:
                 server.publish_network(agent.policy_state_dict())
                 last_wait_publish_time = time.perf_counter()
                 publish_time_sec = last_wait_publish_time - publish_started
-            if int(runtime.log_period) > 0 and update_steps % int(runtime.log_period) == 0:
+            log_period = int(runtime.log_period)
+            should_log_update = log_period > 0 and update_steps % log_period == 0
+            if should_log_update:
                 check_async_eval_worker(async_eval)
                 for eval_result in load_new_async_eval_results(async_eval):
                     write_metric(eval_result)
@@ -379,35 +382,36 @@ def run_learner(cfg: DictConfig) -> dict[str, Any]:
                 checkpoint_time_sec = time.perf_counter() - checkpoint_started
 
             wall_time_sec = time.perf_counter() - start_time
-            write_metric(
-                {
-                    "role": "learner",
-                    "algorithm": "rlpd",
-                    "phase": "online",
-                    "env_steps": env_steps,
-                    "update_steps": update_steps,
-                    "replay_size": len(replay),
-                    "offline_replay_size": 0 if offline_replay is None else len(offline_replay),
-                    "batch_mix": mixed.mix,
-                    "update_time_sec": timing.get("time/mixed_sample_sec", 0.0)
-                    + timing.get("time/algorithm_update_sec", 0.0),
-                    "time/publish_network_sec": publish_time_sec,
-                    "time/save_checkpoint_sec": checkpoint_time_sec,
-                    "speed/learner_wall_updates_per_sec": update_steps / max(wall_time_sec, 1e-9),
-                    "speed/learner_active_updates_per_sec": update_steps / max(active_update_time_sec, 1e-9),
-                    "wall_time_sec": wall_time_sec,
-                    **timing,
-                    **{f"train/{key}": value for key, value in last_update.items()},
-                    **rlpd_learner_metric_aliases(
-                        last_update,
-                        update_steps=update_steps,
-                        env_steps=env_steps,
-                        replay_size=len(replay),
-                        offline_replay_size=0 if offline_replay is None else len(offline_replay),
-                        batch_mix=mixed.mix,
-                    ),
-                }
-            )
+            if should_log_update:
+                write_metric(
+                    {
+                        "role": "learner",
+                        "algorithm": "rlpd",
+                        "phase": "online",
+                        "env_steps": env_steps,
+                        "update_steps": update_steps,
+                        "replay_size": len(replay),
+                        "offline_replay_size": 0 if offline_replay is None else len(offline_replay),
+                        "batch_mix": mixed.mix,
+                        "update_time_sec": timing.get("time/mixed_sample_sec", 0.0)
+                        + timing.get("time/algorithm_update_sec", 0.0),
+                        "time/publish_network_sec": publish_time_sec,
+                        "time/save_checkpoint_sec": checkpoint_time_sec,
+                        "speed/learner_wall_updates_per_sec": update_steps / max(wall_time_sec, 1e-9),
+                        "speed/learner_active_updates_per_sec": update_steps / max(active_update_time_sec, 1e-9),
+                        "wall_time_sec": wall_time_sec,
+                        **timing,
+                        **{f"train/{key}": value for key, value in last_update.items()},
+                        **rlpd_learner_metric_aliases(
+                            last_update,
+                            update_steps=update_steps,
+                            env_steps=env_steps,
+                            replay_size=len(replay),
+                            offline_replay_size=0 if offline_replay is None else len(offline_replay),
+                            batch_mix=mixed.mix,
+                        ),
+                    }
+                )
         completed_loop = True
     finally:
         try:
@@ -469,6 +473,7 @@ def run_actor(cfg: DictConfig) -> dict[str, Any]:
     env = create_env(cfg)
     obs_builder = create_rlpd_obs_builder(cfg)
     agent = create_rlpd_agent(cfg)
+    agent.set_compile_enabled(False)
     run_dir = run_dir_from_runtime(runtime)
 
     write_actor_metric = make_jsonl_metric_writer(run_dir, "actor_metrics.jsonl")

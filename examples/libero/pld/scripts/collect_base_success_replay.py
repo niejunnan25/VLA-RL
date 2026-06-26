@@ -68,9 +68,14 @@ def main() -> None:
                 next_obs, reward, done, truncated, info = env.step_chunk(execute_actions)
                 executed_steps = int(info.get("executed_steps", min(execute_horizon, len(base_actions))))
                 terminal = bool(done or truncated)
-                episode_success = bool(episode_success or info.get("success", False) or info.get("env_done", False))
+                step_success = bool(
+                    info.get("success", False) or info.get("env_done", False) or info.get("is_success", False)
+                )
+                # Success-only critic terminal (truncation still bootstraps).
+                critic_terminal = step_success
+                episode_success = bool(episode_success or step_success)
                 next_pld_obs = None
-                if not terminal:
+                if not critic_terminal:
                     next_base_actions = predict_base_actions(reference_policy, next_obs, horizon=execute_horizon, action_dim=action_dim)
                     next_pld_obs = build_pld_obs(next_obs, next_base_actions, builder=pld_obs_builder)
                 episode.append(
@@ -81,10 +86,10 @@ def main() -> None:
                         reward=float(reward),
                         done=bool(done),
                         truncated=bool(truncated),
-                        discount=0.0 if terminal else gamma**executed_steps,
+                        discount=0.0 if critic_terminal else gamma**executed_steps,
                         executed_steps=executed_steps,
                         env_steps=steps_written + len(episode) + 1,
-                        info=dict(info),
+                        info={**dict(info), "critic_terminal": bool(critic_terminal)},
                     )
                 )
                 obs = next_obs
