@@ -7,7 +7,7 @@ from omegaconf import DictConfig, OmegaConf
 
 from vla_rl.algorithms.pld import PLDObservationBuilder, PLDSACAgent, pld_base_action_prefix
 from vla_rl.data import Observation
-from vla_rl.envs.libero import LiberoRemoteEnvBackend
+from vla_rl.envs.libero import LiberoLocalEnvBackend, LiberoRemoteEnvBackend
 from vla_rl.policies import ReferencePolicyClient
 
 
@@ -25,6 +25,7 @@ def create_env(cfg: DictConfig):
     return _create_from_section(
         cfg.env,
         {
+            "vla_rl.envs.libero.LiberoLocalEnvBackend": LiberoLocalEnvBackend,
             "vla_rl.envs.libero.LiberoRemoteEnvBackend": LiberoRemoteEnvBackend,
         },
     )

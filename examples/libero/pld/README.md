@@ -4,12 +4,14 @@ This example is the PLD Stage-1 / residual-RL line in VLA-RL. It is separate fro
 
 The implementation reuses stable VLA-RL primitives for reference-policy access, LIBERO env access, replay, and checkpoints. It does not run through the RLT example or a shared universal runner.
 
+PLD now uses `vla_rl.envs.libero.LiberoLocalEnvBackend` by default, so LIBERO runs in the actor / collector / evaluator process with `/vla/users/niejunnan/envs/serl_torch/bin/python`. It does not launch a separate LIBERO env RPC server. The OpenPI reference policy is still served through RPC because its dependency stack is intentionally isolated from the training environment.
+
 ## Collect Base-Success Replay
 
 ```bash
 cd /vla/users/niejunnan/codebase/VLA-RL
 
-python examples/libero/pld/scripts/collect_base_success_replay.py \
+/vla/users/niejunnan/envs/serl_torch/bin/python examples/libero/pld/scripts/collect_base_success_replay.py \
   --config examples/libero/pld/configs/libero_spatial_task4_openpi_pld.yaml \
   --target-successes 50
 ```
@@ -47,7 +49,7 @@ For a connectivity smoke, set `--target-successes 1` and override `runtime.max_e
 ## Evaluation
 
 ```bash
-python examples/libero/pld/scripts/eval.py \
+/vla/users/niejunnan/envs/serl_torch/bin/python examples/libero/pld/scripts/eval.py \
   --config examples/libero/pld/configs/libero_spatial_task4_openpi_pld.yaml \
   --checkpoint /tmp/vlarl_pld_task4_smoke/checkpoints/final.pt \
   --episodes 10 \
@@ -56,4 +58,4 @@ python examples/libero/pld/scripts/eval.py \
 
 The evaluator writes success, return, length, and residual-magnitude summaries. Video saving is optional and disabled by default.
 
-The checked-in config and launcher defaults use local cluster paths for the validated LIBERO server, OpenPI fork, OpenPI checkpoint, and ResNet checkpoint. Override `--serl-torch-root`, `--policy-root`, `--policy-checkpoint`, or matching OmegaConf fields on another machine.
+The checked-in config and launcher defaults use local cluster paths for the validated LIBERO environment, OpenPI fork, OpenPI checkpoint, and ResNet checkpoint. Override `env.serl_torch_root`, `--policy-root`, `--policy-checkpoint`, or matching OmegaConf fields on another machine.

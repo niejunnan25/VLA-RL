@@ -9,7 +9,8 @@ import torch.nn.functional as F
 
 from vla_rl.algorithms.base import Algorithm
 from vla_rl.algorithms.pld.action import ResidualActionSpec
-from vla_rl.algorithms.pld.modeling import GaussianResidualActor, PLDCritic, PLDObsEncoder, soft_update
+from vla_rl.algorithms.pld.modeling import GaussianResidualActor, PLDCritic, PLDObsEncoder
+from vla_rl.nn import soft_update
 from vla_rl.data import Observation, PolicyFeatures, RolloutBatch, Transition
 
 

@@ -61,7 +61,10 @@ from examples.libero.rlt.metrics import (
     actor_speed_stats,
     rlt_learner_metric_aliases,
 )
-from examples.libero.rlt.reward import PendingRLTRewardTransition, build_rlt_reward_processor
+from vla_rl.rewards.processor import (
+    PendingRewardTransition as PendingRLTRewardTransition,
+    build_reward_processor as build_rlt_reward_processor,
+)
 from examples.libero.rlt.rollout import (
     insert_window_replay_transitions,
     make_chunk_transition,
