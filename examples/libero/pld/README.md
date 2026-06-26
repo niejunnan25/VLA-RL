@@ -29,8 +29,7 @@ bash examples/libero/pld/tools/launch_pld.sh \
   --learner-gpu 1 \
   --run-dir /tmp/vlarl_pld_task4_smoke \
   -- \
-  runtime.max_env_steps=1000 \
-  runtime.max_update_steps=1000
+  runtime.max_env_steps=1000
 ```
 
 ## Collect Then Train
@@ -44,7 +43,7 @@ bash examples/libero/pld/tools/launch_pld_after_collect.sh \
   --run-dir outputs/libero_spatial_task4_openpi_pld
 ```
 
-For a connectivity smoke, set `--target-successes 1` and override `runtime.max_env_steps=1000 runtime.max_update_steps=1000`. Formal PLD runs should keep offline replay and Cal-QL-style pretraining enabled.
+For a connectivity smoke, set `--target-successes 1` and override `runtime.max_env_steps=1000`. Formal PLD runs should keep offline replay and Cal-QL-style pretraining enabled.
 
 ## Evaluation
 

@@ -9,7 +9,7 @@ Robo-Dopamine transport details while reusing Robo-Dopamine's GRM engine.
 from __future__ import annotations
 
 import argparse
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from http.server import ThreadingHTTPServer
 import io
 import logging
@@ -43,6 +43,20 @@ class _TransitionPayload:
     step_in_episode: int
 
 
+@dataclass(slots=True)
+class _EpisodeCache:
+    task: str = ""
+    task_id: int | None = None
+    payloads_by_index: dict[int, dict[str, Any]] = field(default_factory=dict)
+
+
+@dataclass(slots=True)
+class _EpisodeSnapshot:
+    task: str
+    task_id: int | None
+    payloads_by_index: dict[int, dict[str, Any]]
+
+
 def _ndarray_to_bytes(value: Any) -> bytes:
     buffer = io.BytesIO()
     np.save(buffer, np.asarray(value), allow_pickle=False)
@@ -69,32 +83,99 @@ def _int_list(value: Any) -> list[int]:
     return [int(value)]
 
 
-def _compact_query_indices(request: dict[str, Any], *, trajectory_len: int, trajectory_indices: list[int]) -> list[int]:
-    query_indices = _int_list(request.get("query_indices", []))
-    if not query_indices:
-        query_indices = list(range(trajectory_len))
-    if all(0 <= int(idx) < trajectory_len for idx in query_indices):
-        return query_indices
+def _cache_key_from_request(request: dict[str, Any], metadata: dict[str, Any]) -> str:
+    session_id = str(
+        request.get("session_id")
+        or metadata.get("session_id")
+        or request.get("run_id")
+        or metadata.get("run_id")
+        or "default"
+    )
+    episode_id = str(request.get("episode_id", "episode"))
+    return f"{session_id}:{episode_id}"
 
+
+def _copy_trajectory_payload(payload: dict[str, Any]) -> dict[str, Any]:
+    item = dict(payload)
+    raw_images = item.get("images", {})
+    if not isinstance(raw_images, dict):
+        raise TypeError(f"trajectory item images must be a dict, got {type(raw_images).__name__}")
+    item["images"] = {str(key): np.asarray(value).copy() for key, value in raw_images.items()}
+    if item.get("proprio") is not None:
+        item["proprio"] = np.asarray(item["proprio"]).copy()
+    return item
+
+
+def _task_from_request(request: dict[str, Any], trajectory: Sequence[Any]) -> str:
+    task = str(request.get("task") or "")
+    if task:
+        return task
+    for item in trajectory:
+        if isinstance(item, dict) and item.get("task"):
+            return str(item["task"])
+    return ""
+
+
+def _absolute_query_indices(request: dict[str, Any], *, trajectory_len: int, trajectory_indices: list[int]) -> list[int]:
     absolute_query_indices = _int_list(request.get("absolute_query_indices", []))
     if absolute_query_indices:
-        index_to_local = {int(index): local for local, index in enumerate(trajectory_indices)}
-        try:
-            return [index_to_local[int(index)] for index in absolute_query_indices]
-        except KeyError as exc:
-            raise IndexError(
-                f"absolute query index {int(exc.args[0])} is not present in trajectory_indices={trajectory_indices}"
-            ) from exc
-    raise IndexError(f"query_indices={query_indices} out of range for compact trajectory length {trajectory_len}")
+        return absolute_query_indices
+
+    query_indices = _int_list(request.get("query_indices", []))
+    if not query_indices:
+        return list(trajectory_indices)
+    if all(0 <= idx < trajectory_len for idx in query_indices):
+        return [int(trajectory_indices[idx]) for idx in query_indices]
+    return query_indices
 
 
-def _compact_start_idx(request: dict[str, Any], *, trajectory_len: int, trajectory_indices: list[int]) -> int:
-    raw_start_idx = request.get("trajectory_start_idx", 0)
-    start_idx = int(raw_start_idx or 0)
-    if 0 <= start_idx < trajectory_len:
-        return start_idx
-    index_to_local = {int(index): local for local, index in enumerate(trajectory_indices)}
-    return int(index_to_local.get(start_idx, 0))
+def _absolute_start_idx(request: dict[str, Any], *, trajectory_len: int, trajectory_indices: list[int]) -> int:
+    if "trajectory_start_idx" not in request:
+        return 0
+    raw_start_idx = int(request.get("trajectory_start_idx") or 0)
+    if _int_list(request.get("absolute_query_indices", [])):
+        return raw_start_idx
+    if raw_start_idx in trajectory_indices:
+        return raw_start_idx
+    if 0 <= raw_start_idx < trajectory_len:
+        return int(trajectory_indices[raw_start_idx])
+    return raw_start_idx
+
+
+def _engine_uses_incremental(engine: Any) -> bool:
+    return "incremental" in {str(mode) for mode in getattr(engine, "eval_modes", ())}
+
+
+def _context_indices_for_queries(
+    *,
+    available_indices: Sequence[int],
+    query_indices: Sequence[int],
+    start_idx: int,
+    require_contiguous: bool,
+) -> list[int]:
+    available = sorted({int(index) for index in available_indices})
+    available_set = set(available)
+    queries = [int(index) for index in query_indices]
+    missing_queries = [index for index in queries if index not in available_set]
+    if missing_queries:
+        raise RuntimeError(f"query indices {missing_queries} are not cached; available={available}")
+    if int(start_idx) not in available_set:
+        raise RuntimeError(f"trajectory start index {int(start_idx)} is not cached; available={available}")
+
+    if not require_contiguous:
+        return sorted({int(start_idx), *queries})
+
+    max_query = max(queries) if queries else int(start_idx)
+    if max_query < int(start_idx):
+        raise RuntimeError(f"incremental mode requires query >= start; start={start_idx}, query={max_query}")
+    required = list(range(int(start_idx), max_query + 1))
+    missing_context = [index for index in required if index not in available_set]
+    if missing_context:
+        raise RuntimeError(
+            "incremental mode requires contiguous cached frames; "
+            f"missing={missing_context}, start={start_idx}, max_query={max_query}, available={available}"
+        )
+    return required
 
 
 GOAL_SCAN_SKIP_DIRS = frozenset({"data", "videos", ".git", "__pycache__"})
@@ -290,76 +371,124 @@ class RoboDopamineProgressHttpService:
         self.require_goal = bool(require_goal)
         self.response_key = str(response_key)
         self.lock = threading.Lock()
-        self.stats = {"requests": 0, "errors": 0}
+        self.episodes: dict[str, _EpisodeCache] = {}
+        self.stats = {"requests": 0, "errors": 0, "episodes_cached": 0}
 
     def predict_progress(self, request: dict[str, Any]) -> dict[str, Any]:
         trajectory = request.get("trajectory", [])
         if not isinstance(trajectory, Sequence) or isinstance(trajectory, (str, bytes, bytearray)):
             raise TypeError("request.trajectory must be a sequence")
+        metadata = dict(request.get("metadata", {}) or {})
         trajectory_indices = _int_list(request.get("trajectory_indices", []))
         if len(trajectory_indices) != len(trajectory):
             trajectory_indices = list(range(len(trajectory)))
-        query_indices = _compact_query_indices(
+        query_abs_indices = _absolute_query_indices(
             request,
             trajectory_len=len(trajectory),
             trajectory_indices=trajectory_indices,
         )
-        if not trajectory or not query_indices:
+        if not query_abs_indices:
             return {"progress": []}
 
-        metadata = dict(request.get("metadata", {}) or {})
         task_id = metadata.get("task_id", None)
         task_id = None if task_id is None else int(task_id)
-        task = str(request.get("task") or "")
-        if not task:
-            for item in trajectory:
-                if isinstance(item, dict) and item.get("task"):
-                    task = str(item["task"])
-                    break
+        task = _task_from_request(request, trajectory)
+        done = bool(metadata.get("done", False) or metadata.get("truncated", False))
+        cache_key = _cache_key_from_request(request, metadata)
+        if not trajectory and cache_key not in self.episodes:
+            raise RuntimeError(f"no trajectory payloads were provided for uncached episode {cache_key}")
 
-        transitions = [
-            _as_transition(dict(item), step_in_episode=trajectory_indices[idx], task_id=task_id)
-            for idx, item in enumerate(trajectory)
-        ]
-        start_idx = _compact_start_idx(
-            request,
-            trajectory_len=len(trajectory),
-            trajectory_indices=trajectory_indices,
-        )
-        absolute_query_indices = _int_list(request.get("absolute_query_indices", []))
-        query_label = absolute_query_indices if absolute_query_indices else query_indices
-        episode_id = request.get("episode_id", "episode")
-        request_label = f"{episode_id}_{min(query_label)}_{max(query_label)}"
+        with self.lock:
+            cache = self.episodes.setdefault(cache_key, _EpisodeCache())
+            if task:
+                cache.task = task
+            if task_id is not None:
+                cache.task_id = task_id
+            for index, item in zip(trajectory_indices, trajectory, strict=True):
+                cache.payloads_by_index[int(index)] = _copy_trajectory_payload(dict(item))
+            snapshot = _EpisodeSnapshot(
+                task=cache.task,
+                task_id=cache.task_id,
+                payloads_by_index=dict(cache.payloads_by_index),
+            )
 
-        goal_image = None
-        goal_source = None
-        if self.goal_provider is not None:
-            goal_result = self.goal_provider.get_goal(task, task_id=task_id)
-            goal_image = goal_result.image
-            goal_source = goal_result.source
-        if goal_image is None and self.require_goal:
-            raise RuntimeError(f"no expert goal image found for task_id={task_id}, task={task!r}")
+        try:
+            start_abs_idx = _absolute_start_idx(
+                request,
+                trajectory_len=len(trajectory),
+                trajectory_indices=trajectory_indices,
+            )
+            context_abs_indices = _context_indices_for_queries(
+                available_indices=snapshot.payloads_by_index,
+                query_indices=query_abs_indices,
+                start_idx=start_abs_idx,
+                require_contiguous=_engine_uses_incremental(self.engine),
+            )
+            local_index = {int(index): local for local, index in enumerate(context_abs_indices)}
+            query_indices = [local_index[int(index)] for index in query_abs_indices]
+            start_idx = local_index[int(start_abs_idx)]
 
-        progress = self.engine.predict(
-            transitions=transitions,
-            query_indices=query_indices,
-            trajectory_start_idx=start_idx,
-            task=task,
-            goal_image=goal_image,
-            request_label=request_label,
-        )
+            transitions = [
+                _as_transition(
+                    snapshot.payloads_by_index[int(index)],
+                    step_in_episode=int(index),
+                    task_id=snapshot.task_id,
+                )
+                for index in context_abs_indices
+            ]
+            query_label = [int(index) for index in query_abs_indices]
+            episode_id = request.get("episode_id", "episode")
+            request_label = f"{episode_id}_{min(query_label)}_{max(query_label)}"
+
+            goal_image = None
+            goal_source = None
+            if self.goal_provider is not None:
+                goal_result = self.goal_provider.get_goal(snapshot.task, task_id=snapshot.task_id)
+                goal_image = goal_result.image
+                goal_source = goal_result.source
+            if goal_image is None and self.require_goal:
+                raise RuntimeError(f"no expert goal image found for task_id={snapshot.task_id}, task={snapshot.task!r}")
+
+            progress = self.engine.predict(
+                transitions=transitions,
+                query_indices=query_indices,
+                trajectory_start_idx=start_idx,
+                task=snapshot.task,
+                goal_image=goal_image,
+                request_label=request_label,
+            )
+        except Exception:
+            if done:
+                with self.lock:
+                    self.episodes.pop(cache_key, None)
+                    self.stats["episodes_cached"] = len(self.episodes)
+            raise
         progress = [float(value) for value in progress]
         with self.lock:
             self.stats["requests"] += 1
+            if done:
+                self.episodes.pop(cache_key, None)
+            self.stats["episodes_cached"] = len(self.episodes)
         LOGGER.info(
-            "request ok: episode=%s task=%r query=%s progress=%s goal=%s",
+            "request ok: episode=%s task=%r query=%s context=%s progress=%s goal=%s",
             episode_id,
-            task,
+            snapshot.task,
             query_label,
+            context_abs_indices,
             [round(value, 4) for value in progress],
             goal_source,
         )
-        return {"progress": progress, "progress_predictions_by_key": {self.response_key: {"progress": progress}}}
+        return {
+            "progress": progress,
+            "progress_predictions_by_key": {self.response_key: {"progress": progress}},
+            "metadata": {
+                "trajectory_indices": [int(index) for index in context_abs_indices],
+                "query_indices": [int(index) for index in query_indices],
+                "absolute_query_indices": [int(index) for index in query_abs_indices],
+                "trajectory_start_idx": int(start_abs_idx),
+                "episodes_cached": int(self.stats["episodes_cached"]),
+            },
+        }
 
     def dispatch(self, method: str, kwargs: dict[str, Any]) -> Any:
         try:

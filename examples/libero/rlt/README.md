@@ -56,8 +56,7 @@ actor submits completed chunk transitions to an async reward worker, and the
 worker commits only fully relabeled transitions to learner replay. This keeps
 the learner from seeing placeholder rewards while avoiding step-level VLA
 backfill. The first chunk queries both the start and end boundary; later
-chunks send only the latest boundary unless a fallback requires re-querying the
-previous boundary. Disable window replay when using remote progress rewards:
+chunks send only the latest boundary. Disable window replay when using remote progress rewards:
 
 ```yaml
 rlt:
@@ -68,7 +67,6 @@ reward:
   source: remote_progress
   scale: 1.0
   initial_progress: query_start
-  on_error: fallback_sparse
   remote:
     url: http://127.0.0.1:50052
     method: predict_progress
@@ -99,8 +97,7 @@ bash examples/libero/rlt/tools/launch_rlt.sh \
   --broadcast-port 5569 \
   --run-dir /tmp/vlarl_rlt_task4_smoke \
   -- \
-  runtime.max_env_steps=1000 \
-  runtime.max_update_steps=1000
+  runtime.max_env_steps=1000
 ```
 
 For formal runs, remove the short-step overrides or set them to the target budget. The checked-in config and launcher defaults use the local LIBERO backend in `/vla/users/niejunnan/envs/serl_torch`, the OpenPI fork, OpenPI checkpoint, and an external RLT Stage-1 encoder checkpoint. Override `--policy-root`, `--policy-checkpoint`, or `feature.encoder_path` on another machine.
@@ -111,8 +108,7 @@ For formal runs, remove the short-step overrides or set them to the target budge
 bash examples/libero/rlt/tools/launch_libero90_8tasks_example.sh \
   --dry-run \
   -- \
-  runtime.max_env_steps=1000 \
-  runtime.max_update_steps=1000
+  runtime.max_env_steps=1000
 ```
 
 Remove `--dry-run` to start one tmux session per task.
@@ -155,8 +151,7 @@ bash examples/libero/rlt/tools/launch_rlt.sh \
   -- \
   runtime.async_eval.every_episodes=50 \
   runtime.async_eval.episodes=50 \
-  runtime.max_env_steps=600000 \
-  runtime.max_update_steps=1200000
+  runtime.max_env_steps=600000
 ```
 
 ## Stage 1 and Stage 2 Commands
@@ -204,6 +199,5 @@ bash examples/libero/rlt/tools/launch_rlt.sh \
   feature.source=policy_prior_prefix \
   feature.online_source=auto \
   runtime.max_env_steps=1000 \
-  runtime.max_update_steps=1000 \
   runtime.checkpoint_period=2000
 ```

@@ -8,6 +8,7 @@ from vla_rl.rewards.processor import (
 )
 from vla_rl.rewards.progress import (
     RemoteProgressClient,
+    compute_potential_discount,
     compute_progress_reward,
     normalize_progress_response,
 )
@@ -19,6 +20,7 @@ __all__ = [
     "RemoteProgressClient",
     "SparseRewardProcessor",
     "build_reward_processor",
+    "compute_potential_discount",
     "compute_progress_reward",
     "normalize_progress_response",
     "observation_to_reward_payload",

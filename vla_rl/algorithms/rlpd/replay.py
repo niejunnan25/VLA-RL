@@ -5,7 +5,7 @@ import pickle
 from pathlib import Path
 from typing import Any, Iterable
 
-from vla_rl.data import ReplayBuffer, Transition
+from vla_rl.data import MemoryEfficientReplayBuffer, Transition
 
 EPISODE_GLOB = "episode_*.pkl"
 MANIFEST_NAME = "manifest.json"
@@ -39,11 +39,11 @@ def load_offline_replay(
     seed: int = 0,
     max_episodes: int | None = None,
     max_transitions: int | None = None,
-) -> tuple[ReplayBuffer, dict[str, int]]:
+) -> tuple[MemoryEfficientReplayBuffer, dict[str, int]]:
     root = Path(path).expanduser()
     if not root.exists():
         raise FileNotFoundError(f"offline replay path does not exist: {root}")
-    replay = ReplayBuffer(capacity=capacity, seed=seed)
+    replay = MemoryEfficientReplayBuffer(capacity=capacity, seed=seed)
     episode_files = sorted(root.glob(EPISODE_GLOB))
     if max_episodes is not None:
         episode_files = episode_files[: int(max_episodes)]

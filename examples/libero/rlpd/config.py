@@ -32,24 +32,36 @@ def validate_rlpd_cfg(cfg: DictConfig) -> None:
         raise ValueError("runtime.batch_size must be positive")
     if int(cfg.runtime.get("max_env_steps", 0)) <= 0:
         raise ValueError("runtime.max_env_steps must be positive")
-    if int(cfg.runtime.get("max_update_steps", 0)) <= 0:
-        raise ValueError("runtime.max_update_steps must be positive")
 
 
 def _reject_removed_fields(cfg: DictConfig) -> None:
     removed = []
     if "rlpd" in cfg:
         removed.append("rlpd.mode")
-    if "execute_horizon" in cfg.runtime:
+    runtime = cfg.get("runtime", {})
+    algorithm = cfg.get("algorithm", {})
+    observation = cfg.get("rlpd_observation", {})
+    reward = cfg.get("reward", {})
+    if "role" in runtime:
+        removed.append("runtime.role")
+    if "execute_horizon" in runtime:
         removed.append("runtime.execute_horizon")
-    if "warmup_steps" in cfg.runtime:
-        removed.append("runtime.warmup_steps; use runtime.training_starts for learner replay warmup and runtime.random_steps for actor random actions")
-    if "chunk_horizon" in cfg.algorithm:
+    if "random_steps" in runtime:
+        removed.append("runtime.random_steps")
+    if "require_offline" in runtime:
+        removed.append("runtime.require_offline")
+    if "warmup_steps" in runtime:
+        removed.append("runtime.warmup_steps; use runtime.training_starts for learner replay warmup")
+    if "max_update_steps" in runtime:
+        removed.append("runtime.max_update_steps; learner lifetime follows actor runtime.max_env_steps")
+    if "chunk_horizon" in algorithm:
         removed.append("algorithm.chunk_horizon")
-    if "chunk_horizon" in cfg.rlpd_observation:
+    if "chunk_horizon" in observation:
         removed.append("rlpd_observation.chunk_horizon")
-    if "action_dim" in cfg.rlpd_observation:
+    if "action_dim" in observation:
         removed.append("rlpd_observation.action_dim")
+    if "on_error" in reward:
+        removed.append("reward.on_error")
     if removed:
         joined = ", ".join(removed)
         raise ValueError(

@@ -19,6 +19,7 @@ from vla_rl.runtime.async_eval import (
 )
 from vla_rl.runtime.run_utils import apply_actor_summary_file, read_actor_summary, send_actor_summary
 from examples.libero.rlt.config import validate_rlt_cfg
+from examples.libero.rlt.learner import learner_should_stop
 from examples.libero.rlt.metrics import (
     actor_chunk_metric,
     actor_episode_metric,
@@ -145,6 +146,22 @@ def test_rlt_config_rejects_invalid_replan_steps():
     cfg.rlt.replan_steps = int(cfg.rlt.chunk_size) + 1
     with pytest.raises(ValueError, match="rlt.replan_steps"):
         validate_rlt_cfg(cfg)
+
+
+def test_rlt_config_rejects_removed_max_update_steps():
+    repo_root = Path(__file__).resolve().parents[1]
+    cfg = OmegaConf.load(
+        repo_root / "examples/libero/rlt/configs/reward_model/libero_spatial_task4_self_cond_512_stage2.yaml"
+    )
+
+    cfg.runtime.max_update_steps = 1
+    with pytest.raises(ValueError, match="max_update_steps"):
+        validate_rlt_cfg(cfg)
+
+
+def test_rlt_learner_stop_follows_actor_lifecycle():
+    assert learner_should_stop(actor_done=True)
+    assert not learner_should_stop(actor_done=False)
 
 
 def test_rlt_transition_discount_uses_executed_steps():

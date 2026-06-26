@@ -1,0 +1,131 @@
+env:
+  _target_: vla_rl.envs.libero.LiberoRemoteEnvBackend
+  url: http://127.0.0.1:23100
+  task_suite_name: libero_spatial
+  task_id: 5
+  action_dim: 7
+  resolution: 256
+  num_steps_wait: 10
+  libero_root: /vla/users/niejunnan/codebase/serl_torch/third_party/LIBERO
+  libero_datasets_root: /vla/users/niejunnan/datasets
+  seed: 0
+  image_size: 224
+  timeout: 120.0
+rlpd_observation:
+  image_keys:
+  - image_rgb_0
+  - image_rgb_1
+algorithm:
+  image_keys:
+  - image_rgb_0
+  - image_rgb_1
+  proprio_dim: 8
+  action_dim: 7
+  action_limits:
+  - 1.0
+  - 1.0
+  - 1.0
+  - 1.0
+  - 1.0
+  - 1.0
+  - 1.0
+  clip_gripper: true
+  image_encoder_type: hf_resnet
+  image_feature_dim: 256
+  vector_latent_dim: 64
+  encoder_hidden_dim: 256
+  project_obs: false
+  shared_encoder: true
+  drq_random_crop: true
+  drq_padding: 4
+  resnet_model_name: /vla/users/niejunnan/codebase/serl_torch/pretrained_models/microsoft--resnet-18
+  resnet_pretrained: true
+  freeze_image_backbone: true
+  resnet_pooling_method: spatial_learned_embeddings
+  resnet_num_spatial_blocks: 8
+  actor_hidden_dims:
+  - 256
+  - 256
+  - 256
+  critic_hidden_dims:
+  - 256
+  - 256
+  - 256
+  actor_lr: 0.0003
+  critic_lr: 0.0003
+  temperature_lr: 0.0003
+  discount: 0.99
+  tau: 0.005
+  init_temperature: 0.01
+  backup_entropy: false
+  utd_ratio: 4
+  critic_actor_ratio: 2
+  clip_grad_norm: 1.0
+  device: cuda
+reward:
+  type: env_plus_potential_delta
+  source: remote_progress
+  scale: 1.0
+  initial_progress: query_start
+  remote:
+    url: http://127.0.0.1:50052
+    method: predict_progress
+    timeout: 120.0
+    retries: 1
+    retry_sleep: 0.5
+  trajectory:
+    image_keys:
+    - image_rgb_0
+    - image_rgb_1
+  async:
+    max_pending_chunks: 64
+runtime:
+  backend: agentlace
+  trainer_ip: 127.0.0.1
+  trainer_port: 5588
+  broadcast_port: 5589
+  store_name: actor_env
+  actor_name: actor_env
+  request_type: send-stats
+  max_env_steps: 600000
+  batch_size: 128
+  replay_capacity: 100000
+  replay_seed: 0
+  gamma: 0.99
+  training_starts: 0
+  steps_per_update: 30
+  log_period: 50
+  checkpoint_period: 2500
+  actor_queue_capacity: 2000
+  run_dir: outputs/reward_model/libero_spatial_task5_rlpd_robodopamine_pbrs
+  offline_replay_path: outputs/rlpd_offline/libero_spatial_task5_expert_robodopamine_pbrs
+  offline_ratio: 0.5
+  offline_capacity: 100000
+  async_eval:
+    enabled: true
+    every_episodes: 50
+    episodes: 50
+    max_env_steps_per_episode: 0
+    save_videos: false
+    queue_file: eval_queue.jsonl
+    summary_jsonl: eval_summary.jsonl
+    worker_log_file: eval_worker.log
+    checkpoint_dir: eval_checkpoints
+    poll_interval_sec: 5.0
+wandb:
+  project: RoboReward
+  group: online_rlpd_libero_spatial_rm_3way_v1
+  exp_name: rlpd_libero_spatial_t05_robodopamine_pbrs_s0
+  tags:
+  - online
+  - rlpd
+  - libero
+  - libero_spatial
+  - task5
+  - reward_model
+  - robodopamine
+  - pbrs
+  - seed0
+  mode: online
+  debug: false
+  save_code: true

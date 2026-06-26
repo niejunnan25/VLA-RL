@@ -65,8 +65,7 @@ bash examples/libero/rlt/tools/launch_rlt.sh \
   --trainer-port 5568 \
   --broadcast-port 5569 \
   --run-dir /tmp/vlarl_rlt_task4_smoke \
-  -- runtime.max_env_steps=1000 runtime.max_update_steps=1000
+  -- runtime.max_env_steps=1000
 ```
 
-For long runs, remove the short-step overrides or set
-`runtime.max_env_steps` / `runtime.max_update_steps` to the target budget.
+For long runs, remove the short-step override or set `runtime.max_env_steps` to the target budget.

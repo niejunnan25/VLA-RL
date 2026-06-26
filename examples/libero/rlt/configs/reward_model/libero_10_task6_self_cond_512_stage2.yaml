@@ -72,7 +72,6 @@ runtime:
   actor_name: actor_env
   request_type: send-stats
   max_env_steps: 600000
-  max_update_steps: 1200000
   warmup_steps: 2500
   batch_size: 128
   replay_capacity: 100000

@@ -64,6 +64,9 @@ def predict_base_actions(reference_policy, obs: Observation, *, horizon: int, ac
 
 
 def validate_pld_cfg(cfg: DictConfig) -> None:
+    runtime = cfg.get("runtime", {})
+    if "max_update_steps" in runtime:
+        raise ValueError("runtime.max_update_steps has been removed; learner lifetime follows actor runtime.max_env_steps")
     if "pld_observation" not in cfg:
         raise ValueError("PLD config requires pld_observation section")
     if int(cfg.algorithm.chunk_horizon) != int(cfg.runtime.execute_horizon):

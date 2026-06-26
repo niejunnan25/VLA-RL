@@ -386,12 +386,10 @@ reward/committed
 reward/submitted
 reward/pending
 reward/failed
-reward/fallback_sparse
 reward/last_latency_sec
 ```
 
-Healthy runs should have `reward/failed = 0`, `reward/fallback_sparse = 0`, and
-`reward/submitted - reward/committed` close to the pending queue size.
+Healthy runs should have `reward/failed = 0`, and `reward/submitted - reward/committed` close to the pending queue size.
 `progress_events.jsonl` records the absolute progress returned by the remote
 reward model at chunk boundaries, plus `previous_progress`, `env_reward`,
 `computed_reward`, `discount`, `executed_steps`, and `latency_sec`. Use this file

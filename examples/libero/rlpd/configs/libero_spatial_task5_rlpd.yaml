@@ -6,10 +6,7 @@ env:
   action_dim: 7
   resolution: 256
   num_steps_wait: 10
-  max_episode_steps: null
-  benchmark_root: null
   libero_root: /vla/users/niejunnan/codebase/serl_torch/third_party/LIBERO
-  libero_config_dir: null
   libero_datasets_root: /vla/users/niejunnan/datasets
   seed: 0
   image_size: 224
@@ -45,7 +42,6 @@ algorithm:
   discount: 0.99
   tau: 0.005
   init_temperature: 0.01
-  target_entropy: null
   backup_entropy: false
   utd_ratio: 4
   critic_actor_ratio: 2
@@ -58,7 +54,6 @@ reward:
 
 runtime:
   backend: agentlace
-  role: learner
   trainer_ip: 127.0.0.1
   trainer_port: 5588
   broadcast_port: 5589
@@ -66,10 +61,8 @@ runtime:
   actor_name: actor_env
   request_type: send-stats
   max_env_steps: 600000
-  max_update_steps: 600000
-  random_steps: 0
   batch_size: 128
-  replay_capacity: 250000
+  replay_capacity: 100000
   replay_seed: 0
   gamma: 0.99
   training_starts: 0
@@ -77,35 +70,25 @@ runtime:
   log_period: 50
   checkpoint_period: 2500
   actor_queue_capacity: 2000
-  resume_from: null
   run_dir: outputs/libero_spatial_task5_rlpd
   offline_replay_path: outputs/rlpd_offline/libero_spatial_task5_expert
-  require_offline: true
   offline_ratio: 0.5
-  offline_capacity: 250000
-  offline_max_episodes: null
-  offline_max_transitions: null
+  offline_capacity: 100000
 
   async_eval:
-    enabled: false
+    enabled: true
     every_episodes: 50
     episodes: 50
     max_env_steps_per_episode: 0
     save_videos: false
-    env_url: null
     queue_file: eval_queue.jsonl
     summary_jsonl: eval_summary.jsonl
     worker_log_file: eval_worker.log
     checkpoint_dir: eval_checkpoints
     poll_interval_sec: 5.0
-    worker_cuda_visible_devices: null
-    worker_mujoco_egl_device_id: null
 
 wandb:
   project: vla-rl
-  entity: null
-  workspace: null
-  group: null
   exp_name: libero_spatial_task5_rlpd
   tags: [libero, rlpd, single_step]
   mode: online

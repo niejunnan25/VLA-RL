@@ -64,7 +64,7 @@ bash examples/libero/rlt/tools/launch_rlt.sh \
   --trainer-port 5568 \
   --broadcast-port 5569 \
   --run-dir /tmp/vlarl_rlt_task4_smoke \
-  -- runtime.max_env_steps=1000 runtime.max_update_steps=1000
+  -- runtime.max_env_steps=1000
 ```
 
 ## Metrics and Acceptance

@@ -36,6 +36,10 @@ def validate_rlt_cfg(cfg: DictConfig) -> None:
     runtime = cfg_section(cfg, "runtime")
     if "execute_horizon" in agent_cfg or "execute_horizon" in runtime:
         raise ValueError("RLT v0 uses chunk_size only; remove execute_horizon from config")
+    if "max_update_steps" in runtime:
+        raise ValueError(
+            "runtime.max_update_steps has been removed; learner lifetime follows actor runtime.max_env_steps"
+        )
     chunk_size = int(rlt.chunk_size)
     if chunk_size <= 0:
         raise ValueError(f"rlt.chunk_size must be positive, got {chunk_size}")

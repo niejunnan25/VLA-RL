@@ -16,6 +16,7 @@ from http.server import ThreadingHTTPServer
 import io
 import json
 import logging
+import os
 import sys
 from pathlib import Path
 import signal
@@ -52,7 +53,7 @@ class _EpisodeSnapshot:
 class _ProgressResult:
     progress: list[float]
     progress_by_key: dict[str, list[float]]
-    sampled_indices: list[int]
+    sampled_indices: list[list[int]]
 
 
 def _int_list(value: Any) -> list[int]:
@@ -103,6 +104,18 @@ def _extract_images(payload: Any, image_keys: Sequence[str]) -> dict[str, np.nda
     if not images:
         raise ValueError(f"no configured image keys found in request; available={sorted(raw_images)}")
     return images
+
+
+def _cache_key_from_request(request: dict[str, Any], metadata: dict[str, Any]) -> str:
+    session_id = str(
+        request.get("session_id")
+        or metadata.get("session_id")
+        or request.get("run_id")
+        or metadata.get("run_id")
+        or "default"
+    )
+    episode_id = str(request.get("episode_id", "episode"))
+    return f"{session_id}:{episode_id}"
 
 
 def _task_from_request(request: dict[str, Any], trajectory: Sequence[Any]) -> str:
@@ -240,22 +253,167 @@ def _as_float_list(value: Any) -> list[float]:
     return [float(item) for item in array]
 
 
+class RoboMeterNativeBackend:
+    """In-process RoboMeter inference backend.
+
+    This follows RoboMeter's policy-learning relabel path: each query gets its
+    own prefix sample, then those samples are batched for one model forward. It
+    avoids the extra official eval-server process and repeated multipart .npy
+    transfer while preserving the prefix-per-query reward semantics.
+    """
+
+    def __init__(
+        self,
+        *,
+        model_path: str,
+        device: str,
+        forward_batch_size: int,
+        robometer_root: str | None = None,
+    ) -> None:
+        if robometer_root:
+            root = Path(robometer_root).expanduser().resolve()
+            if str(root) not in sys.path:
+                sys.path.insert(0, str(root))
+
+        import torch
+        from robometer.models.utils import convert_bins_to_continuous
+        from robometer.utils.save import load_model_from_hf
+        from robometer.utils.setup_utils import setup_batch_collator
+
+        self.torch = torch
+        self.convert_bins_to_continuous = convert_bins_to_continuous
+        self.device = torch.device(device)
+        self.forward_batch_size = max(1, int(forward_batch_size))
+
+        LOGGER.info("loading RoboMeter native backend from %s on %s", model_path, self.device)
+        exp_config, tokenizer, processor, model = load_model_from_hf(
+            model_path=str(model_path),
+            device=self.device,
+        )
+        model = model.to(self.device)
+        model.eval()
+
+        self.exp_config = exp_config
+        self.tokenizer = tokenizer
+        self.model = model
+        self.batch_collator = setup_batch_collator(processor, tokenizer, exp_config, is_eval=True)
+        progress_loss_type = getattr(exp_config.loss, "progress_loss_type", "l2")
+        self.is_discrete_mode = str(progress_loss_type).lower() == "discrete"
+        self.num_bins = int(
+            getattr(
+                exp_config.loss,
+                "progress_discrete_bins",
+                getattr(exp_config.model, "progress_discrete_bins", 10),
+            )
+        )
+        self.model_type = str(getattr(exp_config.model, "model_type", ""))
+        self.lock = threading.Lock()
+
+    def predict_progress_samples(self, samples: Sequence[dict[str, Any]]) -> list[list[float]]:
+        if not samples:
+            return []
+        buckets: dict[int, list[tuple[int, dict[str, Any]]]] = {}
+        for sample_idx, sample in enumerate(samples):
+            buckets.setdefault(self._sample_frame_count(sample), []).append((sample_idx, sample))
+
+        outputs: list[list[float] | None] = [None] * len(samples)
+        with self.lock:
+            with self.torch.inference_mode():
+                for indexed_samples in buckets.values():
+                    for start in range(0, len(indexed_samples), self.forward_batch_size):
+                        indexed_chunk = indexed_samples[start : start + self.forward_batch_size]
+                        chunk_indices = [sample_idx for sample_idx, _sample in indexed_chunk]
+                        chunk = [sample for _sample_idx, sample in indexed_chunk]
+                        chunk_outputs = self._predict_same_length_chunk(chunk)
+                        if len(chunk_outputs) != len(chunk_indices):
+                            raise RuntimeError(
+                                f"expected {len(chunk_indices)} progress outputs, got {len(chunk_outputs)}"
+                            )
+                        for sample_idx, sample_output in zip(chunk_indices, chunk_outputs):
+                            outputs[sample_idx] = sample_output
+        if any(output is None for output in outputs):
+            raise RuntimeError("RoboMeter native backend did not produce all requested outputs")
+        return [list(output) for output in outputs if output is not None]
+
+    @staticmethod
+    def _sample_frame_count(sample: dict[str, Any]) -> int:
+        trajectory = sample.get("trajectory", {})
+        frames = trajectory.get("frames") if isinstance(trajectory, dict) else None
+        if hasattr(frames, "shape"):
+            return int(frames.shape[0])
+        return len(frames) if frames is not None else 0
+
+    def _predict_same_length_chunk(self, chunk: Sequence[dict[str, Any]]) -> list[list[float]]:
+        frame_lengths = {self._sample_frame_count(sample) for sample in chunk}
+        if len(frame_lengths) > 1:
+            raise RuntimeError(f"native RoboMeter batch has mixed frame lengths: {sorted(frame_lengths)}")
+        batch_inputs = self.batch_collator(chunk)["progress_inputs"]
+        batch_inputs = {
+            key: value.to(self.device) if isinstance(value, self.torch.Tensor) else value
+            for key, value in batch_inputs.items()
+        }
+        return self._compute_progress_outputs(batch_inputs)
+
+    def _compute_progress_outputs(self, batch_inputs: dict[str, Any]) -> list[list[float]]:
+        if "rewind" in self.model.__class__.__name__.lower():
+            model_output, _extra = self.model(
+                video_embeddings=batch_inputs.get("video_embeddings"),
+                text_embeddings=batch_inputs.get("text_embeddings"),
+                sample_type="progress",
+                timing_raw=None,
+            )
+        else:
+            model_output, _extra = self.model(
+                input_ids=batch_inputs["input_ids"],
+                attention_mask=batch_inputs["attention_mask"],
+                pixel_values=batch_inputs.get("pixel_values", None),
+                pixel_values_videos=batch_inputs.get("pixel_values_videos", None),
+                image_grid_thw=batch_inputs.get("image_grid_thw", None),
+                video_grid_thw=batch_inputs.get("video_grid_thw", None),
+                second_per_grid_ts=batch_inputs.get("second_per_grid_ts", None),
+                sample_type="progress",
+                timing_raw=None,
+            )
+
+        progress_logits = getattr(model_output, "progress_logits", None)
+        if not isinstance(progress_logits, dict):
+            return [[] for _ in range(int(batch_inputs["input_ids"].shape[0]))]
+        seq_a = progress_logits.get("A")
+        if seq_a is None:
+            return [[] for _ in range(int(batch_inputs["input_ids"].shape[0]))]
+
+        progress_pred: list[list[float]] = []
+        for item in [seq_a[idx] for idx in range(seq_a.shape[0])]:
+            if self.is_discrete_mode:
+                continuous = self.convert_bins_to_continuous(item.detach().cpu().float())
+                progress_pred.append(continuous.numpy().flatten().tolist())
+            else:
+                progress_pred.append(item.detach().cpu().flatten().tolist())
+        return progress_pred
+
+
 class RoboMeterProgressHttpService:
     def __init__(
         self,
         *,
+        backend: str,
         robometer_url: str,
+        native_backend: RoboMeterNativeBackend | None,
         image_keys: Sequence[str],
         view_mode: str,
+        query_mode: str,
         max_history_frames: int,
         use_frame_steps: bool,
         timeout: float,
         response_key: str,
         clamp_progress: bool,
     ) -> None:
+        self.backend = str(backend)
         self.robometer_url = str(robometer_url).rstrip("/")
+        self.native_backend = native_backend
         self.image_keys = tuple(str(key) for key in image_keys)
         self.view_mode = str(view_mode)
+        self.query_mode = str(query_mode)
         self.max_history_frames = int(max_history_frames)
         self.use_frame_steps = bool(use_frame_steps)
         self.timeout = float(timeout)
@@ -270,6 +428,12 @@ class RoboMeterProgressHttpService:
             "last_latency_sec": 0.0,
             "last_progress": None,
         }
+        if self.backend not in {"native", "http"}:
+            raise ValueError(f"unsupported backend: {self.backend}")
+        if self.backend == "native" and self.native_backend is None:
+            raise ValueError("native backend requires native_backend")
+        if self.query_mode not in {"prefix_per_query", "sequence_multi_query"}:
+            raise ValueError(f"unsupported query_mode: {self.query_mode}")
 
     def predict_progress(self, request: dict[str, Any]) -> dict[str, Any]:
         start = time.perf_counter()
@@ -293,9 +457,10 @@ class RoboMeterProgressHttpService:
         episode_id = str(request.get("episode_id", "episode"))
         task = _task_from_request(request, trajectory)
         metadata = dict(request.get("metadata", {}) or {})
+        cache_key = _cache_key_from_request(request, metadata)
 
         with self.lock:
-            cache = self.episodes.setdefault(episode_id, _EpisodeCache(task=task))
+            cache = self.episodes.setdefault(cache_key, _EpisodeCache(task=task))
             if task:
                 cache.task = task
             cache.updated_at = time.time()
@@ -318,7 +483,7 @@ class RoboMeterProgressHttpService:
         except Exception:
             if bool(metadata.get("done", False) or metadata.get("truncated", False)):
                 with self.lock:
-                    self.episodes.pop(episode_id, None)
+                    self.episodes.pop(cache_key, None)
                     self.stats["episodes_cached"] = len(self.episodes)
             raise
         progress = result.progress
@@ -333,7 +498,7 @@ class RoboMeterProgressHttpService:
             self.stats["last_latency_sec"] = float(latency)
             self.stats["last_progress"] = progress[-1] if progress else None
             if done:
-                self.episodes.pop(episode_id, None)
+                self.episodes.pop(cache_key, None)
                 self.stats["episodes_cached"] = len(self.episodes)
 
         LOGGER.info(
@@ -354,11 +519,32 @@ class RoboMeterProgressHttpService:
             "metadata": {
                 "sampled_indices": result.sampled_indices,
                 "view_mode": self.view_mode,
+                "query_mode": self.query_mode,
+                "backend": self.backend,
                 "use_frame_steps": self.use_frame_steps,
             },
         }
 
     def _predict_from_snapshot(
+        self,
+        *,
+        episode_id: str,
+        snapshot: _EpisodeSnapshot,
+        query_abs: Sequence[int],
+    ) -> _ProgressResult:
+        if self.query_mode == "sequence_multi_query":
+            return self._predict_sequence_multi_query(
+                episode_id=episode_id,
+                snapshot=snapshot,
+                query_abs=query_abs,
+            )
+        return self._predict_prefix_per_query(
+            episode_id=episode_id,
+            snapshot=snapshot,
+            query_abs=query_abs,
+        )
+
+    def _predict_sequence_multi_query(
         self,
         *,
         episode_id: str,
@@ -393,7 +579,7 @@ class RoboMeterProgressHttpService:
             sample_id = f"{episode_id}:{view_key}:{sampled_indices[0]}-{sampled_indices[-1]}"
             samples.append(_make_progress_sample(frames, snapshot.task, sample_id, view_key))
 
-        progress_by_view = self._post_progress_batch(samples)
+        progress_by_view = self._predict_samples(samples)
         index_to_position = {int(idx): pos for pos, idx in enumerate(sampled_indices)}
         selected_by_view: dict[str, list[float]] = {}
         full_progress_arrays = []
@@ -412,8 +598,78 @@ class RoboMeterProgressHttpService:
         return _ProgressResult(
             progress=[float(value) for value in fused],
             progress_by_key=selected_by_view,
-            sampled_indices=[int(idx) for idx in sampled_indices],
+            sampled_indices=[[int(idx) for idx in sampled_indices]],
         )
+
+    def _predict_prefix_per_query(
+        self,
+        *,
+        episode_id: str,
+        snapshot: _EpisodeSnapshot,
+        query_abs: Sequence[int],
+    ) -> _ProgressResult:
+        available_indices = sorted(snapshot.frames_by_index)
+        available_set = set(available_indices)
+        missing = [int(idx) for idx in query_abs if int(idx) not in available_set]
+        if missing:
+            raise RuntimeError(f"query indices {missing} are not cached; available={available_indices}")
+        if not available_indices:
+            return _ProgressResult(progress=[], progress_by_key={}, sampled_indices=[])
+
+        view_keys = _view_keys_for_mode(snapshot.frames_by_index, available_indices, self.view_mode)
+        if not view_keys:
+            raise RuntimeError(f"no common view keys for available prefix; available_indices={available_indices}")
+
+        samples: list[dict[str, Any]] = []
+        sample_meta: list[tuple[str, int, list[int]]] = []
+        sampled_by_query: list[list[int]] = []
+        for query_index in [int(idx) for idx in query_abs]:
+            prefix_available = [int(idx) for idx in available_indices if int(idx) <= query_index]
+            sampled_indices = _select_sampled_indices(
+                prefix_available,
+                [prefix_available[0], query_index],
+                max_frames=self.max_history_frames,
+            )
+            if query_index not in sampled_indices:
+                raise RuntimeError(
+                    f"query index {query_index} was not retained in prefix sample {sampled_indices}"
+                )
+            sampled_by_query.append([int(idx) for idx in sampled_indices])
+            for view_key in view_keys:
+                frames = np.stack(
+                    [snapshot.frames_by_index[int(idx)][view_key] for idx in sampled_indices],
+                    axis=0,
+                )
+                sample_id = f"{episode_id}:{view_key}:prefix-{query_index}"
+                samples.append(_make_progress_sample(frames, snapshot.task, sample_id, view_key))
+                sample_meta.append((view_key, query_index, [int(idx) for idx in sampled_indices]))
+
+        progress_pred = self._predict_samples(samples)
+        if len(progress_pred) != len(sample_meta):
+            raise RuntimeError(f"expected {len(sample_meta)} progress outputs, got {len(progress_pred)}")
+
+        selected_by_view = {f"robometer_{view_key}": [] for view_key in view_keys}
+        for (view_key, _query_index, _sampled_indices), progress_array in zip(sample_meta, progress_pred):
+            progress_values = _as_float_list(progress_array)
+            selected_by_view[f"robometer_{view_key}"].append(
+                float(progress_values[-1]) if progress_values else 0.0
+            )
+
+        fused = np.stack(
+            [np.asarray(selected_by_view[f"robometer_{view_key}"], dtype=np.float32) for view_key in view_keys],
+            axis=0,
+        ).mean(axis=0).astype(np.float32).tolist()
+        return _ProgressResult(
+            progress=[float(value) for value in fused],
+            progress_by_key=selected_by_view,
+            sampled_indices=sampled_by_query,
+        )
+
+    def _predict_samples(self, samples: Sequence[dict[str, Any]]) -> list[list[float]]:
+        if self.backend == "native":
+            assert self.native_backend is not None
+            return self.native_backend.predict_progress_samples(samples)
+        return self._post_progress_batch(samples)
 
     def _post_progress_batch(self, samples: Sequence[dict[str, Any]]) -> list[list[float]]:
         files, data = _build_multipart_payload(samples, use_frame_steps=self.use_frame_steps)
@@ -451,20 +707,31 @@ class RoboMeterProgressHttpService:
 
 def parse_args(argv: Sequence[str] | None = None) -> argparse.Namespace:
     parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument("--backend", choices=["native", "http"], default="native")
+    parser.add_argument("--model-path", default="/vla/users/niejunnan/assets/Robometer-4B")
+    parser.add_argument("--device", default="cuda")
+    parser.add_argument("--forward-batch-size", type=int, default=4)
+    parser.add_argument("--robometer-root", default=os.environ.get("ROBOMETER_ROOT"))
     parser.add_argument("--robometer-url", default="http://127.0.0.1:8401")
     parser.add_argument("--host", default="127.0.0.1")
     parser.add_argument("--port", type=int, default=50152)
-    parser.add_argument("--image-keys", nargs="+", default=["image_rgb_0", "image_rgb_1"])
+    parser.add_argument("--image-keys", nargs="+", default=["image_rgb_0"])
     parser.add_argument(
         "--view-mode",
         choices=["first", "main", "average_two", "average_all"],
-        default="average_two",
+        default="first",
+    )
+    parser.add_argument(
+        "--query-mode",
+        choices=["prefix_per_query", "sequence_multi_query"],
+        default="prefix_per_query",
     )
     parser.add_argument("--max-history-frames", type=int, default=8)
     parser.add_argument("--timeout-s", type=float, default=120.0)
     parser.add_argument("--response-key", default="robometer")
     parser.add_argument("--no-frame-steps", dest="use_frame_steps", action="store_false")
-    parser.add_argument("--use-frame-steps", dest="use_frame_steps", action="store_true", default=True)
+    parser.add_argument("--use-frame-steps", dest="use_frame_steps", action="store_true")
+    parser.set_defaults(use_frame_steps=False)
     parser.add_argument("--no-clamp-progress", dest="clamp_progress", action="store_false")
     parser.add_argument("--log-level", default="INFO", choices=["DEBUG", "INFO", "WARNING", "ERROR"])
     return parser.parse_args(argv)
@@ -477,10 +744,22 @@ def main(argv: Sequence[str] | None = None) -> int:
         format="%(asctime)s %(levelname)s %(name)s: %(message)s",
     )
 
+    native_backend = None
+    if args.backend == "native":
+        native_backend = RoboMeterNativeBackend(
+            model_path=str(args.model_path),
+            device=str(args.device),
+            forward_batch_size=int(args.forward_batch_size),
+            robometer_root=args.robometer_root,
+        )
+
     service = RoboMeterProgressHttpService(
+        backend=str(args.backend),
         robometer_url=str(args.robometer_url),
+        native_backend=native_backend,
         image_keys=list(args.image_keys),
         view_mode=str(args.view_mode),
+        query_mode=str(args.query_mode),
         max_history_frames=int(args.max_history_frames),
         use_frame_steps=bool(args.use_frame_steps),
         timeout=float(args.timeout_s),
@@ -497,11 +776,14 @@ def main(argv: Sequence[str] | None = None) -> int:
     signal.signal(signal.SIGTERM, request_stop)
     signal.signal(signal.SIGINT, request_stop)
     LOGGER.info(
-        "RoboMeter progress adapter listening on http://%s:%s; robometer_url=%s view_mode=%s use_frame_steps=%s",
+        "RoboMeter progress adapter listening on http://%s:%s; backend=%s robometer_url=%s "
+        "view_mode=%s query_mode=%s use_frame_steps=%s",
         args.host,
         args.port,
+        args.backend,
         args.robometer_url,
         args.view_mode,
+        args.query_mode,
         args.use_frame_steps,
     )
     try:

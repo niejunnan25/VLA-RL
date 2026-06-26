@@ -1,9 +1,15 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
+from typing import Protocol
 
-from vla_rl.data.replay import ReplayBuffer
 from vla_rl.data.schema import RolloutBatch
+
+
+class ReplayLike(Protocol):
+    def __len__(self) -> int: ...
+
+    def sample(self, batch_size: int) -> RolloutBatch: ...
 
 
 @dataclass(frozen=True)
@@ -17,8 +23,8 @@ class MixedReplaySampler:
 
     def __init__(
         self,
-        online_replay: ReplayBuffer,
-        offline_replay: ReplayBuffer | None = None,
+        online_replay: ReplayLike,
+        offline_replay: ReplayLike | None = None,
         offline_ratio: float = 0.5,
     ) -> None:
         if not 0.0 <= float(offline_ratio) <= 1.0:

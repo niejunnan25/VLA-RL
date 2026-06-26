@@ -165,7 +165,21 @@ def _validate_obs_dict(name: str, value: dict[str, np.ndarray]) -> None:
     if not isinstance(value, dict):
         raise ValueError(f"{name} must be an Observation or dict, got {type(value).__name__}")
     for key, array in value.items():
+        if str(key).startswith("image_"):
+            image = np.asarray(array)
+            if image.dtype != np.uint8 and not np.issubdtype(image.dtype, np.floating):
+                raise ValueError(f"{name}[{key}] image must be uint8 or floating, got {image.dtype}")
+            if image.ndim != 3:
+                raise ValueError(f"{name}[{key}] image must have ndim=3, got shape={image.shape}")
+            continue
         _as_float_array(f"{name}[{key}]", array)
+
+
+def _copy_obs_array(key: str, value: Any) -> np.ndarray:
+    array = np.asarray(value)
+    if key.startswith("image_") and array.dtype == np.uint8:
+        return np.ascontiguousarray(array.copy())
+    return np.ascontiguousarray(array.astype(np.float32, copy=True))
 
 
 def _copy_obs_value(value: ObsValue) -> ObsValue:
@@ -176,4 +190,4 @@ def _copy_obs_value(value: ObsValue) -> ObsValue:
             task=value.task,
             raw=dict(value.raw),
         )
-    return {str(key): np.asarray(array, dtype=np.float32).copy() for key, array in value.items()}
+    return {str(key): _copy_obs_array(str(key), array) for key, array in value.items()}

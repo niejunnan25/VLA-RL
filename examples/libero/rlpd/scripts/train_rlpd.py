@@ -42,7 +42,7 @@ from examples.libero.rlpd.rollout import (
     step_info_success,
 )
 from vla_rl.algorithms.rlpd import build_rlpd_obs, load_offline_replay as load_rlpd_offline_replay
-from vla_rl.data import MixedReplaySampler, ReplayBuffer, Transition
+from vla_rl.data import MemoryEfficientReplayBuffer, MixedReplaySampler, Transition
 from vla_rl.runtime.agentlace import json_sanitize, make_agentlace_replay_store
 from vla_rl.runtime.async_eval import (
     append_async_eval_request,
@@ -64,6 +64,7 @@ from vla_rl.runtime.wandb import make_wandb_logger
 
 
 MetricWriter = Callable[[dict[str, Any]], None]
+EXPECTED_OFFLINE_IMAGE_PREPROCESS = "libero"
 
 
 ##############################################################################
@@ -80,7 +81,6 @@ def parse_args() -> argparse.Namespace:
 def main() -> None:
     args = parse_args()
     cfg = load_config(args.config, args.overrides)
-    cfg.runtime.role = args.role
     validate_rlpd_cfg(cfg)
 
     if args.role == "learner":
@@ -100,7 +100,7 @@ def run_learner(cfg: DictConfig) -> dict[str, Any]:
     agent = create_rlpd_agent(cfg)
     run_dir = run_dir_from_runtime(runtime)
     checkpoints = CheckpointManager(run_dir) if run_dir is not None else None
-    replay = ReplayBuffer(capacity=int(runtime.replay_capacity), seed=int(runtime.replay_seed))
+    replay = MemoryEfficientReplayBuffer(capacity=int(runtime.replay_capacity), seed=int(runtime.replay_seed))
     config_snapshot = OmegaConf.to_container(cfg, resolve=True)
 
     if run_dir is not None:
@@ -279,13 +279,7 @@ def run_learner(cfg: DictConfig) -> dict[str, Any]:
             env_steps = current_env_steps(env_steps)
             maybe_queue_async_eval()
 
-            if _learner_should_stop(
-                update_steps=update_steps,
-                env_steps=env_steps,
-                max_update_steps=int(runtime.max_update_steps),
-                max_env_steps=int(runtime.max_env_steps),
-                actor_done=actor_done,
-            ):
+            if _learner_should_stop(actor_done=actor_done):
                 break
 
             min_replay_size = max(
@@ -326,15 +320,6 @@ def run_learner(cfg: DictConfig) -> dict[str, Any]:
                         }
                     )
                     last_wait_metric_time = now
-                time.sleep(float(runtime.get("update_sleep_sec", 0.05)))
-                continue
-
-            if update_steps >= int(runtime.max_update_steps):
-                check_async_eval_worker(async_eval)
-                now = time.perf_counter()
-                if now - last_wait_publish_time >= 1.0:
-                    server.publish_network(agent.policy_state_dict())
-                    last_wait_publish_time = now
                 time.sleep(float(runtime.get("update_sleep_sec", 0.05)))
                 continue
 
@@ -542,13 +527,8 @@ def run_actor(cfg: DictConfig) -> dict[str, Any]:
             with step_timer.context("build_rlpd_obs"):
                 rlpd_obs = build_rlpd_obs(obs, builder=obs_builder)
 
-            random_steps = int(runtime.get("random_steps", 0))
-            random_action = env_steps < random_steps
-            if random_action:
-                actions = agent.random_action()
-            else:
-                with step_timer.context("sample_action"):
-                    actions = agent.sample_action(rlpd_obs)
+            with step_timer.context("sample_action"):
+                actions = agent.sample_action(rlpd_obs)
             actions = assert_single_step_actions(actions, context="actor final_actions")
 
             with step_timer.context("env_step_chunk"):
@@ -578,8 +558,6 @@ def run_actor(cfg: DictConfig) -> dict[str, Any]:
                 info={
                     **dict(info),
                     "algorithm": "rlpd",
-                    "random_action": bool(random_action),
-                    "random_steps": int(random_steps),
                     "chunk_start_env_steps": int(env_steps),
                     "critic_terminal": bool(critic_terminal),
                     "terminal": bool(terminal),
@@ -668,8 +646,6 @@ def run_actor(cfg: DictConfig) -> dict[str, Any]:
                     "executed_steps": int(executed_steps),
                     "replay_transitions": inserted_transitions,
                     "submitted_transitions": 1,
-                    "random_action": bool(random_action),
-                    "random_steps": int(random_steps),
                     "wall_time_sec": wall_time_sec,
                     "step_time_sec": step_time_sec,
                     "time/reset_env_sec": reset_time_sec,
@@ -724,10 +700,12 @@ def run_actor(cfg: DictConfig) -> dict[str, Any]:
         write_actor_metric({"summary": summary})
         return summary
     finally:
-        if reward_processor is not None:
-            reward_processor.close(drain=True, raise_on_error=False)
-        _stop_if_available(client)
-        _close_if_available(env)
+        try:
+            if reward_processor is not None:
+                reward_processor.close(drain=True)
+        finally:
+            _stop_if_available(client)
+            _close_if_available(env)
 
 
 ##############################################################################
@@ -746,14 +724,13 @@ def _make_progress_metric_writer(cfg: DictConfig, run_dir: Path | None) -> Metri
     return make_jsonl_metric_writer(run_dir, "progress_events.jsonl")
 
 
-def _load_offline_replay(cfg: DictConfig) -> tuple[ReplayBuffer | None, dict[str, Any]]:
+def _load_offline_replay(cfg: DictConfig) -> tuple[MemoryEfficientReplayBuffer | None, dict[str, Any]]:
     runtime = cfg.runtime
     path = runtime.get("offline_replay_path", None)
     if not path:
-        if bool(runtime.require_offline):
-            raise RuntimeError("RLPD requires offline replay; set runtime.offline_replay_path")
-        return None, {"episodes_loaded": 0, "transitions_loaded": 0}
+        raise RuntimeError("RLPD requires offline replay; set runtime.offline_replay_path")
 
+    _assert_offline_replay_manifest(path)
     replay, stats = load_rlpd_offline_replay(
         path,
         capacity=int(runtime.offline_capacity),
@@ -761,10 +738,8 @@ def _load_offline_replay(cfg: DictConfig) -> tuple[ReplayBuffer | None, dict[str
         max_episodes=runtime.get("offline_max_episodes", None),
         max_transitions=runtime.get("offline_max_transitions", None),
     )
-    if bool(runtime.require_offline) and len(replay) == 0:
-        raise RuntimeError(f"RLPD offline replay is empty: {path}")
     if len(replay) == 0:
-        return None, stats
+        raise RuntimeError(f"RLPD offline replay is empty: {path}")
 
     _assert_standard_replay(
         replay,
@@ -775,9 +750,25 @@ def _load_offline_replay(cfg: DictConfig) -> tuple[ReplayBuffer | None, dict[str
     return replay, stats
 
 
-def _assert_standard_replay(replay: ReplayBuffer, *, action_dim: int, image_keys: tuple[str, ...], path: str) -> None:
-    items = list(getattr(replay, "_items", ()))
-    for index, transition in enumerate(items):
+def _assert_offline_replay_manifest(path: str | Path) -> None:
+    manifest_path = Path(path) / "manifest.json"
+    if not manifest_path.exists():
+        raise RuntimeError(f"RLPD offline replay missing manifest.json: {manifest_path}")
+    payload = json.loads(manifest_path.read_text())
+    stats = payload.get("stats", {})
+    image_preprocess = stats.get("image_preprocess", None)
+    if image_preprocess != EXPECTED_OFFLINE_IMAGE_PREPROCESS:
+        raise RuntimeError(
+            f"RLPD offline replay {path} was converted with image_preprocess={image_preprocess!r}; "
+            f"expected {EXPECTED_OFFLINE_IMAGE_PREPROCESS!r}. "
+            "Regenerate the offline replay with the LIBERO RLPD converter so offline images match online observations."
+        )
+
+
+def _assert_standard_replay(replay: Any, *, action_dim: int, image_keys: tuple[str, ...], path: str) -> None:
+    iter_transitions = getattr(replay, "iter_transitions", None)
+    transitions = iter_transitions() if callable(iter_transitions) else iter(getattr(replay, "_items", ()))
+    for index, transition in enumerate(transitions):
         if int(transition.executed_steps) != 1:
             raise AssertionError(
                 f"RLPD offline replay must be single-step: "
@@ -810,19 +801,8 @@ def _assert_standard_obs(obs: Any, *, image_keys: tuple[str, ...], path: str, in
             raise AssertionError(f"RLPD offline replay {path} transition {index} {name} missing {image_key}")
 
 
-def _learner_should_stop(
-    *,
-    update_steps: int,
-    env_steps: int,
-    max_update_steps: int,
-    max_env_steps: int,
-    actor_done: bool,
-) -> bool:
-    if update_steps < max_update_steps:
-        return False
-    if max_env_steps <= 0:
-        return True
-    return env_steps >= max_env_steps or actor_done
+def _learner_should_stop(*, actor_done: bool) -> bool:
+    return bool(actor_done)
 
 
 def _stop_if_available(obj: Any) -> None:

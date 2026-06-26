@@ -266,37 +266,8 @@ def run_learner(cfg: DictConfig) -> dict[str, Any]:
             refresh_actor_summary_file()
             env_steps = current_env_steps(env_steps)
             maybe_queue_async_eval()
-            if learner_should_stop(
-                update_steps=update_steps,
-                env_steps=env_steps,
-                max_update_steps=int(runtime.max_update_steps),
-                max_env_steps=int(runtime.max_env_steps),
-                actor_done=actor_done,
-            ):
+            if learner_should_stop(actor_done=actor_done):
                 break
-
-            if update_steps >= int(runtime.max_update_steps):
-                check_async_eval_worker(async_eval)
-                now = time.perf_counter()
-                if now - last_wait_publish_time >= 1.0:
-                    server.publish_network(agent.policy_state_dict())
-                    last_wait_publish_time = now
-                if now - last_wait_metric_time >= 1.0:
-                    write_metric(
-                        {
-                            "role": "learner",
-                            "event": "waiting_for_actor_env",
-                            "replay_size": len(replay),
-                            "target_env_steps": int(runtime.max_env_steps),
-                            "update_steps": update_steps,
-                            "env_steps": env_steps,
-                            "actor_done": actor_done,
-                            "wall_time_sec": now - start_time,
-                        }
-                    )
-                    last_wait_metric_time = now
-                time.sleep(float(runtime.get("update_sleep_sec", 0.05)))
-                continue
 
             min_replay_size = max(int(runtime.training_starts), int(runtime.batch_size))
             if len(replay) < min_replay_size:
@@ -850,17 +821,19 @@ def run_actor(cfg: DictConfig) -> dict[str, Any]:
         write_actor_metric({"summary": summary})
         return summary
     finally:
-        if reward_processor is not None:
-            reward_processor.close(drain=True, raise_on_error=False)
-        stop = getattr(client, "stop", None)
-        if callable(stop):
-            stop()
-        close = getattr(env, "close", None)
-        if callable(close):
-            close()
-        close = getattr(reference_policy, "close", None)
-        if callable(close):
-            close()
+        try:
+            if reward_processor is not None:
+                reward_processor.close(drain=True)
+        finally:
+            stop = getattr(client, "stop", None)
+            if callable(stop):
+                stop()
+            close = getattr(env, "close", None)
+            if callable(close):
+                close()
+            close = getattr(reference_policy, "close", None)
+            if callable(close):
+                close()
 
 
 if __name__ == "__main__":

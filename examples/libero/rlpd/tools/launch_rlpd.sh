@@ -9,7 +9,7 @@ ACTOR_GPU="0"
 LEARNER_GPU="0"
 ENV_GPU=""
 ENV_PORT="23100"
-WITH_EVAL="0"
+WITH_EVAL="1"
 EVAL_GPU=""
 EVAL_ENV_PORT="23110"
 TRAINER_PORT="5588"
@@ -24,7 +24,7 @@ usage() {
   cat <<'EOF'
 Usage: examples/libero/rlpd/tools/launch_rlpd.sh [options] [-- overrides...]
 
-Starts a standard RLPD run: LIBERO env server, learner, actor, and optional async eval.
+Starts a standard RLPD run: LIBERO env server, learner, actor, and async eval.
 No OpenPI/reference-policy server is started because the SAC policy outputs actions directly.
 
 Options:
@@ -34,7 +34,8 @@ Options:
   --learner-gpu ID             GPU for learner.
   --env-gpu ID                 GPU for actor LIBERO env server. Defaults to actor GPU.
   --env-port PORT              Actor LIBERO env server port.
-  --with-eval                  Start async eval worker plus dedicated eval env server.
+  --with-eval                  Start async eval worker plus dedicated eval env server. Enabled by default.
+  --no-eval                    Disable async eval for debugging.
   --eval-gpu ID                GPU for async eval worker and eval env. Defaults to actor GPU.
   --eval-env-port PORT         Async eval LIBERO env server port.
   --trainer-port PORT          Agentlace trainer port.
@@ -58,6 +59,7 @@ while [[ $# -gt 0 ]]; do
     --env-gpu) ENV_GPU="$2"; shift 2 ;;
     --env-port) ENV_PORT="$2"; shift 2 ;;
     --with-eval) WITH_EVAL="1"; shift ;;
+    --no-eval) WITH_EVAL="0"; shift ;;
     --eval-gpu) EVAL_GPU="$2"; shift 2 ;;
     --eval-env-port) EVAL_ENV_PORT="$2"; shift 2 ;;
     --trainer-port) TRAINER_PORT="$2"; shift 2 ;;

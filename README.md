@@ -70,8 +70,7 @@ examples/libero/rlt/tools/launch_rlt.sh \
   --learner-gpu 1 \
   --run-dir /tmp/vlarl_rlt_smoke \
   -- \
-  runtime.max_env_steps=1000 \
-  runtime.max_update_steps=1000
+  runtime.max_env_steps=1000
 ```
 
 The actor sends RLT transitions to the learner rather than raw images.
@@ -120,7 +119,6 @@ examples/libero/pld/tools/launch_pld.sh \
   --run-dir /tmp/vlarl_pld_smoke \
   -- \
   runtime.max_env_steps=1000 \
-  runtime.max_update_steps=1000 \
   runtime.calql_pretrain_steps=10 \
   runtime.training_starts=10
 ```

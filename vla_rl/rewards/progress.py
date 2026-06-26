@@ -52,6 +52,22 @@ class RemoteProgressClient:
         self.client.close()
 
 
+def compute_potential_discount(
+    *,
+    gamma: float,
+    executed_steps: int,
+    discount: float | None = None,
+    terminal: bool = False,
+) -> float:
+    """Return the multiplier applied to Phi(next_state) in PBRS-style rewards."""
+
+    if bool(terminal):
+        return 0.0
+    if discount is not None:
+        return float(discount)
+    return float(gamma) ** int(executed_steps)
+
+
 def compute_progress_reward(
     reward_type: str,
     *,
@@ -62,6 +78,7 @@ def compute_progress_reward(
     executed_steps: int,
     scale: float = 1.0,
     discount: float | None = None,
+    terminal: bool = False,
 ) -> float:
     kind = str(reward_type)
     if kind not in SUPPORTED_REWARD_TYPES:
@@ -78,7 +95,12 @@ def compute_progress_reward(
         return scaled * current
     if kind == "progress_delta":
         return scaled * (current - previous)
-    potential_discount = float(discount) if discount is not None else float(gamma) ** int(executed_steps)
+    potential_discount = compute_potential_discount(
+        gamma=float(gamma),
+        executed_steps=int(executed_steps),
+        discount=discount,
+        terminal=bool(terminal),
+    )
     potential_delta = potential_discount * current - previous
     if kind == "potential_delta":
         return scaled * potential_delta
@@ -95,8 +117,6 @@ def normalize_progress_response(result: Any, *, expected_count: int | None = Non
     if any(not np.isfinite(value) for value in out):
         raise ValueError(f"progress response contains non-finite values: {out}")
     if expected_count is not None and expected_count > 0 and len(out) != expected_count:
-        if expected_count == 1:
-            return [out[-1]]
         raise ValueError(f"expected {expected_count} progress values, got {len(out)}")
     return out
 

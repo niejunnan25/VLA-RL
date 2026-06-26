@@ -242,6 +242,18 @@ def test_libero_pld_train_helpers_validate_config():
     pld_config.validate_pld_cfg(cfg)
 
 
+def test_libero_pld_config_rejects_removed_max_update_steps():
+    cfg = OmegaConf.create({"runtime": {"max_update_steps": 1}})
+
+    with pytest.raises(ValueError, match="max_update_steps"):
+        pld_config.validate_pld_cfg(cfg)
+
+
+def test_libero_pld_learner_stop_follows_actor_lifecycle():
+    assert pld_train._learner_should_stop(actor_done=True)
+    assert not pld_train._learner_should_stop(actor_done=False)
+
+
 def test_libero_pld_train_offline_replay_optional():
     runtime = OmegaConf.create({"offline_replay_path": None, "require_offline": False})
 

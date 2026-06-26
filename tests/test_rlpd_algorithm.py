@@ -7,6 +7,8 @@ import pytest
 from omegaconf import OmegaConf
 
 from examples.libero.rlpd.async_eval import start_async_eval_worker
+from examples.libero.rlpd.config import validate_rlpd_cfg
+from examples.libero.rlpd.scripts.train_rlpd import _learner_should_stop
 from vla_rl.algorithms.rlpd import SACAgent
 from vla_rl.data import ReplayBuffer, Transition
 
@@ -86,3 +88,15 @@ def test_rlpd_async_eval_requires_dedicated_env_url(tmp_path: Path) -> None:
 
     with pytest.raises(ValueError, match="runtime.async_eval.env_url is required"):
         start_async_eval_worker(runtime, run_dir=tmp_path)
+
+
+def test_rlpd_config_rejects_removed_max_update_steps() -> None:
+    cfg = OmegaConf.create({"runtime": {"max_update_steps": 1}})
+
+    with pytest.raises(ValueError, match="max_update_steps"):
+        validate_rlpd_cfg(cfg)
+
+
+def test_rlpd_learner_stop_follows_actor_lifecycle() -> None:
+    assert _learner_should_stop(actor_done=True)
+    assert not _learner_should_stop(actor_done=False)

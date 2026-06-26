@@ -318,8 +318,9 @@ class SACAgent(Algorithm):
             batch = self._obs_to_torch([obs])
             with self._autocast_context():
                 normalized = self._actor_deterministic(batch) if deterministic else self._actor_sample(batch)[0]
-            action = self._scale_action_torch(normalized)
-            return action.detach().cpu().numpy().reshape(1, self.action_dim).astype(np.float32)
+            # NumPy cannot consume bfloat16 tensors directly; keep env-facing actions float32.
+            action = self._scale_action_torch(normalized.to(dtype=torch.float32))
+            return action.detach().cpu().numpy().reshape(1, self.action_dim)
 
     def set_compile_enabled(self, enabled: bool) -> None:
         self.enable_compile = bool(enabled)
@@ -634,10 +635,16 @@ class SACAgent(Algorithm):
 
     def _obs_to_torch(self, obs_list: list[dict[str, Any]]) -> dict[str, torch.Tensor]:
         result: dict[str, torch.Tensor] = {}
-        required_keys = [*(f"image_{key}" for key in self.image_keys), "proprio"]
-        for key in required_keys:
-            values = [np.asarray(obs[key], dtype=np.float32) for obs in obs_list]
-            result[key] = torch.as_tensor(np.stack(values), dtype=torch.float32, device=self.device)
+        for image_key in (f"image_{key}" for key in self.image_keys):
+            values = [np.asarray(obs[image_key]) for obs in obs_list]
+            tensor = torch.as_tensor(np.stack(values), device=self.device)
+            if tensor.is_floating_point():
+                tensor = tensor.to(dtype=torch.float32)
+            else:
+                tensor = tensor.to(dtype=torch.float32).div_(255.0)
+            result[image_key] = tensor
+        proprio_values = [np.asarray(obs["proprio"], dtype=np.float32) for obs in obs_list]
+        result["proprio"] = torch.as_tensor(np.stack(proprio_values), dtype=torch.float32, device=self.device)
         return result
 
     def _scale_action_torch(self, normalized_action: torch.Tensor) -> torch.Tensor:

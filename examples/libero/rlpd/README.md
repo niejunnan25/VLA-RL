@@ -18,8 +18,7 @@ The learner samples mixed RLPD batches:
 batch = online_replay * (1 - offline_ratio) + offline_replay * offline_ratio
 ```
 
-The current implementation uses `vla_rl.algorithms.rlpd.SACAgent`, a visual DrQ/SAC agent with image/proprio observations and environment actions. By default it follows the standard image-based RLPD path: online/offline mixed replay, DrQ random crop with edge padding, and a shared visual encoder for actor and critic.
-The 10 LIBERO spatial configs set runtime.random_steps: 0, so actor rollout never uses uniform random warmup actions. The actor still samples from the SAC stochastic policy. The runtime.training_starts: 2500 threshold only delays learner updates until enough online replay exists.
+The current implementation uses `vla_rl.algorithms.rlpd.SACAgent`, a visual DrQ/SAC agent with image/proprio observations and environment actions. It follows the standard image-based RLPD path: online/offline mixed replay, DrQ random crop with edge padding, and a shared visual encoder for actor and critic. Actor rollout always samples from the SAC stochastic policy; there is no uniform random action warmup switch.
 
 The default visual path is:
 
@@ -37,7 +36,7 @@ The actor sends exactly one action per environment call and asserts that `env.st
 
 ## Offline Replay
 
-The default YAML keeps `runtime.require_offline: true`. The learner will fail early unless `runtime.offline_replay_path` points to an RLPD replay directory. The loader asserts:
+The learner fails early unless `runtime.offline_replay_path` points to an RLPD replay directory. The loader asserts:
 
 ```text
 transition.executed_steps == 1
@@ -69,7 +68,7 @@ cd /vla/users/niejunnan/codebase/VLA-RL
 
 RLPD mixes online replay with an offline replay buffer. For LIBERO, the offline buffer should usually come from expert demonstrations. Do not match the local LeRobot directories by sorted order: `task_id` order in LIBERO is not the same as directory order.
 
-The converter resolves the official LIBERO prompt from `env.task_suite_name` and `env.task_id`, then matches that prompt against each LeRobot repo's `meta/tasks.jsonl`.
+The converter resolves the official LIBERO prompt from `env.task_suite_name` and `env.task_id`, then matches that prompt against each LeRobot repo's `meta/tasks.jsonl`. It always applies the same LIBERO image normalization used by online observations before writing replay. This is a data-generation contract, not a training-time option. Training rejects offline replay whose manifest does not record `image_preprocess: libero`, because those images do not match online data.
 
 ```bash
 python examples/libero/rlpd/scripts/convert_lerobot_expert_replay.py \
@@ -163,7 +162,6 @@ reward:
   source: remote_progress
   scale: 1.0
   initial_progress: query_start
-  on_error: fallback_sparse
   remote:
     url: http://127.0.0.1:50052
     method: predict_progress
@@ -175,3 +173,96 @@ reward:
   async:
     max_pending_chunks: 64
 ```
+
+
+### Reward-Model Benchmark Configs
+
+The reward-model benchmark configs live under:
+
+```text
+examples/libero/rlpd/configs/reward_model/
+```
+
+For each LIBERO spatial task there are three experiment YAMLs:
+
+```text
+libero_spatial_taskX_rlpd_sparse.yaml
+libero_spatial_taskX_rlpd_robodopamine_pbrs.yaml
+libero_spatial_taskX_rlpd_robometer_pbrs.yaml
+```
+
+The sparse config keeps both online and offline replay on the original LIBERO sparse reward. The Robo-Dopamine and RoboMeter configs use `reward.type: env_plus_potential_delta`, so online actor transitions are relabeled through the shared absolute-progress RPC interface and inserted into replay with PBRS rewards.
+
+For a clean RLPD comparison, relabel the offline expert replay with the same reward model before training. Otherwise the dense-reward runs would mix online dense rewards with offline sparse expert transitions.
+
+### Start Reward Servers
+
+Robo-Dopamine uses the VLA-RL adapter directly:
+
+```bash
+GPU=1 PORT=50052 \
+MODEL_PATH=/vla/users/niejunnan/assets/Robo-Dopamine-GRM-2.0-4B-Preview \
+bash examples/libero/rlpd/tools/serve_robodopamine_progress.sh
+```
+
+RoboMeter needs the official RoboMeter eval server plus the VLA-RL progress adapter. This helper starts both in one foreground process group:
+
+```bash
+GPU=1 ROBOMETER_PORT=8401 ADAPTER_PORT=50152 \
+MODEL_PATH=/vla/users/niejunnan/assets/Robometer-4B \
+bash examples/libero/rlpd/tools/serve_robometer_progress_stack.sh
+```
+
+The helper uses the RoboMeter project environment: it first tries `$ROBOMETER_ROOT/.venv/bin/python` when that environment already has the server dependencies (`fastapi`, `uvicorn`, `torch`, and `omegaconf`), otherwise it falls back to `uv run python` inside `$ROBOMETER_ROOT`. It defaults to the workspace RoboMeter environment and keeps `ROBOMETER_USE_UNSLOTH=true`, matching the previous successful RoboMeter evaluation setup. Set `ROBOMETER_USE_UNSLOTH=false` only when running in an environment without a usable Unsloth vision loader; in that mode it creates a temporary checkpoint directory with symlinks to the original model files and only patches `config.yaml` to disable Unsloth. The workspace RoboMeter copy already contains the compatibility fixes used in previous RBM-EVAL runs, so `ROBOMETER_DISABLE_IMPORT_STUBS` defaults to `1`. Set `ROBOMETER_DISABLE_IMPORT_STUBS=0` only when using an unpatched RoboMeter checkout that still imports `sentence_transformers -> torchcodec` during server startup.
+
+The RLPD code only sees `reward.remote.url` and expects `predict_progress(request)` to return absolute progress. Model-specific details such as goal images, trajectory prefix handling, and RoboMeter frame-step evaluation stay inside these server adapters. Reward RPC failures are fatal, so failed reward-model experiments cannot silently continue with sparse rewards.
+
+### Relabel Offline Expert Replay
+
+Relabel Robo-Dopamine expert replay for one task:
+
+```bash
+python examples/libero/rlpd/scripts/relabel_lerobot_expert_replay.py \
+  --config examples/libero/rlpd/configs/reward_model/libero_spatial_task4_rlpd_robodopamine_pbrs.yaml
+```
+
+Relabel RoboMeter expert replay for one task:
+
+```bash
+python examples/libero/rlpd/scripts/relabel_lerobot_expert_replay.py \
+  --config examples/libero/rlpd/configs/reward_model/libero_spatial_task4_rlpd_robometer_pbrs.yaml
+```
+
+For a quick smoke test, keep the output outside the formal replay directory and limit both episodes and transitions:
+
+```bash
+python examples/libero/rlpd/scripts/relabel_lerobot_expert_replay.py \
+  --config examples/libero/rlpd/configs/reward_model/libero_spatial_task4_rlpd_robodopamine_pbrs.yaml \
+  --remote-url http://127.0.0.1:50056 \
+  --output-dir /tmp/vlarl_rlpd_rd_relabel_smoke_task4 \
+  --max-episodes 1 \
+  --max-transitions-per-episode 3
+```
+
+The output path comes from `runtime.offline_replay_path` in the YAML. The script also writes `summary.json` and `progress_events.jsonl` into that replay directory so reward scale, progress, and PBRS values can be audited later.
+
+### Train Reward-Model RLPD
+
+After the matching reward server is running and the matching offline replay exists, launch training with the reward-model YAML:
+
+```bash
+bash examples/libero/rlpd/tools/launch_rlpd.sh \
+  --config examples/libero/rlpd/configs/reward_model/libero_spatial_task4_rlpd_robodopamine_pbrs.yaml \
+  --session vlarl_libero_spatial4_rlpd_robodopamine_pbrs \
+  --actor-gpu 0 \
+  --learner-gpu 0 \
+  --env-gpu 0 \
+  --env-port 23100 \
+  --with-eval \
+  --eval-gpu 0 \
+  --eval-env-port 23110 \
+  --trainer-port 5588 \
+  --broadcast-port 5589
+```
+
+Use the same command with `libero_spatial_task4_rlpd_robometer_pbrs.yaml` after starting the RoboMeter reward stack on the port configured in that YAML.

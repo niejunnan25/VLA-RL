@@ -22,7 +22,10 @@ if str(PROJECT_ROOT) not in sys.path:
 from examples.libero.rlpd.config import load_config, validate_rlpd_cfg, create_rlpd_obs_builder
 from vla_rl.algorithms.rlpd import build_rlpd_obs, write_offline_episode
 from vla_rl.data import Observation, Transition
-from vla_rl.envs.libero.observation import normalize_image, resize_nearest
+from vla_rl.envs.libero.observation import normalize_image
+
+
+OFFLINE_IMAGE_PREPROCESS = "libero"
 
 
 def parse_args() -> argparse.Namespace:
@@ -41,7 +44,6 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--gamma", type=float, default=None, help="Discount. Defaults to runtime.gamma.")
     parser.add_argument("--step-reward", type=float, default=0.0)
     parser.add_argument("--terminal-reward", type=float, default=1.0)
-    parser.add_argument("--image-preprocess", choices=("none", "libero"), default="none")
     parser.add_argument("overrides", nargs=argparse.REMAINDER)
     return parser.parse_args()
 
@@ -85,7 +87,6 @@ def main() -> None:
             task_id=task_id,
             action_dim=action_dim,
             image_size=image_size,
-            image_preprocess=str(args.image_preprocess),
             gamma=gamma,
             step_reward=float(args.step_reward),
             terminal_reward=float(args.terminal_reward),
@@ -108,7 +109,7 @@ def main() -> None:
                 "lerobot_root": str(Path(args.lerobot_root).expanduser()),
                 "matched_repo": str(repo_dir),
                 "matched_repo_task": repo_task,
-                "image_preprocess": str(args.image_preprocess),
+                "image_preprocess": OFFLINE_IMAGE_PREPROCESS,
                 "image_size": image_size,
                 "step_reward": float(args.step_reward),
                 "terminal_reward": float(args.terminal_reward),
@@ -216,7 +217,6 @@ def convert_episode(
     task_id: int,
     action_dim: int,
     image_size: int,
-    image_preprocess: str,
     gamma: float,
     step_reward: float,
     terminal_reward: float,
@@ -234,7 +234,6 @@ def convert_episode(
             state=data["state"][idx],
             task_prompt=task_prompt,
             image_size=image_size,
-            image_preprocess=image_preprocess,
             source_dir=source_repo,
         )
         for idx in range(n_rows)
@@ -287,13 +286,12 @@ def make_observation(
     state: Any,
     task_prompt: str,
     image_size: int,
-    image_preprocess: str,
     source_dir: Path,
 ) -> Observation:
     image = decode_lerobot_image(image_cell, source_dir=source_dir)
     wrist = decode_lerobot_image(wrist_cell, source_dir=source_dir)
-    image = preprocess_image(image, image_size=image_size, mode=image_preprocess)
-    wrist = preprocess_image(wrist, image_size=image_size, mode=image_preprocess)
+    image = preprocess_image(image, image_size=image_size)
+    wrist = preprocess_image(wrist, image_size=image_size)
     obs = Observation(
         images={
             "image_rgb_0": image,
@@ -322,15 +320,8 @@ def decode_lerobot_image(cell: Any, *, source_dir: Path) -> np.ndarray:
     raise ValueError(f"unsupported LeRobot image cell: {type(cell).__name__}")
 
 
-def preprocess_image(image: np.ndarray, *, image_size: int, mode: str) -> np.ndarray:
-    if mode == "libero":
-        return normalize_image(image, image_size=image_size)
-    array = np.asarray(image)
-    if array.dtype != np.uint8:
-        array = np.clip(array, 0, 255).astype(np.uint8)
-    if array.shape[:2] != (image_size, image_size):
-        array = resize_nearest(array, (image_size, image_size))
-    return np.ascontiguousarray(array)
+def preprocess_image(image: np.ndarray, *, image_size: int) -> np.ndarray:
+    return normalize_image(image, image_size=image_size)
 
 
 def attach_mc_returns(transitions: list[Transition], *, gamma: float) -> None:

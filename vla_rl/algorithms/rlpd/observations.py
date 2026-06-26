@@ -25,7 +25,7 @@ class ObservationBuilder:
         for key in self.image_keys:
             if key not in obs.images:
                 raise KeyError(f"observation missing image key {key!r}; available={sorted(obs.images)}")
-            result[f"image_{key}"] = _image_to_chw_float(obs.images[key])
+            result[f"image_{key}"] = _image_to_chw_uint8(obs.images[key])
         return result
 
 
@@ -33,10 +33,18 @@ def build_rlpd_obs(obs: Observation, *, builder: ObservationBuilder) -> dict[str
     return builder.build_observation(obs)
 
 
-def _image_to_chw_float(image: np.ndarray) -> np.ndarray:
+def _image_to_chw_uint8(image: np.ndarray) -> np.ndarray:
     arr = np.asarray(image)
     if arr.ndim != 3:
-        raise ValueError(f"image must be HWC, got shape={arr.shape}")
-    if arr.dtype == np.uint8:
-        return np.transpose(arr, (2, 0, 1)).astype(np.float32) / 255.0
-    return np.transpose(arr.astype(np.float32, copy=False), (2, 0, 1))
+        raise ValueError(f"image must be HWC or CHW, got shape={arr.shape}")
+    if arr.shape[0] in (1, 3, 4) and arr.shape[-1] not in (1, 3, 4):
+        chw = arr
+    else:
+        chw = np.transpose(arr, (2, 0, 1))
+    if chw.dtype == np.uint8:
+        return np.ascontiguousarray(chw)
+    if np.issubdtype(chw.dtype, np.floating):
+        if chw.size and np.nanmin(chw) >= -1e-6 and np.nanmax(chw) <= 1.0 + 1e-6:
+            chw = chw * 255.0
+        return np.ascontiguousarray(np.rint(np.clip(chw, 0.0, 255.0)).astype(np.uint8))
+    return np.ascontiguousarray(np.clip(chw, 0, 255).astype(np.uint8))

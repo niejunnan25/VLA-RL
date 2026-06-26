@@ -160,7 +160,7 @@ def run_learner(cfg: DictConfig) -> dict[str, Any]:
 
     completed_loop = False
     try:
-        while calql_steps_done < int(runtime.calql_pretrain_steps) and update_steps < int(runtime.max_update_steps):
+        while calql_steps_done < int(runtime.calql_pretrain_steps):
             if offline_replay is None or len(offline_replay) == 0:
                 break
             step_timer = Timer()
@@ -213,7 +213,7 @@ def run_learner(cfg: DictConfig) -> dict[str, Any]:
         while True:
             refresh_actor_summary_file()
             env_steps = current_env_steps(env_steps)
-            if _learner_should_stop(update_steps, env_steps, int(runtime.max_update_steps), int(runtime.max_env_steps), actor_done):
+            if _learner_should_stop(actor_done=actor_done):
                 break
             online_updates = max(0, update_steps - calql_steps_done)
             # Gate online learning on replay size only (RLPD/SERL-style). The
@@ -251,9 +251,6 @@ def run_learner(cfg: DictConfig) -> dict[str, Any]:
                         "wall_time_sec": now - start_time,
                     })
                     last_wait_metric_time = now
-                time.sleep(float(runtime.get("update_sleep_sec", 0.05)))
-                continue
-            if update_steps >= int(runtime.max_update_steps):
                 time.sleep(float(runtime.get("update_sleep_sec", 0.05)))
                 continue
             step_timer = Timer()
@@ -531,12 +528,8 @@ def _load_offline_replay(runtime: DictConfig) -> tuple[ReplayBuffer | None, dict
     return replay, stats
 
 
-def _learner_should_stop(update_steps: int, env_steps: int, max_update_steps: int, max_env_steps: int, actor_done: bool) -> bool:
-    if update_steps < max_update_steps:
-        return False
-    if max_env_steps <= 0:
-        return True
-    return env_steps >= max_env_steps or actor_done
+def _learner_should_stop(*, actor_done: bool) -> bool:
+    return bool(actor_done)
 
 
 
