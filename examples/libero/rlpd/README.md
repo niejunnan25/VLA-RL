@@ -52,7 +52,7 @@ Do not use PLD/residual replay here. PLD replay contains `base_action_chunk`, wh
 The standard workflow for one LIBERO task is:
 
 1. Convert the matching expert demonstrations into an RLPD offline replay buffer.
-2. Start the LIBERO env server, learner, and actor with the same task YAML.
+2. Start learner and actor with the same task YAML. Each rollout/eval process creates its own local LIBERO env.
 
 The example below runs `libero_spatial/task_id=4`.
 
@@ -92,16 +92,14 @@ bash examples/libero/rlpd/tools/launch_rlpd.sh \
   --session vlarl_libero_spatial4_rlpd \
   --actor-gpu 0 \
   --learner-gpu 0 \
-  --env-gpu 0 \
-  --env-port 23100 \
   --trainer-port 5588 \
   --broadcast-port 5589 \
   --run-dir outputs/libero_spatial_task4_rlpd
 ```
 
-The default launcher placement is intentionally conservative for one-task runs: actor, learner, LIBERO env, and async eval can all be placed on the same GPU. For multi-task sweeps, run one task per GPU or override the `--actor-gpu`, `--learner-gpu`, `--env-gpu`, and `--eval-gpu` flags explicitly.
+The default launcher placement is intentionally conservative for one-task runs: actor, learner, the actor-local LIBERO env, and async eval can all be placed on the same GPU. For multi-task sweeps, run one task per GPU or override the `--actor-gpu`, `--learner-gpu`, and `--eval-gpu` flags explicitly.
 
-The launcher starts only the LIBERO env server, learner, and actor. It does not start an OpenPI/reference-policy server because the SAC policy outputs actions directly.
+The launcher starts only learner and actor. It does not start a LIBERO env RPC server or an OpenPI/reference-policy server because the actor creates LIBERO locally and the SAC policy outputs actions directly.
 
 ### Running Other Spatial Tasks
 
@@ -128,17 +126,14 @@ bash examples/libero/rlpd/tools/launch_rlpd.sh \
   --session vlarl_libero_spatial4_rlpd \
   --actor-gpu 0 \
   --learner-gpu 0 \
-  --env-gpu 0 \
-  --env-port 23100 \
   --with-eval \
   --eval-gpu 0 \
-  --eval-env-port 23110 \
   --trainer-port 5588 \
   --broadcast-port 5589 \
   --run-dir outputs/libero_spatial_task4_rlpd
 ```
 
-With `--with-eval`, the launcher starts a second LIBERO env server for evaluation. This keeps actor collection and eval rollouts from sharing the same remote simulator process.
+With `--with-eval`, the learner starts an eval worker process. That worker creates its own local LIBERO env, so actor collection and eval rollouts still do not share a simulator instance.
 
 The learner writes eval requests and results under `runtime.run_dir`:
 
@@ -150,7 +145,7 @@ eval_checkpoints/
 eval_runs/
 ```
 
-The relevant YAML section is `runtime.async_eval`. It is disabled by default and can be enabled by the launcher or by an explicit YAML experiment config. When enabling it manually, set `runtime.async_eval.env_url` to a dedicated eval env server; the launcher does this automatically for `--with-eval`.
+The relevant YAML section is `runtime.async_eval`. It is disabled by default and can be enabled by the launcher or by an explicit YAML experiment config. Set `worker_cuda_visible_devices` and `worker_mujoco_egl_device_id` when the eval worker should use a specific GPU.
 
 ## Reward Model
 
@@ -163,7 +158,7 @@ reward:
   scale: 1.0
   initial_progress: query_start
   remote:
-    url: http://127.0.0.1:50052
+    url: http://127.0.0.1:52000
     method: predict_progress
     timeout: 120.0
     retries: 1
@@ -200,7 +195,7 @@ For a clean RLPD comparison, relabel the offline expert replay with the same rew
 Robo-Dopamine uses the VLA-RL adapter directly:
 
 ```bash
-GPU=1 PORT=50052 \
+GPU=1 PORT=52000 \
 MODEL_PATH=/vla/users/niejunnan/assets/Robo-Dopamine-GRM-2.0-4B-Preview \
 bash examples/libero/rlpd/tools/serve_robodopamine_progress.sh
 ```
@@ -256,11 +251,8 @@ bash examples/libero/rlpd/tools/launch_rlpd.sh \
   --session vlarl_libero_spatial4_rlpd_robodopamine_pbrs \
   --actor-gpu 0 \
   --learner-gpu 0 \
-  --env-gpu 0 \
-  --env-port 23100 \
   --with-eval \
   --eval-gpu 0 \
-  --eval-env-port 23110 \
   --trainer-port 5588 \
   --broadcast-port 5589
 ```

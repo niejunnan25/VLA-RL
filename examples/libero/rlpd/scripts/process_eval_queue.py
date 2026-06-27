@@ -80,9 +80,6 @@ def _run_request(base_cfg, request: dict[str, Any]) -> dict[str, Any]:
         }
 
     cfg = OmegaConf.create(OmegaConf.to_container(base_cfg, resolve=True))
-    if request.get("env_url"):
-        cfg.env.url = str(request["env_url"])
-
     output_dir = Path(str(request["output_dir"]))
     try:
         summary = run_eval(

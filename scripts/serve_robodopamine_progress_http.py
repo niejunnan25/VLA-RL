@@ -11,6 +11,7 @@ from __future__ import annotations
 import argparse
 from dataclasses import dataclass, field
 from http.server import ThreadingHTTPServer
+import inspect
 import io
 import logging
 import os
@@ -370,6 +371,7 @@ class RoboDopamineProgressHttpService:
         self.goal_provider = goal_provider
         self.require_goal = bool(require_goal)
         self.response_key = str(response_key)
+        self._engine_predict_supports_cache = "cache_key" in inspect.signature(engine.predict).parameters
         self.lock = threading.Lock()
         self.episodes: dict[str, _EpisodeCache] = {}
         self.stats = {"requests": 0, "errors": 0, "episodes_cached": 0}
@@ -449,21 +451,31 @@ class RoboDopamineProgressHttpService:
             if goal_image is None and self.require_goal:
                 raise RuntimeError(f"no expert goal image found for task_id={snapshot.task_id}, task={snapshot.task!r}")
 
-            progress = self.engine.predict(
-                transitions=transitions,
-                query_indices=query_indices,
-                trajectory_start_idx=start_idx,
-                task=snapshot.task,
-                goal_image=goal_image,
-                request_label=request_label,
-            )
+            predict_kwargs = {
+                "transitions": transitions,
+                "query_indices": query_indices,
+                "trajectory_start_idx": start_idx,
+                "task": snapshot.task,
+                "goal_image": goal_image,
+                "request_label": request_label,
+            }
+            if self._engine_predict_supports_cache:
+                predict_kwargs.update(
+                    cache_key=cache_key,
+                    context_cache_indices=context_abs_indices,
+                    goal_cache_key=goal_source or snapshot.task or str(snapshot.task_id or ""),
+                )
+            progress = self.engine.predict(**predict_kwargs)
         except Exception:
             if done:
+                self._clear_engine_episode_cache(cache_key)
                 with self.lock:
                     self.episodes.pop(cache_key, None)
                     self.stats["episodes_cached"] = len(self.episodes)
             raise
         progress = [float(value) for value in progress]
+        if done:
+            self._clear_engine_episode_cache(cache_key)
         with self.lock:
             self.stats["requests"] += 1
             if done:
@@ -489,6 +501,11 @@ class RoboDopamineProgressHttpService:
                 "episodes_cached": int(self.stats["episodes_cached"]),
             },
         }
+
+    def _clear_engine_episode_cache(self, cache_key: str) -> None:
+        clear_cache = getattr(self.engine, "clear_episode_cache", None)
+        if callable(clear_cache):
+            clear_cache(cache_key)
 
     def dispatch(self, method: str, kwargs: dict[str, Any]) -> Any:
         try:

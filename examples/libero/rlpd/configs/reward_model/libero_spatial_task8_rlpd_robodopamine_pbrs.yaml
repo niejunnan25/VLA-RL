@@ -1,6 +1,5 @@
 env:
-  _target_: vla_rl.envs.libero.LiberoRemoteEnvBackend
-  url: http://127.0.0.1:23100
+  _target_: vla_rl.envs.libero.LiberoLocalEnvBackend
   task_suite_name: libero_spatial
   task_id: 8
   action_dim: 7
@@ -10,7 +9,6 @@ env:
   libero_datasets_root: /vla/users/niejunnan/datasets
   seed: 0
   image_size: 224
-  timeout: 120.0
 rlpd_observation:
   image_keys:
   - image_rgb_0
@@ -68,7 +66,7 @@ reward:
   scale: 1.0
   initial_progress: query_start
   remote:
-    url: http://127.0.0.1:50052
+    url: http://127.0.0.1:52008
     method: predict_progress
     timeout: 120.0
     retries: 1
@@ -78,7 +76,9 @@ reward:
     - image_rgb_0
     - image_rgb_1
   async:
-    max_pending_chunks: 64
+    max_pending_chunks: 128
+    batch_size: 8
+    max_wait_ms: 5
 runtime:
   backend: agentlace
   trainer_ip: 127.0.0.1

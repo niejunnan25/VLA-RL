@@ -207,7 +207,6 @@ def run_learner(cfg: DictConfig) -> dict[str, Any]:
                 "episodes": int(async_cfg.get("episodes", 50)),
                 "max_env_steps_per_episode": int(async_cfg.get("max_env_steps_per_episode", 0) or 0),
                 "save_videos": bool(async_cfg.get("save_videos", False)),
-                "env_url": None if async_cfg.get("env_url", None) is None else str(async_cfg.get("env_url")),
             },
         )
         write_metric(

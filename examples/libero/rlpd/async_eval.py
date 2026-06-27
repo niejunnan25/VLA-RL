@@ -25,13 +25,6 @@ def start_async_eval_worker(runtime: DictConfig, *, run_dir: Path | None) -> Asy
     if every_episodes <= 0:
         raise ValueError("runtime.async_eval.every_episodes must be positive")
 
-    env_url = async_cfg.get("env_url", None)
-    if env_url is None or not str(env_url).strip():
-        raise ValueError(
-            "runtime.async_eval.env_url is required when runtime.async_eval.enabled=true; "
-            "use launch_rlpd.sh --with-eval or set a dedicated eval env URL in YAML."
-        )
-
     queue_path = resolve_async_eval_path(async_cfg.get("queue_file", "eval_queue.jsonl"), run_dir=run_dir)
     summary_path = resolve_async_eval_path(async_cfg.get("summary_jsonl", "eval_summary.jsonl"), run_dir=run_dir)
     worker_log_path = resolve_async_eval_path(async_cfg.get("worker_log_file", "eval_worker.log"), run_dir=run_dir)

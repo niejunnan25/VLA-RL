@@ -7,9 +7,14 @@ ROBODOPAMINE_ROOT="${ROBODOPAMINE_ROOT:-/vla/users/niejunnan/codebase/Robo-Dopam
 MODEL_PATH="${MODEL_PATH:-/vla/users/niejunnan/assets/Robo-Dopamine-GRM-2.0-4B-Preview}"
 GOAL_DATASET="${GOAL_DATASET:-/vla/users/niejunnan/datasets/libero_lerobot}"
 HOST="${HOST:-127.0.0.1}"
-PORT="${PORT:-50052}"
+PORT="${PORT:-52000}"
 GPU="${GPU:-0}"
-OUT_ROOT="${OUT_ROOT:-/tmp/robodopamine_rlpd_reward_http}"
+DEFAULT_OUT_ROOT="/dev/shm/robodopamine_rlpd_reward_http"
+if [[ ! -d "/dev/shm" ]]; then
+  DEFAULT_OUT_ROOT="/tmp/robodopamine_rlpd_reward_http"
+fi
+OUT_ROOT="${OUT_ROOT:-$DEFAULT_OUT_ROOT}"
+FORWARD_BATCH_SIZE="${FORWARD_BATCH_SIZE:-8}"
 VLLM_ATTENTION_BACKEND="${VLLM_ATTENTION_BACKEND:-TORCH_SDPA}"
 
 export PYTHONUNBUFFERED=1
@@ -30,6 +35,6 @@ CUDA_VISIBLE_DEVICES="$GPU" "$PYTHON_BIN" "$ROOT/scripts/serve_robodopamine_prog
   --image-preprocess none \
   --goal-image-preprocess none \
   --eval-modes forward \
-  --batch-size 1 \
+  --batch-size "$FORWARD_BATCH_SIZE" \
   --goal-dataset "$GOAL_DATASET" \
   --out-root "$OUT_ROOT"
