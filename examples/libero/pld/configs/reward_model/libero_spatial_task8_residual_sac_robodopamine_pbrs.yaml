@@ -129,7 +129,7 @@ reward:
     - image_rgb_1
   async:
     max_pending_chunks: 128
-    batch_size: 1
+    batch_size: 8
     max_wait_ms: 5
 
 runtime:
