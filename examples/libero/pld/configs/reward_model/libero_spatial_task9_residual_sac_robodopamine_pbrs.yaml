@@ -102,7 +102,7 @@ algorithm:
   torch_compile_dynamic: false
   discount: 0.99
   tau: 0.005
-  init_temperature: 0.01
+  init_temperature: 1.0
   target_entropy: null
   backup_entropy: false
   utd_ratio: 4
