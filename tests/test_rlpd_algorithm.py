@@ -6,7 +6,8 @@ import numpy as np
 import pytest
 from omegaconf import OmegaConf
 
-from examples.libero.rlpd.async_eval import start_async_eval_worker
+from examples.libero.common.async_eval import start_async_eval_worker
+from examples.libero.common import eval_queue
 from examples.libero.rlpd.config import validate_rlpd_cfg
 from examples.libero.rlpd.scripts.train_rlpd import _learner_should_stop
 from vla_rl.algorithms.rlpd import SACAgent
@@ -94,7 +95,7 @@ def test_rlpd_async_eval_allows_local_env_without_remote_env(monkeypatch, tmp_pa
         captured["env"] = env
         return FakeProc(), worker_log_path.open("a", encoding="utf-8")
 
-    monkeypatch.setattr("examples.libero.rlpd.async_eval.launch_async_eval_worker", fake_launch_async_eval_worker)
+    monkeypatch.setattr("examples.libero.common.async_eval.launch_async_eval_worker", fake_launch_async_eval_worker)
 
     runtime = OmegaConf.create(
         {
@@ -106,7 +107,7 @@ def test_rlpd_async_eval_allows_local_env_without_remote_env(monkeypatch, tmp_pa
             }
         }
     )
-    async_eval = start_async_eval_worker(runtime, run_dir=tmp_path)
+    async_eval = start_async_eval_worker(runtime, run_dir=tmp_path, algorithm="rlpd")
     try:
         assert async_eval.enabled is True
         assert captured["env"]["CUDA_VISIBLE_DEVICES"] == "2"
@@ -116,9 +117,7 @@ def test_rlpd_async_eval_allows_local_env_without_remote_env(monkeypatch, tmp_pa
             async_eval.worker_log_fp.close()
 
 
-def test_rlpd_eval_queue_request_uses_local_env_without_env_url(monkeypatch, tmp_path: Path) -> None:
-    from examples.libero.rlpd.scripts import process_eval_queue
-
+def test_rlpd_eval_queue_request_uses_local_env_without_env_url(tmp_path: Path) -> None:
     checkpoint_path = tmp_path / "checkpoint.pt"
     checkpoint_path.write_bytes(b"placeholder")
     output_dir = tmp_path / "eval_run"
@@ -132,8 +131,6 @@ def test_rlpd_eval_queue_request_uses_local_env_without_env_url(monkeypatch, tmp
         seen["output_dir"] = str(output_dir)
         return {"success_rate": 0.5, "avg_return": 1.0, "avg_length": 2.0, "episodes": episodes}
 
-    monkeypatch.setattr(process_eval_queue, "run_eval", fake_run_eval)
-
     base_cfg = OmegaConf.create(
         {
             "env": {"_target_": "vla_rl.envs.libero.LiberoLocalEnvBackend", "task_suite_name": "libero_spatial", "task_id": 0},
@@ -142,7 +139,7 @@ def test_rlpd_eval_queue_request_uses_local_env_without_env_url(monkeypatch, tmp
             "rlpd_observation": {"image_keys": ["image_rgb_0", "image_rgb_1"]},
         }
     )
-    result = process_eval_queue._run_request(
+    result = eval_queue._run_request(
         base_cfg,
         {
             "eval_index": 3,
@@ -153,6 +150,8 @@ def test_rlpd_eval_queue_request_uses_local_env_without_env_url(monkeypatch, tmp
             "max_env_steps_per_episode": 1,
             "save_videos": False,
         },
+        spec=eval_queue.EVAL_QUEUE_SPECS["rlpd"],
+        run_eval=fake_run_eval,
     )
 
     assert result["status"] == "ok"

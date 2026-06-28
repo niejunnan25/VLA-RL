@@ -57,7 +57,6 @@ def test_hil_serl_wandb_filter_keeps_readable_rlt_aliases() -> None:
         "learner/bc_loss": 0.4,
         "eval/train_episode": 50,
         "eval/success_rate": 0.5,
-        "eval/episodes_run": 10,
     }
 
 

@@ -209,16 +209,14 @@ def test_pld_config_validation_rejects_horizon_mismatch():
     with pytest.raises(ValueError, match="chunk_horizon must match runtime.execute_horizon"):
         pld_config.validate_pld_cfg(cfg)
 
-def test_pld_agent_actor_updates_after_configured_critic_steps():
+def test_pld_agent_update_runs_actor_and_reports_critic_steps():
     agent = make_agent()
-    agent.critic_actor_ratio = 2
     batch = RolloutBatch(transitions=[make_transition(False) for _ in range(2)])
 
-    first = agent.update(batch)
-    second = agent.update(batch)
+    info = agent.update(batch)
 
-    assert "loss_actor" not in first
-    assert set(second) >= {"loss_critic", "loss_actor", "temperature", "updates"}
+    assert set(info) >= {"loss_critic", "loss_actor", "temperature", "updates", "critic_steps"}
+    assert info["critic_steps"] == 1.0
 
 
 def test_pld_actor_weight_sync_roundtrip():

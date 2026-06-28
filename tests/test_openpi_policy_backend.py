@@ -1,5 +1,4 @@
 import numpy as np
-import pytest
 
 from vla_rl.data import Observation
 from vla_rl.policies.openpi import OpenPIBackend
@@ -101,7 +100,10 @@ def test_openpi_observation_raw_override():
     assert policy.last_obs == {"custom": True}
 
 
-def test_openpi_missing_predict_action_with_features_has_clear_error():
+def test_openpi_missing_predict_action_with_features_returns_action_only_features():
     backend = OpenPIBackend(config_name="pi05_libero", checkpoint_path="/tmp/ckpt", policy=NoFeaturePolicy())
-    with pytest.raises(AttributeError, match="predict_action_with_features"):
-        backend.extract_features(make_obs())
+    features = backend.extract_features(make_obs())
+
+    assert features.reference_actions.shape == (2, 32)
+    assert features.embeddings == {}
+    assert features.metadata["feature_mode"] == "reference_actions_only"

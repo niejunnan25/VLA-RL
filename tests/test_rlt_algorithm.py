@@ -279,7 +279,7 @@ def test_launch_async_eval_worker_accepts_worker_env(monkeypatch, tmp_path: Path
 
 
 def test_start_async_eval_worker_allows_local_env_without_env_url(monkeypatch, tmp_path: Path):
-    from examples.libero.rlt.async_eval import start_async_eval_worker
+    from examples.libero.common.async_eval import start_async_eval_worker
 
     captured = {}
 
@@ -291,7 +291,7 @@ def test_start_async_eval_worker_allows_local_env_without_env_url(monkeypatch, t
         captured["env"] = env
         return FakeProc(), worker_log_path.open("a", encoding="utf-8")
 
-    monkeypatch.setattr("examples.libero.rlt.async_eval.launch_async_eval_worker", fake_launch_async_eval_worker)
+    monkeypatch.setattr("examples.libero.common.async_eval.launch_async_eval_worker", fake_launch_async_eval_worker)
 
     runtime = OmegaConf.create(
         {
@@ -304,11 +304,13 @@ def test_start_async_eval_worker_allows_local_env_without_env_url(monkeypatch, t
             },
         }
     )
-    async_eval = start_async_eval_worker(runtime, run_dir=tmp_path)
+    async_eval = start_async_eval_worker(runtime, run_dir=tmp_path, algorithm="rlt")
     try:
         assert async_eval.enabled is True
         assert captured["env"]["CUDA_VISIBLE_DEVICES"] == "2"
         assert captured["env"]["MUJOCO_EGL_DEVICE_ID"] == "2"
+        assert captured["cmd"][1:4] == ["-m", "examples.libero.common.eval_queue", "--algorithm"]
+        assert captured["cmd"][4] == "rlt"
     finally:
         if async_eval.worker_log_fp is not None:
             async_eval.worker_log_fp.close()

@@ -67,7 +67,10 @@ def make_pending(
     episode_id=0,
     chunk_index=0,
     discount=None,
+    critic_terminal=None,
 ):
+    if critic_terminal is None:
+        critic_terminal = bool(done or truncated)
     transition = Transition(
         obs=make_rlt_state(0.0),
         next_obs=make_rlt_state(1.0),
@@ -78,7 +81,7 @@ def make_pending(
         discount=float(0.99**2 if discount is None else discount),
         executed_steps=2,
         env_steps=2,
-        info={"critic_terminal": False},
+        info={"critic_terminal": bool(critic_terminal)},
     )
     return PendingRLTRewardTransition(
         episode_id=int(episode_id),
