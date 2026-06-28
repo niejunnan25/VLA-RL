@@ -22,10 +22,10 @@ if str(PROJECT_ROOT) not in sys.path:
 from examples.libero.rlpd.config import load_config, validate_rlpd_cfg, create_rlpd_obs_builder
 from vla_rl.algorithms.rlpd import build_rlpd_obs, write_offline_episode
 from vla_rl.data import Observation, Transition
-from vla_rl.envs.libero.observation import normalize_image
+from vla_rl.envs.libero.observation import LIBERO_OPENPI_IMAGE_PREPROCESS, normalize_image
 
 
-OFFLINE_IMAGE_PREPROCESS = "libero"
+OFFLINE_IMAGE_PREPROCESS = LIBERO_OPENPI_IMAGE_PREPROCESS
 
 
 def parse_args() -> argparse.Namespace:

@@ -65,10 +65,10 @@ def main() -> None:
                 executed_steps = assert_single_executed_step(info, context="env.step_chunk")
                 terminal = bool(done or truncated)
                 step_success = step_info_success(info)
-                critic_terminal = bool(terminal or step_success)
+                critic_terminal = bool(step_success)
                 episode_success = bool(episode_success or step_success)
                 next_direct_obs = None
-                if not terminal:
+                if not critic_terminal:
                     next_direct_obs = build_rlpd_obs(next_obs, builder=obs_builder)
                 episode.append(
                     Transition(

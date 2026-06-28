@@ -15,7 +15,7 @@ EVAL_GPU=""
 EVAL_POLICY_PORT="8999"
 TRAINER_PORT="5488"
 BROADCAST_PORT="5489"
-RUN_DIR="$ROOT/outputs/libero_spatial_task4_self_cond_512_sparse_rlt"
+RUN_DIR=""
 POLICY_ROOT="/vla/users/niejunnan/codebase/openpi-rlt-github"
 POLICY_CONFIG="pi0_libero"
 POLICY_CHECKPOINT="/vla/users/niejunnan/assets/openpi-assets/checkpoints/pi0_libero_pytorch"
@@ -39,7 +39,7 @@ Options:
   --eval-policy-port PORT      Async eval reference-policy server port.
   --trainer-port PORT          Agentlace trainer port.
   --broadcast-port PORT        Agentlace broadcast port.
-  --run-dir PATH               Run directory.
+  --run-dir PATH               Optional run directory override. Defaults to YAML runtime.run_dir.
   --python PATH                Python for actor/learner.
   --policy-python PATH         Python for reference-policy server.
   --policy-root PATH           OpenPI/other policy checkout root.
@@ -95,9 +95,12 @@ COMMON_OVERRIDES=(
   "policy.url=http://127.0.0.1:${POLICY_PORT}"
   "runtime.trainer_port=${TRAINER_PORT}"
   "runtime.broadcast_port=${BROADCAST_PORT}"
-  "runtime.run_dir=${RUN_DIR}"
   "${OVERRIDES[@]}"
 )
+
+if [[ -n "$RUN_DIR" ]]; then
+  COMMON_OVERRIDES+=("runtime.run_dir=${RUN_DIR}")
+fi
 
 if [[ "$WITH_EVAL" == "1" ]]; then
   COMMON_OVERRIDES+=(
@@ -138,5 +141,9 @@ if [[ "$WITH_EVAL" == "1" ]]; then
 fi
 echo "  learner: GPU $LEARNER_GPU, trainer=$TRAINER_PORT broadcast=$BROADCAST_PORT"
 echo "  actor:   GPU $ACTOR_GPU"
-echo "  run_dir: $RUN_DIR"
+if [[ -n "$RUN_DIR" ]]; then
+  echo "  run_dir override: $RUN_DIR"
+else
+  echo "  run_dir: from YAML runtime.run_dir"
+fi
 echo "Attach with: tmux attach -t $SESSION"

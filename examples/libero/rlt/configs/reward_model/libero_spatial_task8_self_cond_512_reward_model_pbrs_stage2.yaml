@@ -99,7 +99,7 @@ runtime:
   checkpoint_period: 2000
   actor_queue_capacity: 2000
   resume_from: null
-  run_dir: /vla/users/niejunnan/codebase/VLA-RL/outputs/libero_spatial_task8_robo-dopamine_pbrs
+  run_dir: examples/libero/rlt/outputs/libero_spatial_robo-dopamine_pbrs_300k_s0/task08
 
 wandb:
   project: vla-rl

@@ -10,7 +10,7 @@ LEARNER_GPU="0"
 EVAL_GPU=""
 TRAINER_PORT="5588"
 BROADCAST_PORT="5589"
-RUN_DIR="$ROOT/outputs/libero_spatial_task4_rlpd"
+RUN_DIR=""
 WITH_EVAL="1"
 WAIT_TIMEOUT_SEC="600"
 
@@ -32,7 +32,7 @@ Options:
   --eval-gpu ID                GPU for async eval worker and eval-local LIBERO env. Defaults to actor GPU.
   --trainer-port PORT          Agentlace trainer port.
   --broadcast-port PORT        Agentlace broadcast port.
-  --run-dir PATH               Run directory.
+  --run-dir PATH               Optional run directory override. Defaults to YAML runtime.run_dir.
   --python PATH                Python for actor/learner/eval worker.
   --wait-timeout-sec SEC       Timeout for actor waiting on trainer port.
 
@@ -74,9 +74,12 @@ if [[ -z "$EVAL_GPU" ]]; then EVAL_GPU="$ACTOR_GPU"; fi
 COMMON_OVERRIDES=(
   "runtime.trainer_port=${TRAINER_PORT}"
   "runtime.broadcast_port=${BROADCAST_PORT}"
-  "runtime.run_dir=${RUN_DIR}"
   "${OVERRIDES[@]}"
 )
+
+if [[ -n "$RUN_DIR" ]]; then
+  COMMON_OVERRIDES+=("runtime.run_dir=${RUN_DIR}")
+fi
 
 if [[ "$WITH_EVAL" == "1" ]]; then
   COMMON_OVERRIDES+=(
@@ -107,5 +110,9 @@ if [[ "$WITH_EVAL" == "1" ]]; then
 fi
 echo "  learner: GPU $LEARNER_GPU, trainer=$TRAINER_PORT broadcast=$BROADCAST_PORT"
 echo "  actor:   GPU $ACTOR_GPU"
-echo "  run_dir: $RUN_DIR"
+if [[ -n "$RUN_DIR" ]]; then
+  echo "  run_dir override: $RUN_DIR"
+else
+  echo "  run_dir: from YAML runtime.run_dir"
+fi
 echo "Attach with: tmux attach -t $SESSION"

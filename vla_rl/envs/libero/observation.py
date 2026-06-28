@@ -3,11 +3,13 @@ from __future__ import annotations
 from typing import Any
 
 import numpy as np
+from openpi_client import image_tools
 
 from vla_rl.data import Observation
 
 LIBERO_IMAGE_KEYS = ("image_rgb_0", "image_rgb_1", "image_rgb_2")
 LIBERO_STATE_DIM = 8
+LIBERO_OPENPI_IMAGE_PREPROCESS = "openpi_libero_resize_with_pad_v1"
 
 
 def build_libero_observation(
@@ -93,12 +95,22 @@ def normalize_image(image: Any, image_size: int = 224) -> np.ndarray:
         array = np.repeat(array, 3, axis=-1)
     if array.shape[-1] > 3:
         array = array[..., :3]
+    # Match OpenPI's official LIBERO eval preprocessing exactly for uint8
+    # LIBERO frames, while keeping the helper robust to float image inputs.
     if array.dtype != np.uint8:
-        array = np.clip(array, 0, 255).astype(np.uint8)
-    # LIBERO camera frames are commonly upside down relative to policy input.
-    array = array[::-1, ::-1]
-    if array.shape[:2] != (image_size, image_size):
-        array = resize_nearest(array, (image_size, image_size))
+        if np.issubdtype(array.dtype, np.floating):
+            finite = array[np.isfinite(array)]
+            max_value = float(np.max(finite)) if finite.size else 1.0
+            min_value = float(np.min(finite)) if finite.size else 0.0
+            if min_value >= -1e-6 and max_value <= 1.0 + 1e-6:
+                array = image_tools.convert_to_uint8(np.clip(array, 0.0, 1.0))
+            else:
+                array = np.rint(np.clip(array, 0.0, 255.0)).astype(np.uint8)
+        else:
+            array = np.clip(array, 0, 255).astype(np.uint8)
+    array = np.ascontiguousarray(array[::-1, ::-1])
+    array = image_tools.resize_with_pad(array, image_size, image_size)
+    array = image_tools.convert_to_uint8(array)
     return np.ascontiguousarray(array)
 
 
@@ -116,14 +128,6 @@ def quat_to_axis_angle(quat: np.ndarray) -> np.ndarray:
         return np.zeros(3, dtype=np.float32)
     axis = xyz / sin_half
     return (axis * angle).astype(np.float32)
-
-
-def resize_nearest(image: np.ndarray, size: tuple[int, int]) -> np.ndarray:
-    out_h, out_w = size
-    in_h, in_w = image.shape[:2]
-    y = np.linspace(0, in_h - 1, out_h).astype(np.int64)
-    x = np.linspace(0, in_w - 1, out_w).astype(np.int64)
-    return image[y][:, x]
 
 
 def _first_present(raw_obs: dict[str, Any], keys: tuple[str, ...], default: Any) -> Any:

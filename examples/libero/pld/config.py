@@ -58,8 +58,26 @@ def create_pld_agent(cfg: DictConfig) -> PLDSACAgent:
     )
 
 
-def predict_base_actions(reference_policy, obs: Observation, *, horizon: int, action_dim: int) -> np.ndarray:
-    base_actions = reference_policy.sample_actions(obs)
+def reference_action_policy_horizon(cfg: DictConfig) -> int:
+    section = cfg.get("reference_action", {})
+    policy_horizon = int(section.get("policy_horizon", cfg.runtime.execute_horizon))
+    if policy_horizon <= 0:
+        raise ValueError("reference_action.policy_horizon must be positive")
+    return policy_horizon
+
+
+def predict_base_actions(
+    reference_policy,
+    obs: Observation,
+    *,
+    horizon: int,
+    action_dim: int,
+    policy_horizon: int | None = None,
+) -> np.ndarray:
+    kwargs: dict[str, Any] = {}
+    if policy_horizon is not None:
+        kwargs["num_steps"] = int(policy_horizon)
+    base_actions = reference_policy.sample_actions(obs, **kwargs)
     return pld_base_action_prefix(base_actions, horizon=horizon, action_dim=action_dim)
 
 
@@ -77,6 +95,8 @@ def validate_pld_cfg(cfg: DictConfig) -> None:
         raise ValueError("pld_observation.action_dim must match algorithm.action_dim")
     if int(cfg.runtime.execute_horizon) <= 0:
         raise ValueError("runtime.execute_horizon must be positive")
+    if reference_action_policy_horizon(cfg) < int(cfg.runtime.execute_horizon):
+        raise ValueError("reference_action.policy_horizon must be >= runtime.execute_horizon")
 
 
 def _create_from_section(section: DictConfig, target_map: dict[str, Any]):

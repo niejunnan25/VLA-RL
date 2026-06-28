@@ -339,7 +339,15 @@ class AsyncRemoteProgressRewardProcessor(BaseRewardProcessor):
         for index, (pending, progress, boundary_index) in enumerate(
             zip(batch, end_progress_values, boundary_indices, strict=True)
         ):
-            terminal = bool(pending.transition.done or pending.transition.truncated)
+            # PBRS must use the same terminal/bootstrap convention as the critic
+            # target. Some chunk-level residual runs intentionally bootstrap
+            # through time-limit truncation and expose that via critic_terminal.
+            terminal = bool(
+                pending.transition.info.get(
+                    "critic_terminal",
+                    pending.transition.done or pending.transition.truncated,
+                )
+            )
             potential_discount = compute_potential_discount(
                 gamma=self.gamma,
                 executed_steps=int(pending.executed_steps),

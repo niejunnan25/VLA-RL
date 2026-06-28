@@ -9,6 +9,14 @@ from typing import Any
 import numpy as np
 
 
+_CLOUD_METRIC_EXCLUDED_KEYS = {
+    "eval/episodes_run",
+    "eval/force_zero_residual",
+    "eval/residual_l1",
+    "eval/residual_l2",
+}
+
+
 class NullWandBLogger:
     """No-op logger used when W&B-style logging is disabled."""
 
@@ -179,6 +187,8 @@ def select_hil_serl_wandb_scalars(data: dict[str, Any]) -> dict[str, Any]:
     flat = flatten_wandb_scalars(data)
     selected: dict[str, Any] = {}
     for key, value in flat.items():
+        if key in _CLOUD_METRIC_EXCLUDED_KEYS:
+            continue
         if key.startswith(("rollout/", "learner/", "eval/")):
             selected[key] = value
     return selected

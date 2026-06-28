@@ -5,11 +5,34 @@ from typing import Sequence
 
 import torch
 import torch.nn as nn
+import torch.nn.functional as F
 from torch import Tensor
 
 
+def _activation(name: str) -> nn.Module:
+    key = str(name).lower()
+    if key == "relu":
+        return nn.ReLU()
+    if key == "tanh":
+        return nn.Tanh()
+    if key in {"silu", "swish"}:
+        return nn.SiLU()
+    if key == "gelu":
+        return nn.GELU()
+    if key == "leaky_relu":
+        return nn.LeakyReLU()
+    raise ValueError(f"unsupported activation={name!r}")
+
+
 class MLP(nn.Module):
-    def __init__(self, input_dim: int, hidden_dims: Sequence[int], output_dim: int, layer_norm: bool = True) -> None:
+    def __init__(
+        self,
+        input_dim: int,
+        hidden_dims: Sequence[int],
+        output_dim: int,
+        layer_norm: bool = True,
+        activation: str = "relu",
+    ) -> None:
         super().__init__()
         layers: list[nn.Module] = []
         prev = int(input_dim)
@@ -17,7 +40,7 @@ class MLP(nn.Module):
             layers.append(nn.Linear(prev, int(hidden_dim)))
             if layer_norm:
                 layers.append(nn.LayerNorm(int(hidden_dim)))
-            layers.append(nn.ReLU())
+            layers.append(_activation(activation))
             prev = int(hidden_dim)
         layers.append(nn.Linear(prev, int(output_dim)))
         self.net = nn.Sequential(*layers)
@@ -79,6 +102,7 @@ class HFResNetImageEncoder(nn.Module):
         freeze_backbone: bool = True,
         pooling_method: str = "spatial_learned_embeddings",
         num_spatial_blocks: int = 8,
+        spatial_dropout_rate: float = 0.0,
     ) -> None:
         super().__init__()
         self.backbone = backbone
@@ -86,6 +110,7 @@ class HFResNetImageEncoder(nn.Module):
         self.freeze_backbone = bool(freeze_backbone)
         self.pooling_method = str(pooling_method)
         self.num_spatial_blocks = int(num_spatial_blocks)
+        self.spatial_dropout_rate = float(spatial_dropout_rate)
         self.spatial_pool: SpatialLearnedEmbeddings | None = None
         self.bottleneck = nn.LazyLinear(self.output_dim)
         self.register_buffer("_mean", torch.tensor(self.imagenet_mean, dtype=torch.float32).view(1, 3, 1, 1), persistent=False)
@@ -139,6 +164,8 @@ class HFResNetImageEncoder(nn.Module):
 
     def pool_features(self, features: Tensor) -> Tensor:
         pooled = self._pool(features)
+        if self.pooling_method == "spatial_learned_embeddings" and self.spatial_dropout_rate > 0.0:
+            pooled = F.dropout(pooled, p=self.spatial_dropout_rate, training=self.training)
         projected = self.bottleneck(pooled)
         projected = torch.layer_norm(projected, projected.shape[-1:])
         return torch.tanh(projected)

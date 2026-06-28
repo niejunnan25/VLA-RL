@@ -87,7 +87,7 @@ runtime:
   checkpoint_period: 2500
   actor_queue_capacity: 2000
   resume_from: null
-  run_dir: outputs/libero_spatial_task4_openpi_pld
+  run_dir: examples/libero/pld/outputs/libero_spatial_openpi_pld_300k_s0/task04
   offline_replay_path: outputs/pld_base_success/libero_spatial_task4_pi0_libero
   require_offline: true
   offline_ratio: 0.5

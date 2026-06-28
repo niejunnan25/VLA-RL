@@ -96,7 +96,7 @@ runtime:
   log_period: 50
   checkpoint_period: 2500
   actor_queue_capacity: 2000
-  run_dir: outputs/reward_model/libero_spatial_task2_rlpd_robometer_pbrs
+  run_dir: examples/libero/rlpd/outputs/reward_model/libero_spatial_rlpd_robometer_pbrs_600k_s0/task02
   offline_replay_path: outputs/rlpd_offline/libero_spatial_task2_expert_robometer_pbrs
   offline_ratio: 0.5
   offline_capacity: 100000

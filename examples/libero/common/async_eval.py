@@ -3,6 +3,7 @@ from __future__ import annotations
 import os
 from pathlib import Path
 import sys
+from typing import Literal
 
 from omegaconf import DictConfig
 
@@ -14,12 +15,32 @@ from vla_rl.runtime.async_eval import (
 )
 
 
-def start_async_eval_worker(runtime: DictConfig, *, run_dir: Path | None) -> AsyncEvalRuntime:
+AlgorithmName = Literal["pld", "rlpd", "rlt"]
+
+
+_ASYNC_EVAL_REQUIRES_POLICY_URL = {
+    "pld": True,
+    "rlpd": False,
+    "rlt": True,
+}
+
+
+def start_async_eval_worker(
+    runtime: DictConfig,
+    *,
+    run_dir: Path | None,
+    algorithm: AlgorithmName,
+) -> AsyncEvalRuntime:
+    if algorithm not in _ASYNC_EVAL_REQUIRES_POLICY_URL:
+        raise ValueError(f"unsupported async eval algorithm: {algorithm}")
+
     async_cfg = runtime.get("async_eval", None)
     if async_cfg is None or not bool(async_cfg.get("enabled", False)):
         return AsyncEvalRuntime()
     if run_dir is None:
         raise ValueError("runtime.run_dir is required when runtime.async_eval.enabled=true")
+    if _ASYNC_EVAL_REQUIRES_POLICY_URL[algorithm] and not async_cfg.get("policy_url", None):
+        raise ValueError("runtime.async_eval.policy_url is required when async eval is enabled")
 
     every_episodes = int(async_cfg.get("every_episodes", 50))
     if every_episodes <= 0:
@@ -36,11 +57,13 @@ def start_async_eval_worker(runtime: DictConfig, *, run_dir: Path | None) -> Asy
     queue_path.write_text("")
     summary_path.touch(exist_ok=True)
 
-    worker_script = Path(__file__).resolve().parent / "scripts" / "process_eval_queue.py"
     worker_proc, worker_log_fp = launch_async_eval_worker(
         cmd=[
             sys.executable,
-            str(worker_script),
+            "-m",
+            "examples.libero.common.eval_queue",
+            "--algorithm",
+            algorithm,
             "--train-config",
             str(run_dir / "config.yaml"),
             "--queue-file",
@@ -67,13 +90,17 @@ def start_async_eval_worker(runtime: DictConfig, *, run_dir: Path | None) -> Asy
     )
 
 
-def _async_eval_worker_env(async_cfg: DictConfig) -> dict[str, str] | None:
+def _async_eval_worker_env(async_cfg: DictConfig) -> dict[str, str]:
+    env = dict(os.environ)
+    project_root = Path(__file__).resolve().parents[3]
+    existing_pythonpath = env.get("PYTHONPATH", "")
+    paths = [str(project_root)]
+    if existing_pythonpath:
+        paths.append(existing_pythonpath)
+    env["PYTHONPATH"] = os.pathsep.join(paths)
+
     cuda_visible_devices = async_cfg.get("worker_cuda_visible_devices", None)
     mujoco_egl_device_id = async_cfg.get("worker_mujoco_egl_device_id", None)
-    if cuda_visible_devices is None and mujoco_egl_device_id is None:
-        return None
-
-    env = dict(os.environ)
     if cuda_visible_devices is not None:
         env["CUDA_VISIBLE_DEVICES"] = str(cuda_visible_devices)
     if mujoco_egl_device_id is not None:

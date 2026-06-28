@@ -81,7 +81,7 @@ runtime:
   log_period: 50
   checkpoint_period: 2500
   actor_queue_capacity: 2000
-  run_dir: outputs/reward_model/libero_spatial_task3_rlpd_sparse
+  run_dir: examples/libero/rlpd/outputs/reward_model/libero_spatial_rlpd_sparse_600k_s0/task03
   offline_replay_path: outputs/rlpd_offline/libero_spatial_task3_expert
   offline_ratio: 0.5
   offline_capacity: 100000

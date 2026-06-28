@@ -12,7 +12,7 @@ POLICY_GPU=""
 POLICY_PORT="8899"
 TRAINER_PORT="5488"
 BROADCAST_PORT="5489"
-RUN_DIR="$ROOT/outputs/libero_spatial_task4_openpi_pld"
+RUN_DIR=""
 COLLECT_OUTPUT_DIR=""
 TARGET_SUCCESSES="50"
 MAX_ATTEMPTS="1000"
@@ -39,7 +39,7 @@ Options:
   --policy-port PORT           Reference-policy server port.
   --trainer-port PORT          Agentlace trainer port.
   --broadcast-port PORT        Agentlace broadcast port.
-  --run-dir PATH               Training run directory.
+  --run-dir PATH               Optional run directory override. Defaults to YAML runtime.run_dir.
   --collect-output-dir PATH    Base-success replay directory.
   --target-successes N         Base-success episodes to collect.
   --max-attempts N             Collector attempt limit.
@@ -87,19 +87,68 @@ while [[ $# -gt 0 ]]; do
   esac
 done
 
+read_yaml_run_dir() {
+  "$PYTHON_BIN" - "$CONFIG" <<'PY'
+import re
+import sys
+from pathlib import Path
+
+path = Path(sys.argv[1])
+try:
+    lines = path.read_text().splitlines()
+except OSError:
+    sys.exit(0)
+
+in_runtime = False
+runtime_indent = None
+for line in lines:
+    stripped = line.strip()
+    if not stripped or stripped.startswith("#"):
+        continue
+    indent = len(line) - len(line.lstrip())
+    if re.match(r"^runtime\s*:\s*(#.*)?$", stripped):
+        in_runtime = True
+        runtime_indent = indent
+        continue
+    if in_runtime and indent <= runtime_indent and not line.lstrip().startswith("#"):
+        in_runtime = False
+    if in_runtime:
+        match = re.match(r"^run_dir\s*:\s*(.*?)\s*(#.*)?$", stripped)
+        if match:
+            value = match.group(1).strip().strip("'\\\"")
+            if value:
+                print(value)
+            break
+PY
+}
+
 if [[ -z "$POLICY_GPU" ]]; then POLICY_GPU="$ACTOR_GPU"; fi
-if [[ -z "$COLLECT_OUTPUT_DIR" ]]; then COLLECT_OUTPUT_DIR="$RUN_DIR/base_success_replay"; fi
+if [[ -z "$COLLECT_OUTPUT_DIR" ]]; then
+  if [[ -n "$RUN_DIR" ]]; then
+    COLLECT_OUTPUT_DIR="$RUN_DIR/base_success_replay"
+  else
+    YAML_RUN_DIR="$(read_yaml_run_dir)"
+    if [[ -z "$YAML_RUN_DIR" ]]; then
+      echo "ERROR: --collect-output-dir is required when neither --run-dir nor YAML runtime.run_dir is set." >&2
+      exit 2
+    fi
+    COLLECT_OUTPUT_DIR="$YAML_RUN_DIR/base_success_replay"
+  fi
+fi
 
 COMMON_OVERRIDES=(
   "policy.url=http://127.0.0.1:${POLICY_PORT}"
   "env.serl_torch_root=${SERL_TORCH_ROOT}"
   "runtime.trainer_port=${TRAINER_PORT}"
   "runtime.broadcast_port=${BROADCAST_PORT}"
-  "runtime.run_dir=${RUN_DIR}"
   "runtime.offline_replay_path=${COLLECT_OUTPUT_DIR}"
   "collect.output_dir=${COLLECT_OUTPUT_DIR}"
   "${OVERRIDES[@]}"
 )
+
+if [[ -n "$RUN_DIR" ]]; then
+  COMMON_OVERRIDES+=("runtime.run_dir=${RUN_DIR}")
+fi
 
 tmux kill-session -t "$SESSION" 2>/dev/null || true
 tmux new-session -d -s "$SESSION" -n control "cd '$ROOT' && sleep infinity"
@@ -118,5 +167,9 @@ tmux new-window -t "$SESSION" -n actor \
 
 echo "Started PLD collect-then-train tmux session: $SESSION"
 echo "  collect output: $COLLECT_OUTPUT_DIR"
-echo "  run_dir:        $RUN_DIR"
+if [[ -n "$RUN_DIR" ]]; then
+  echo "  run_dir override: $RUN_DIR"
+else
+  echo "  run_dir: from YAML runtime.run_dir"
+fi
 echo "Attach with: tmux attach -t $SESSION"

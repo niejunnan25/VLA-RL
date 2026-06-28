@@ -53,7 +53,7 @@ from examples.libero.rlt.config import (
     rlt_cfg,
     validate_rlt_cfg,
 )
-from examples.libero.rlt.async_eval import start_async_eval_worker
+from examples.libero.common.async_eval import start_async_eval_worker
 from examples.libero.rlt.learner import learner_should_stop
 from examples.libero.rlt.metrics import (
     actor_chunk_metric,
@@ -128,7 +128,7 @@ def run_learner(cfg: DictConfig) -> dict[str, Any]:
         else:
             (run_dir / "metrics.jsonl").touch(exist_ok=True)
 
-    async_eval = start_async_eval_worker(runtime, run_dir=run_dir)
+    async_eval = start_async_eval_worker(runtime, run_dir=run_dir, algorithm="rlt")
     update_steps = 0
     env_steps = 0
     episodes = 0

@@ -296,13 +296,14 @@ def relabel_episode(
     for idx in range(n_rows - 1):
         progress_step = progress_steps[idx]
         done = idx == n_rows - 2
+        critic_terminal = bool(done)
         env_reward = terminal_reward if done else step_reward
-        discount = 0.0 if done else float(gamma)
+        discount = 0.0 if critic_terminal else float(gamma)
         potential_discount = compute_potential_discount(
             gamma=float(gamma),
             executed_steps=1,
             discount=float(discount),
-            terminal=bool(done),
+            terminal=critic_terminal,
         )
         reward = compute_progress_reward(
             reward_type,
@@ -313,7 +314,7 @@ def relabel_episode(
             executed_steps=1,
             scale=float(reward_scale),
             discount=float(discount),
-            terminal=bool(done),
+            terminal=critic_terminal,
         )
         action = np.asarray(data["actions"][idx], dtype=np.float32).reshape(-1)
         if action.shape != (action_dim,):
@@ -341,7 +342,7 @@ def relabel_episode(
                 "task_id": int(task_id),
                 "task_prompt": task_prompt,
                 "expert_terminal": bool(done),
-                "critic_terminal": bool(done),
+                "critic_terminal": critic_terminal,
                 "reward_type": str(reward_type),
                 "env_reward": float(env_reward),
                 "reward_model_progress": float(progress_step.progress),

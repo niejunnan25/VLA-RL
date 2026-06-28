@@ -197,6 +197,20 @@ class OpenPIBackend(PolicyBackend):
         openpi_obs = self._to_openpi_observation(obs, task=obs.task)
         del actions
         method_name = _openpi_feature_method(feature_source)
+        if not hasattr(self.policy, method_name):
+            # Native OpenPI/JAX policies only expose infer()/infer_many(). Residual SAC only
+            # needs the frozen base action chunk, so expose action-only PolicyFeatures.
+            ref_actions = self._call_sample_actions(openpi_obs, num_steps=num_steps, **kwargs)
+            metadata = self._metadata(feature_source=feature_source)
+            metadata["feature_mode"] = "reference_actions_only"
+            features = PolicyFeatures(
+                reference_actions=self._normalize_reference_actions(ref_actions),
+                embeddings={},
+                proprio=obs.proprio.copy() if obs.proprio is not None else None,
+                metadata=metadata,
+            )
+            features.validate()
+            return features
         method = getattr(self.policy, method_name)
         out = method(openpi_obs, num_steps=num_steps, **kwargs)
         if not isinstance(out, dict) or "actions" not in out or "features" not in out:
@@ -239,7 +253,8 @@ class OpenPIBackend(PolicyBackend):
             policy = policy_config.create_trained_policy(config, self.checkpoint_path, pytorch_device=str(self.device))
         except TypeError:
             policy = policy_config.create_trained_policy(config, self.checkpoint_path)
-        if hasattr(policy, "_model") and hasattr(model_module, "Observation"):
+        is_torch_policy = bool(getattr(policy, "_is_pytorch_model", False))
+        if is_torch_policy and hasattr(policy, "_model") and hasattr(model_module, "Observation"):
             return _OpenPIBasePolicy(policy=policy, observation_cls=model_module.Observation, device=self.device)
         return policy
 
@@ -264,7 +279,12 @@ class OpenPIBackend(PolicyBackend):
         if hasattr(self.policy, "sample_actions"):
             return self.policy.sample_actions(openpi_obs, **kwargs)
         if hasattr(self.policy, "infer"):
-            result = self.policy.infer(openpi_obs, **kwargs)
+            try:
+                result = self.policy.infer(openpi_obs, **kwargs)
+            except TypeError:
+                if not kwargs:
+                    raise
+                result = self.policy.infer(openpi_obs)
             if isinstance(result, dict):
                 for key in ("actions", "action", "raw_actions"):
                     if key in result:

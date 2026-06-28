@@ -23,6 +23,7 @@ from examples.libero.pld.config import (
 )
 from vla_rl.algorithms.pld import build_pld_obs, write_pld_offline_episode
 from vla_rl.data import Transition
+from vla_rl.envs.libero.observation import LIBERO_OPENPI_IMAGE_PREPROCESS
 
 
 def parse_args() -> argparse.Namespace:
@@ -107,6 +108,7 @@ def main() -> None:
                         "attempts": attempts,
                         "successes": successes + 1,
                         "steps_written": steps_written + len(episode),
+                        "image_preprocess": LIBERO_OPENPI_IMAGE_PREPROCESS,
                     },
                 )
                 successes += 1

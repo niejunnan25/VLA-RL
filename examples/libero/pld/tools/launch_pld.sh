@@ -12,7 +12,7 @@ POLICY_GPU=""
 POLICY_PORT="8899"
 TRAINER_PORT="5488"
 BROADCAST_PORT="5489"
-RUN_DIR="$ROOT/outputs/libero_spatial_task4_openpi_pld"
+RUN_DIR=""
 SERL_TORCH_ROOT="/vla/users/niejunnan/codebase/serl_torch"
 POLICY_ROOT="/vla/users/niejunnan/codebase/openpi-rlt-github"
 POLICY_CONFIG="pi0_libero"
@@ -34,7 +34,7 @@ Options:
   --policy-port PORT           Reference-policy server port.
   --trainer-port PORT          Agentlace trainer port.
   --broadcast-port PORT        Agentlace broadcast port.
-  --run-dir PATH               Run directory.
+  --run-dir PATH               Optional run directory override. Defaults to YAML runtime.run_dir.
   --python PATH                Python for actor/learner.
   --policy-python PATH         Python for reference-policy server.
   --policy-root PATH           OpenPI/other policy checkout root.
@@ -87,9 +87,12 @@ COMMON_OVERRIDES=(
   "env.serl_torch_root=${SERL_TORCH_ROOT}"
   "runtime.trainer_port=${TRAINER_PORT}"
   "runtime.broadcast_port=${BROADCAST_PORT}"
-  "runtime.run_dir=${RUN_DIR}"
   "${OVERRIDES[@]}"
 )
+
+if [[ -n "$RUN_DIR" ]]; then
+  COMMON_OVERRIDES+=("runtime.run_dir=${RUN_DIR}")
+fi
 
 tmux kill-session -t "$SESSION" 2>/dev/null || true
 
@@ -111,5 +114,9 @@ echo "  env:     local LIBERO backend in actor process"
 echo "  policy:  GPU $POLICY_GPU, port $POLICY_PORT"
 echo "  learner: GPU $LEARNER_GPU, trainer=$TRAINER_PORT broadcast=$BROADCAST_PORT"
 echo "  actor:   GPU $ACTOR_GPU"
-echo "  run_dir: $RUN_DIR"
+if [[ -n "$RUN_DIR" ]]; then
+  echo "  run_dir override: $RUN_DIR"
+else
+  echo "  run_dir: from YAML runtime.run_dir"
+fi
 echo "Attach with: tmux attach -t $SESSION"

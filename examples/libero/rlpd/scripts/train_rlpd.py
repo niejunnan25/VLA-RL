@@ -20,7 +20,7 @@ if str(PROJECT_ROOT) not in sys.path:
 from agentlace.data.data_store import QueuedDataStore
 from agentlace.trainer import TrainerClient, TrainerConfig, TrainerServer
 
-from examples.libero.rlpd.async_eval import start_async_eval_worker
+from examples.libero.common.async_eval import start_async_eval_worker
 from examples.libero.rlpd.config import (
     create_env,
     create_rlpd_agent,
@@ -42,6 +42,7 @@ from examples.libero.rlpd.rollout import (
     step_info_success,
 )
 from vla_rl.algorithms.rlpd import build_rlpd_obs, load_offline_replay as load_rlpd_offline_replay
+from vla_rl.envs.libero.observation import LIBERO_OPENPI_IMAGE_PREPROCESS
 from vla_rl.data import MemoryEfficientReplayBuffer, MixedReplaySampler, Transition
 from vla_rl.runtime.agentlace import json_sanitize, make_agentlace_replay_store
 from vla_rl.runtime.async_eval import (
@@ -64,7 +65,7 @@ from vla_rl.runtime.wandb import make_wandb_logger
 
 
 MetricWriter = Callable[[dict[str, Any]], None]
-EXPECTED_OFFLINE_IMAGE_PREPROCESS = "libero"
+EXPECTED_OFFLINE_IMAGE_PREPROCESS = LIBERO_OPENPI_IMAGE_PREPROCESS
 
 
 ##############################################################################
@@ -157,7 +158,7 @@ def run_learner(cfg: DictConfig) -> dict[str, Any]:
                 f.write(json.dumps(sanitized, sort_keys=True) + "\n")
         wandb_logger.log(sanitized, step=update_steps)
 
-    async_eval = start_async_eval_worker(runtime, run_dir=run_dir)
+    async_eval = start_async_eval_worker(runtime, run_dir=run_dir, algorithm="rlpd")
 
     def current_env_steps(value: int) -> int:
         return max(int(value), int(replay.latest_env_steps), int(actor_done_env_steps))
@@ -537,10 +538,10 @@ def run_actor(cfg: DictConfig) -> dict[str, Any]:
             next_env_steps = int(env_steps) + int(executed_steps)
             terminal = bool(done or truncated)
             step_success = step_info_success(info)
-            critic_terminal = bool(terminal or step_success)
+            critic_terminal = bool(step_success)
 
             next_rlpd_obs = None
-            if not terminal:
+            if not critic_terminal:
                 with step_timer.context("next_build_rlpd_obs"):
                     next_rlpd_obs = build_rlpd_obs(next_obs, builder=obs_builder)
 

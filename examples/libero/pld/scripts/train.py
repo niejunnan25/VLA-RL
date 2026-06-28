@@ -26,6 +26,7 @@ from examples.libero.pld.config import (
 )
 from vla_rl.algorithms.pld import build_pld_obs, load_pld_offline_replay
 from vla_rl.data import MixedReplaySampler, ReplayBuffer, Transition
+from vla_rl.envs.libero.observation import LIBERO_OPENPI_IMAGE_PREPROCESS
 from agentlace.data.data_store import QueuedDataStore
 from agentlace.trainer import TrainerClient, TrainerConfig, TrainerServer
 
@@ -40,6 +41,9 @@ from vla_rl.runtime.run_utils import (
     save_checkpoint,
     send_actor_summary,
 )
+
+
+EXPECTED_OFFLINE_IMAGE_PREPROCESS = LIBERO_OPENPI_IMAGE_PREPROCESS
 
 
 def parse_args() -> argparse.Namespace:
@@ -516,6 +520,7 @@ def _load_offline_replay(runtime: DictConfig) -> tuple[ReplayBuffer | None, dict
         if bool(runtime.require_offline):
             raise RuntimeError("PLD requires offline replay; set runtime.offline_replay_path")
         return None, {"episodes_loaded": 0, "transitions_loaded": 0}
+    _assert_offline_replay_manifest(path)
     replay, stats = load_pld_offline_replay(
         path,
         capacity=int(runtime.offline_capacity),
@@ -526,6 +531,21 @@ def _load_offline_replay(runtime: DictConfig) -> tuple[ReplayBuffer | None, dict
     if bool(runtime.require_offline) and len(replay) == 0:
         raise RuntimeError(f"PLD offline replay is empty: {path}")
     return replay, stats
+
+
+def _assert_offline_replay_manifest(path: str | Path) -> None:
+    manifest_path = Path(path) / "manifest.json"
+    if not manifest_path.exists():
+        raise RuntimeError(f"PLD offline replay missing manifest.json: {manifest_path}")
+    payload = json.loads(manifest_path.read_text())
+    stats = payload.get("stats", {})
+    image_preprocess = stats.get("image_preprocess", None)
+    if image_preprocess != EXPECTED_OFFLINE_IMAGE_PREPROCESS:
+        raise RuntimeError(
+            f"PLD offline replay {path} was collected with image_preprocess={image_preprocess!r}; "
+            f"expected {EXPECTED_OFFLINE_IMAGE_PREPROCESS!r}. "
+            "Regenerate the PLD offline replay so offline images match online observations."
+        )
 
 
 def _learner_should_stop(*, actor_done: bool) -> bool:
