@@ -127,8 +127,8 @@ reward:
     image_keys:
     - image_rgb_0
   async:
-    max_pending_chunks: 256
-    batch_size: 8
+    max_pending_chunks: 512
+    batch_size: 1
     max_wait_ms: 5
 
 runtime:

@@ -8,7 +8,7 @@ from omegaconf import DictConfig, OmegaConf
 from vla_rl.algorithms.pld import PLDObservationBuilder, PLDSACAgent, pld_base_action_prefix
 from vla_rl.data import Observation
 from vla_rl.envs.libero import LiberoLocalEnvBackend, LiberoRemoteEnvBackend
-from vla_rl.policies import ReferencePolicyClient
+from vla_rl.policies import OpenPIWebsocketPolicyClient, ReferencePolicyClient
 
 
 def load_config(path: str, overrides: list[str]) -> DictConfig:
@@ -35,6 +35,7 @@ def create_reference_policy(cfg: DictConfig):
     return _create_from_section(
         cfg.policy,
         {
+            "vla_rl.policies.OpenPIWebsocketPolicyClient": OpenPIWebsocketPolicyClient,
             "vla_rl.policies.ReferencePolicyClient": ReferencePolicyClient,
         },
     )

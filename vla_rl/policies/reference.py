@@ -16,6 +16,9 @@ class ReferencePolicy(Protocol):
     def action_spec(self) -> ActionSpec:
         ...
 
+    def sample_actions(self, obs: Observation, **kwargs: Any) -> np.ndarray:
+        ...
+
     def predict_action_with_features(self, obs: Observation, **kwargs: Any) -> PolicyFeatures:
         ...
 
@@ -31,6 +34,9 @@ class OpenPIReferencePolicy:
 
     def action_spec(self) -> ActionSpec:
         return self.policy.action_spec()
+
+    def sample_actions(self, obs: Observation, **kwargs: Any) -> np.ndarray:
+        return self.policy.sample_actions(obs, **kwargs)
 
     def predict_action_with_features(self, obs: Observation, **kwargs: Any) -> PolicyFeatures:
         return self.policy.extract_features(obs, **kwargs)
@@ -92,10 +98,8 @@ class ReferencePolicyClient(PolicyBackend):
                 task=task,
                 raw=obs.raw,
             )
-        features = self.predict_action_with_features(obs, **kwargs)
-        if features.reference_actions is None:
-            raise RuntimeError("reference-policy server returned no reference_actions")
-        return np.asarray(features.reference_actions, dtype=np.float32)
+            kwargs = {**kwargs, "task": task}
+        return np.asarray(self.client.call("sample_actions", obs=obs, kwargs=kwargs), dtype=np.float32)
 
     def extract_features(
         self,

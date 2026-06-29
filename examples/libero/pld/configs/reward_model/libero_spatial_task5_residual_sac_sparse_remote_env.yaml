@@ -1,5 +1,6 @@
 env:
-  _target_: vla_rl.envs.libero.LiberoLocalEnvBackend
+  _target_: vla_rl.envs.libero.LiberoRemoteEnvBackend
+  url: http://127.0.0.1:36105
   task_suite_name: libero_spatial
   task_id: 5
   action_dim: 7
@@ -13,18 +14,17 @@ env:
   serl_torch_root: /vla/users/niejunnan/codebase/serl_torch
   seed: 7
   image_size: 224
-
+  timeout: 300.0
+  create_env_kwargs: null
 policy:
   _target_: vla_rl.policies.ReferencePolicyClient
-  url: http://127.0.0.1:8899
+  url: http://127.0.0.1:61905
   action_dim: 7
   timeout: 120.0
   retries: 3
   retry_sleep: 1.0
-
 reference_action:
   policy_horizon: 10
-
 pld_observation:
   _target_: vla_rl.algorithms.pld.PLDObservationBuilder
   image_keys:
@@ -33,7 +33,6 @@ pld_observation:
   action_dim: 7
   chunk_horizon: 5
   alpha: 0.2
-
 algorithm:
   _target_: vla_rl.algorithms.pld.PLDSACAgent
   image_keys:
@@ -111,32 +110,15 @@ algorithm:
   cql_n_actions: 10
   cql_temperature: 1.0
   device: cuda
-
 reward:
-  type: env_plus_potential_delta
-  source: remote_progress
-  scale: 1.0
-  initial_progress: query_start
-  remote:
-    url: http://127.0.0.1:50157
-    method: predict_progress
-    timeout: 120.0
-    retries: 1
-    retry_sleep: 0.5
-  trajectory:
-    image_keys:
-    - image_rgb_0
-  async:
-    max_pending_chunks: 512
-    batch_size: 1
-    max_wait_ms: 5
-
+  type: sparse
+  source: env
 runtime:
   backend: agentlace
   role: learner
   trainer_ip: 127.0.0.1
-  trainer_port: 5488
-  broadcast_port: 5489
+  trainer_port: 60914
+  broadcast_port: 60915
   store_name: actor_env
   actor_name: actor_env
   request_type: send-stats
@@ -153,11 +135,11 @@ runtime:
   checkpoint_period: 2500
   actor_queue_capacity: 2000
   resume_from: null
-  run_dir: examples/libero/pld/outputs/reward_model/libero_spatial_residual_sac_robometer_pbrs_300k/task05
+  run_dir: examples/libero/pld/outputs/reward_model/libero_spatial_residual_sac_sparse_remote_env_300k/task05
   offline:
     enabled: false
   async_eval:
-    enabled: true
+    enabled: false
     every_episodes: 50
     episodes: 50
     max_env_steps_per_episode: 0
@@ -168,13 +150,12 @@ runtime:
     checkpoint_dir: eval_checkpoints
     poll_interval_sec: 5.0
     policy_url: http://127.0.0.1:8999
-
 wandb:
   project: RoboReward
   entity: null
   workspace: null
-  group: online_residual_sac_libero_spatial_rm_3way_v1
-  exp_name: residual_sac_libero_spatial_t05_robometer_pbrs_s0
+  group: online_residual_sac_libero_spatial_remote_env_smoke
+  exp_name: residual_sac_libero_spatial_t05_sparse_remote_env_s0
   tags:
   - online
   - pld
@@ -182,10 +163,10 @@ wandb:
   - libero
   - libero_spatial
   - task5
-  - reward_model
-  - robometer
-  - pbrs
+  - sparse
   - seed0
+  - remote_env
+  - remote_env_smoke
   mode: online
   debug: false
   save_code: true

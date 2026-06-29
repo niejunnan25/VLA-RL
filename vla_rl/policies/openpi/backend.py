@@ -50,6 +50,49 @@ def _patch_python310_datetime_utc() -> None:
         _datetime.UTC = _datetime.timezone.utc
 
 
+OPENPI_LIBERO_OFFICIAL_DATA_KEYS = (
+    "observation/image",
+    "observation/wrist_image",
+    "observation/state",
+)
+
+OPENPI_LIBERO_OFFICIAL_KEYS = (*OPENPI_LIBERO_OFFICIAL_DATA_KEYS, "prompt")
+
+OPENPI_LIBERO_INTERNAL_KEYS = (
+    "images",
+    "image_mask",
+    "image/image_rgb_0",
+    "image/image_rgb_1",
+    "image/image_rgb_2",
+)
+
+
+def official_openpi_libero_payload(raw_obs: dict[str, Any], *, prompt: str | None = None) -> dict[str, Any]:
+    """Return the exact LIBERO payload shape used by OpenPI's official eval.
+
+    VLA-RL stores a richer internal OpenPI observation for LIBERO legacy paths.
+    When the payload is clearly a LIBERO observation, keep the official schema
+    strict so malformed payloads cannot silently fall back to sending the extra
+    internal keys that change OpenPI actions. Other OpenPI schemas, such as
+    AgiBot's left/right wrist views, pass through unchanged.
+    """
+
+    has_all_libero_data_keys = all(key in raw_obs for key in OPENPI_LIBERO_OFFICIAL_DATA_KEYS)
+    has_prompt = "prompt" in raw_obs or prompt is not None
+    if has_all_libero_data_keys and has_prompt:
+        payload = {key: raw_obs[key] for key in OPENPI_LIBERO_OFFICIAL_DATA_KEYS}
+        payload["prompt"] = prompt if prompt is not None else raw_obs["prompt"]
+        return payload
+
+    looks_like_libero = "observation/wrist_image" in raw_obs or any(key in raw_obs for key in OPENPI_LIBERO_INTERNAL_KEYS)
+    if looks_like_libero:
+        missing = [key for key in OPENPI_LIBERO_OFFICIAL_DATA_KEYS if key not in raw_obs]
+        if "prompt" not in raw_obs and prompt is None:
+            missing.append("prompt")
+        raise ValueError(f"LIBERO OpenPI payload is missing official keys: {missing}")
+    return raw_obs
+
+
 @dataclass(frozen=True)
 class _OpenPIFeatureBatch:
     prefix: torch.Tensor
@@ -128,10 +171,42 @@ class _OpenPIBasePolicy:
             reference_actions=unnorm_actions,
         )
 
-
     def sample_actions(self, raw_obs: dict[str, Any], **kwargs) -> np.ndarray:
+        # Keep action-only inference aligned with OpenPI's official LIBERO
+        # evaluation path, where the websocket server calls Policy.infer().
+        # predict_action_with_features() is reserved for RLT feature extraction
+        # and can use a different internal path in OpenPI forks.
         num_steps = int(kwargs.pop("num_steps", 10))
-        return self.infer_features(raw_obs, num_steps=num_steps).reference_actions
+        if num_steps <= 0:
+            raise ValueError(f"num_steps must be positive, got {num_steps}")
+        if kwargs:
+            raise ValueError(
+                "OpenPI action-only sample_actions only accepts num_steps; "
+                f"got unsupported kwargs={sorted(kwargs)}"
+            )
+        if not hasattr(self.policy, "infer"):
+            raise RuntimeError(
+                "OpenPI action-only sample_actions requires policy.infer(); "
+                "use extract_features() for RLT feature extraction"
+            )
+
+        result = self.policy.infer(raw_obs)
+        if isinstance(result, dict):
+            if "actions" not in result:
+                raise RuntimeError("policy.infer() must return a dict containing 'actions'")
+            result = result["actions"]
+        actions = np.asarray(result, dtype=np.float32)
+        if actions.ndim == 3:
+            if actions.shape[0] != 1:
+                raise ValueError(f"batched policy.infer() actions must have batch=1, got shape={actions.shape}")
+            actions = actions[0]
+        if actions.ndim == 1:
+            actions = actions[None, :]
+        if actions.ndim != 2:
+            raise ValueError(f"policy.infer() actions must have shape [T, D], got {actions.shape}")
+        if int(actions.shape[0]) < num_steps:
+            raise ValueError(f"policy.infer() returned {int(actions.shape[0])} actions, expected at least {num_steps}")
+        return actions[:num_steps]
 
 
 class OpenPIBackend(PolicyBackend):
@@ -164,7 +239,7 @@ class OpenPIBackend(PolicyBackend):
         return spec
 
     def sample_actions(self, obs: Observation, task: str | None = None, **kwargs) -> np.ndarray:
-        openpi_obs = self._to_openpi_observation(obs, task=task)
+        openpi_obs = self._to_openpi_observation(obs, task=task or obs.task)
         raw_actions = self._call_sample_actions(openpi_obs, **kwargs)
         return self._normalize_action_array(raw_actions)
 
@@ -263,7 +338,7 @@ class OpenPIBackend(PolicyBackend):
             raw_obs = obs.raw["openpi_observation"]
             if not isinstance(raw_obs, dict):
                 raise ValueError("Observation.raw['openpi_observation'] must be a dict")
-            return raw_obs
+            return official_openpi_libero_payload(raw_obs, prompt=task)
 
         openpi_obs: dict[str, Any] = {}
         for key, image in obs.images.items():

@@ -1,7 +1,8 @@
 env:
-  _target_: vla_rl.envs.libero.LiberoLocalEnvBackend
+  _target_: vla_rl.envs.libero.LiberoRemoteEnvBackend
+  url: http://127.0.0.1:37209
   task_suite_name: libero_spatial
-  task_id: 5
+  task_id: 9
   action_dim: 7
   resolution: 256
   num_steps_wait: 10
@@ -13,18 +14,22 @@ env:
   serl_torch_root: /vla/users/niejunnan/codebase/serl_torch
   seed: 7
   image_size: 224
-
+  timeout: 300.0
+  create_env_kwargs: null
 policy:
-  _target_: vla_rl.policies.ReferencePolicyClient
-  url: http://127.0.0.1:8899
+  _target_: vla_rl.policies.OpenPIWebsocketPolicyClient
+  url: http://127.0.0.1:62209
+  host: 127.0.0.1
+  port: 62209
   action_dim: 7
-  timeout: 120.0
-  retries: 3
-  retry_sleep: 1.0
-
+  serl_torch_root: /vla/users/niejunnan/codebase/serl_torch
+  connect_timeout_sec: 30.0
+  ping_interval_sec: 20.0
+  ping_timeout_sec: 120.0
+  reconnect_retry_count: 1
+  reconnect_retry_backoff_sec: 0.05
 reference_action:
   policy_horizon: 10
-
 pld_observation:
   _target_: vla_rl.algorithms.pld.PLDObservationBuilder
   image_keys:
@@ -33,7 +38,6 @@ pld_observation:
   action_dim: 7
   chunk_horizon: 5
   alpha: 0.2
-
 algorithm:
   _target_: vla_rl.algorithms.pld.PLDSACAgent
   image_keys:
@@ -94,8 +98,8 @@ algorithm:
   temperature_weight_decay: 0.0
   mixed_precision_enabled: true
   mixed_precision_dtype: bfloat16
-  torch_compile_enabled: true
-  torch_compile_target: actor_critic
+  torch_compile_enabled: false
+  torch_compile_target: null
   torch_compile_backend: inductor
   torch_compile_mode: default
   torch_compile_fullgraph: true
@@ -111,32 +115,15 @@ algorithm:
   cql_n_actions: 10
   cql_temperature: 1.0
   device: cuda
-
 reward:
-  type: env_plus_potential_delta
-  source: remote_progress
-  scale: 1.0
-  initial_progress: query_start
-  remote:
-    url: http://127.0.0.1:50157
-    method: predict_progress
-    timeout: 120.0
-    retries: 1
-    retry_sleep: 0.5
-  trajectory:
-    image_keys:
-    - image_rgb_0
-  async:
-    max_pending_chunks: 512
-    batch_size: 1
-    max_wait_ms: 5
-
+  type: sparse
+  source: env
 runtime:
   backend: agentlace
   role: learner
   trainer_ip: 127.0.0.1
-  trainer_port: 5488
-  broadcast_port: 5489
+  trainer_port: 63234
+  broadcast_port: 63235
   store_name: actor_env
   actor_name: actor_env
   request_type: send-stats
@@ -153,7 +140,7 @@ runtime:
   checkpoint_period: 2500
   actor_queue_capacity: 2000
   resume_from: null
-  run_dir: examples/libero/pld/outputs/reward_model/libero_spatial_residual_sac_robometer_pbrs_300k/task05
+  run_dir: examples/libero/pld/outputs/reward_model/libero_spatial_residual_sac_sparse_remote_official_ws_nocompile_300k/task09
   offline:
     enabled: false
   async_eval:
@@ -167,25 +154,31 @@ runtime:
     worker_log_file: eval_worker.log
     checkpoint_dir: eval_checkpoints
     poll_interval_sec: 5.0
-    policy_url: http://127.0.0.1:8999
-
+    policy_url: http://127.0.0.1:62209
+    env_url: http://127.0.0.1:38209
+    worker_cuda_visible_devices: 7
+    worker_mujoco_egl_device_id: 7
 wandb:
   project: RoboReward
   entity: null
   workspace: null
-  group: online_residual_sac_libero_spatial_rm_3way_v1
-  exp_name: residual_sac_libero_spatial_t05_robometer_pbrs_s0
+  group: online_residual_sac_libero_spatial_remote_official_ws_nocompile
+  exp_name: residual_sac_libero_spatial_t09_sparse_remote_official_ws_nocompile_s0
   tags:
   - online
   - pld
   - residual_sac
   - libero
   - libero_spatial
-  - task5
-  - reward_model
-  - robometer
-  - pbrs
+  - task9
+  - sparse
   - seed0
+  - remote_env
+  - async_eval
+  - nocompile
+  - official_openpi_ws
+  - ablation_2x4
+  - shared_policy_server
   mode: online
   debug: false
   save_code: true

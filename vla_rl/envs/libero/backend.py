@@ -127,7 +127,10 @@ class LiberoRemoteEnvBackend(EnvBackend):
         image_size: int = 224,
         timeout: float = 120.0,
         create_env_kwargs: dict[str, Any] | None = None,
+        serl_torch_root: str | None = None,
     ) -> None:
+        # Kept for YAML compatibility with LiberoLocalEnvBackend configs.
+        del serl_torch_root
         self.url = url
         self.task_suite_name = task_suite_name
         self.task_id = int(task_id)

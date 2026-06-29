@@ -44,6 +44,12 @@ def main() -> None:
     )
 
     def dispatch(method: str, kwargs: dict[str, Any]) -> Any:
+        if method == "sample_actions":
+            obs = kwargs.pop("obs")
+            call_kwargs = kwargs.pop("kwargs", {})
+            if kwargs:
+                call_kwargs = {**call_kwargs, **kwargs}
+            return reference_policy.sample_actions(obs, **call_kwargs)
         if method == "predict_action_with_features":
             obs = kwargs.pop("obs")
             call_kwargs = kwargs.pop("kwargs", {})

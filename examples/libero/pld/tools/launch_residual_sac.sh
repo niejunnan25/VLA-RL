@@ -23,6 +23,8 @@ POLICY_CHECKPOINT="/vla/users/niejunnan/assets/openpi-assets/serl_torch_ckpt/pi0
 ACTION_DIM="7"
 WITH_POLICY_SERVER="1"
 WAIT_TIMEOUT_SEC="600"
+POLICY_XLA_PREALLOCATE="${POLICY_XLA_PREALLOCATE:-false}"
+POLICY_XLA_MEM_FRACTION="${POLICY_XLA_MEM_FRACTION:-0.80}"
 
 usage() {
   cat <<'EOF'
@@ -98,6 +100,23 @@ done
 if [[ -z "$POLICY_GPU" ]]; then POLICY_GPU="$ACTOR_GPU"; fi
 if [[ -z "$EVAL_GPU" ]]; then EVAL_GPU="$ACTOR_GPU"; fi
 
+if [[ ! -f "$CONFIG" ]]; then
+  echo "ERROR: config not found: $CONFIG" >&2
+  exit 2
+fi
+
+if grep -q "vla_rl.policies.OpenPIWebsocketPolicyClient" "$CONFIG"; then
+  if [[ "$WITH_POLICY_SERVER" == "1" ]]; then
+    echo "ERROR: $CONFIG uses OpenPIWebsocketPolicyClient, but launch_residual_sac.sh starts the VLA-RL HTTP policy server." >&2
+    echo "Use launch_residual_sac_remote_isolated.sh --policy-mode official_ws, or pass --no-policy-server and provide an external OpenPI websocket server." >&2
+    exit 2
+  fi
+  if [[ "$WITH_EVAL" == "1" && "$EVAL_POLICY_PORT" != "$POLICY_PORT" ]]; then
+    echo "ERROR: OpenPIWebsocketPolicyClient configs cannot use launch_residual_sac.sh to start a separate eval HTTP policy server; set --eval-policy-port equal to --policy-port or use launch_residual_sac_remote_isolated.sh --policy-mode official_ws." >&2
+    exit 2
+  fi
+fi
+
 COMMON_OVERRIDES=(
   "policy.url=http://127.0.0.1:${POLICY_PORT}"
   "env.serl_torch_root=${SERL_TORCH_ROOT}"
@@ -127,12 +146,12 @@ tmux new-session -d -s "$SESSION" -n control "cd '$ROOT' && sleep infinity"
 
 if [[ "$WITH_POLICY_SERVER" == "1" ]]; then
   tmux new-window -t "$SESSION" -n policy \
-    "cd '$ROOT' && CUDA_VISIBLE_DEVICES='$POLICY_GPU' '$POLICY_PYTHON_BIN' scripts/serve_reference_policy.py --policy openpi --policy-root '$POLICY_ROOT' --config-name '$POLICY_CONFIG' --checkpoint-path '$POLICY_CHECKPOINT' --action-dim '$ACTION_DIM' --device cuda --host 127.0.0.1 --port '$POLICY_PORT'"
+    "cd '$ROOT' && CUDA_VISIBLE_DEVICES='$POLICY_GPU' XLA_PYTHON_CLIENT_PREALLOCATE='$POLICY_XLA_PREALLOCATE' XLA_PYTHON_CLIENT_MEM_FRACTION='$POLICY_XLA_MEM_FRACTION' '$POLICY_PYTHON_BIN' scripts/serve_reference_policy.py --policy openpi --policy-root '$POLICY_ROOT' --config-name '$POLICY_CONFIG' --checkpoint-path '$POLICY_CHECKPOINT' --action-dim '$ACTION_DIM' --device cuda --host 127.0.0.1 --port '$POLICY_PORT'"
 fi
 
 if [[ "$WITH_EVAL" == "1" && "$EVAL_POLICY_PORT" != "$POLICY_PORT" ]]; then
   tmux new-window -t "$SESSION" -n eval-policy \
-    "cd '$ROOT' && CUDA_VISIBLE_DEVICES='$EVAL_GPU' '$POLICY_PYTHON_BIN' scripts/serve_reference_policy.py --policy openpi --policy-root '$POLICY_ROOT' --config-name '$POLICY_CONFIG' --checkpoint-path '$POLICY_CHECKPOINT' --action-dim '$ACTION_DIM' --device cuda --host 127.0.0.1 --port '$EVAL_POLICY_PORT'"
+    "cd '$ROOT' && CUDA_VISIBLE_DEVICES='$EVAL_GPU' XLA_PYTHON_CLIENT_PREALLOCATE='$POLICY_XLA_PREALLOCATE' XLA_PYTHON_CLIENT_MEM_FRACTION='$POLICY_XLA_MEM_FRACTION' '$POLICY_PYTHON_BIN' scripts/serve_reference_policy.py --policy openpi --policy-root '$POLICY_ROOT' --config-name '$POLICY_CONFIG' --checkpoint-path '$POLICY_CHECKPOINT' --action-dim '$ACTION_DIM' --device cuda --host 127.0.0.1 --port '$EVAL_POLICY_PORT'"
 elif [[ "$WITH_EVAL" == "1" ]]; then
   echo "Reusing reference-policy server for async eval on port $POLICY_PORT"
 fi
