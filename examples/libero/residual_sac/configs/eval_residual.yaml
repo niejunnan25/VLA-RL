@@ -31,7 +31,7 @@ obs:
   stack_horizon: 1
 
 residual:
-  alpha: 0.35
+  alpha: 0.2
   action_mask: [true, true, true, true, true, true, true]
   action_limits: [1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0]
   clip_gripper: true
@@ -93,6 +93,7 @@ eval:
   deterministic: true
   checkpoint_path: null
   checkpoint_step: null
+  force_zero_residual: false
 
 logging:
   episode_log_file: episode_logs.jsonl

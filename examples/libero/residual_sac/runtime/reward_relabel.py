@@ -3,17 +3,25 @@ from __future__ import annotations
 """State-potential reward relabeling for LIBERO online residual RL."""
 
 from dataclasses import dataclass
+from dataclasses import replace
 import io
 import logging
+import queue
+import threading
 import math
 import time
+import uuid
 from typing import Any
+from typing import Callable
 from typing import Mapping
 from typing import Sequence
 
 import numpy as np
 
 from examples.libero.residual_sac.config import RewardConfig
+from examples.libero.residual_sac.env.observation import build_libero_state
+from examples.libero.residual_sac.env.observation import extract_libero_images
+from vla_rl.rewards.progress import RemoteProgressClient
 
 _VALID_TRANSFORMS = {
     "env_only",
@@ -26,6 +34,7 @@ _VALID_TRANSFORMS = {
     "env_plus_potential_delta",
 }
 _PROTO_CLASSES: tuple[type[Any], type[Any]] | None = None
+MetricWriter = Callable[[dict[str, Any]], None]
 
 
 @dataclass(frozen=True)
@@ -119,7 +128,12 @@ class RewardRelabelGrpcClient:
         episode_id: str,
         language_instruction: str,
         trajectory_start_idx: int,
+        done: bool = False,
+        truncated: bool = False,
+        session_id: str | None = None,
+        task_id: int | None = None,
     ) -> RemoteRewardResult:
+        del done, truncated, session_id, task_id
         if not states:
             raise RewardRelabelError("cannot query potentials for an empty state sequence")
         if not query_indices:
@@ -177,6 +191,110 @@ class RewardRelabelGrpcClient:
             success_probs=[float(value) for value in response.success_probs],
             message=str(response.message),
         )
+
+
+class RewardRelabelHttpClient:
+    """HTTP client for adapters exposing absolute trajectory progress."""
+
+    def __init__(
+        self,
+        *,
+        url: str,
+        method: str,
+        timeout_sec: float,
+        max_retries: int,
+        retry_backoff_sec: float,
+    ) -> None:
+        self.url = str(url)
+        self.method = str(method)
+        self._client = RemoteProgressClient(
+            self.url,
+            method=self.method,
+            timeout=float(timeout_sec),
+            retries=int(max_retries),
+            retry_sleep=float(retry_backoff_sec),
+        )
+
+    def close(self) -> None:
+        self._client.close()
+
+    def query_potentials(
+        self,
+        *,
+        states: Sequence[_TrajectoryState],
+        query_indices: Sequence[int],
+        episode_id: str,
+        language_instruction: str,
+        trajectory_start_idx: int,
+        done: bool = False,
+        truncated: bool = False,
+        session_id: str | None = None,
+        task_id: int | None = None,
+    ) -> RemoteRewardResult:
+        if not states:
+            raise RewardRelabelError("cannot query potentials for an empty state sequence")
+        if not query_indices:
+            raise RewardRelabelError("cannot query an empty state index set")
+
+        trajectory_indices = [int(state.step_in_episode) for state in states]
+        trajectory = [
+            _state_to_reward_payload(state, task_prompt=str(language_instruction))
+            for state in states
+        ]
+        query_indices = [int(index) for index in query_indices]
+        absolute_query_indices = [trajectory_indices[int(index)] for index in query_indices]
+        resolved_session_id = None if session_id is None else str(session_id)
+        resolved_task_id = None if task_id is None else int(task_id)
+        metadata = {
+            "episode_id": str(episode_id),
+            "task": str(language_instruction),
+            "done": bool(done),
+            "truncated": bool(truncated),
+            "trajectory_indices": trajectory_indices,
+            "absolute_query_indices": absolute_query_indices,
+        }
+        if resolved_session_id:
+            metadata["session_id"] = resolved_session_id
+        if resolved_task_id is not None:
+            metadata["task_id"] = int(resolved_task_id)
+        request = {
+            "episode_id": str(episode_id),
+            "task": str(language_instruction),
+            "trajectory": trajectory,
+            "trajectory_indices": trajectory_indices,
+            "query_indices": query_indices,
+            "absolute_query_indices": absolute_query_indices,
+            "trajectory_start_idx": int(trajectory_start_idx),
+            "metadata": metadata,
+        }
+        if resolved_session_id:
+            request["session_id"] = resolved_session_id
+        progress = self._client.predict_progress(
+            request,
+            expected_count=len(query_indices),
+        )
+        return RemoteRewardResult(
+            progress_by_key={"progress": [float(value) for value in progress]},
+            rewards=[float(value) for value in progress],
+            success_probs=[],
+            message="",
+        )
+
+
+def _state_to_reward_payload(
+    state: _TrajectoryState,
+    *,
+    task_prompt: str,
+) -> dict[str, Any]:
+    obs = dict(state.obs)
+    return {
+        "images": {
+            key: np.asarray(value).copy()
+            for key, value in extract_libero_images(obs).items()
+        },
+        "proprio": build_libero_state(obs).astype(np.float32, copy=True),
+        "task": str(task_prompt),
+    }
 
 
 def _dynamic_reward_proto_classes() -> tuple[type[Any], type[Any]]:
@@ -397,6 +515,37 @@ def _copy_chunk_result(chunk_result: Mapping[str, Any]) -> dict[str, Any]:
     return copied
 
 
+def _chunk_potential_boundary(
+    *,
+    copied: Mapping[str, Any],
+    executed_steps: int,
+) -> bool:
+    """Return whether PBRS should zero the next-state potential.
+
+    PLD labels one chunk-level transition and uses ``critic_terminal`` to decide
+    whether Phi(next) is bootstrapped. residual_sac env chunks do not always
+    provide that field, so the fallback mirrors residual_sac's current chunk
+    replay bootstrap boundary: success/env_done/done/truncated.
+    """
+
+    final_info = dict(copied.get("info", {}) or {})
+    infos = [dict(info) for info in list(copied.get("infos", ()))[: int(executed_steps)]]
+    for info in [final_info, *reversed(infos)]:
+        if "critic_terminal" in info:
+            return bool(info.get("critic_terminal"))
+    for info in [final_info, *infos]:
+        if (
+            bool(info.get("env_done", False))
+            or bool(info.get("success", False))
+            or bool(info.get("chunk_success", False))
+        ):
+            return True
+    dones = list(copied.get("dones", ()))
+    if dones and bool(dones[min(len(dones), int(executed_steps)) - 1]):
+        return True
+    return bool(copied.get("done", False) or copied.get("truncated", False))
+
+
 def _select_potentials(
     *,
     result: RemoteRewardResult,
@@ -514,20 +663,40 @@ class RemoteRewardRelabeler(BaseRewardRelabeler):
         cfg: RewardConfig,
         *,
         logger: logging.Logger | None = None,
-        client: RewardRelabelGrpcClient | None = None,
+        client: RewardRelabelGrpcClient | RewardRelabelHttpClient | None = None,
+        progress_event_writer: MetricWriter | None = None,
     ) -> None:
         super().__init__(cfg, logger=logger)
-        self._client = client or RewardRelabelGrpcClient(
-            address=str(cfg.remote.address),
-            timeout_sec=float(cfg.remote.timeout_sec),
-            max_message_mb=int(cfg.remote.max_message_mb),
-            max_retries=int(cfg.remote.max_retries),
-            retry_backoff_sec=float(cfg.remote.retry_backoff_sec),
-            max_retry_backoff_sec=float(cfg.remote.max_retry_backoff_sec),
-        )
+        self._progress_event_writer = progress_event_writer
+        transport = str(getattr(cfg.remote, "transport", "grpc"))
+        if client is not None:
+            self._client = client
+        elif transport == "http":
+            if cfg.remote.url is None:
+                raise RewardRelabelError(
+                    "reward.remote.url is required when reward.remote.transport=http"
+                )
+            self._client = RewardRelabelHttpClient(
+                url=str(cfg.remote.url),
+                method=str(cfg.remote.method),
+                timeout_sec=float(cfg.remote.timeout_sec),
+                max_retries=int(cfg.remote.max_retries),
+                retry_backoff_sec=float(cfg.remote.retry_backoff_sec),
+            )
+        else:
+            self._client = RewardRelabelGrpcClient(
+                address=str(cfg.remote.address),
+                timeout_sec=float(cfg.remote.timeout_sec),
+                max_message_mb=int(cfg.remote.max_message_mb),
+                max_retries=int(cfg.remote.max_retries),
+                retry_backoff_sec=float(cfg.remote.retry_backoff_sec),
+                max_retry_backoff_sec=float(cfg.remote.max_retry_backoff_sec),
+            )
+        endpoint = str(cfg.remote.url or cfg.remote.address)
         self._episode_id = ""
         self._task_prompt = ""
         self._task_id = 0
+        self._session_id = uuid.uuid4().hex
         self._states: list[_TrajectoryState] = []
         self._potentials: dict[int, float] = {}
         self._last_potential = 0.0
@@ -537,7 +706,15 @@ class RemoteRewardRelabeler(BaseRewardRelabeler):
             "name": str(cfg.name),
             "transform": str(cfg.transform),
             "discount": float(cfg.discount),
+            "transport": str(getattr(cfg.remote, "transport", "grpc")),
             "address": str(cfg.remote.address),
+            "url": cfg.remote.url,
+            "method": str(getattr(cfg.remote, "method", "predict_progress")),
+            "endpoint": endpoint,
+            "session_id": self._session_id,
+            "async_enabled": bool(cfg.async_config.enabled),
+            "async_batch_size": int(cfg.async_config.batch_size),
+            "async_max_pending_chunks": int(cfg.async_config.max_pending_chunks),
             "compact_transitions": bool(getattr(cfg.remote, "compact_transitions", False)),
             "chunks_relabelled": 0,
             "steps_relabelled": 0,
@@ -552,6 +729,7 @@ class RemoteRewardRelabeler(BaseRewardRelabeler):
             "last_progress": 0.0,
             "last_potential": 0.0,
             "last_error": None,
+            "progress_event_write_failed": 0,
         }
         self.logger.info(
             "reward relabel enabled: source=%s name=%s transform=%s discount=%.4f endpoint=%s",
@@ -559,7 +737,7 @@ class RemoteRewardRelabeler(BaseRewardRelabeler):
             str(cfg.name),
             str(cfg.transform),
             float(cfg.discount),
-            str(cfg.remote.address),
+            endpoint,
         )
 
     @property
@@ -708,19 +886,22 @@ class RemoteRewardRelabeler(BaseRewardRelabeler):
         for prepared in prepared_chunks:
             start_state_idx = int(prepared["start_state_idx"])
             executed_steps = int(prepared["executed_steps"])
-            for local_idx in range(executed_steps):
-                before_idx = int(start_state_idx) + int(local_idx)
-                after_idx = before_idx + 1
-                if before_idx not in self._potentials:
-                    needed_indices.append(before_idx)
-                if after_idx not in self._potentials:
-                    needed_indices.append(after_idx)
+            end_state_idx = int(start_state_idx) + int(executed_steps)
+            if start_state_idx not in self._potentials:
+                needed_indices.append(start_state_idx)
+            if end_state_idx not in self._potentials:
+                needed_indices.append(end_state_idx)
         query_indices = sorted(set(needed_indices))
 
         fallback_to_env = False
         rpc_sec = 0.0
         rpc_state_count = 0
         rpc_query_count = 0
+        rpc_trajectory_indices: list[int] = []
+        rpc_query_indices_for_log: list[int] = []
+        rpc_absolute_query_indices: list[int] = []
+        batch_done = any(bool(prepared["copied"].get("done", False)) for prepared in prepared_chunks)
+        batch_truncated = any(bool(prepared["copied"].get("truncated", False)) for prepared in prepared_chunks)
         try:
             if query_indices:
                 (
@@ -731,12 +912,24 @@ class RemoteRewardRelabeler(BaseRewardRelabeler):
                 rpc_state_count = len(rpc_states)
                 rpc_query_count = len(rpc_query_indices)
                 rpc_start = time.perf_counter()
+                rpc_trajectory_indices = [
+                    int(state.step_in_episode) for state in rpc_states
+                ]
+                rpc_query_indices_for_log = [int(index) for index in rpc_query_indices]
+                rpc_absolute_query_indices = [
+                    rpc_trajectory_indices[int(index)]
+                    for index in rpc_query_indices_for_log
+                ]
                 remote_result = self._client.query_potentials(
                     states=rpc_states,
                     query_indices=rpc_query_indices,
                     episode_id=self._episode_id,
                     language_instruction=self._task_prompt,
                     trajectory_start_idx=rpc_trajectory_start_idx,
+                    done=bool(batch_done),
+                    truncated=bool(batch_truncated),
+                    session_id=self._session_id,
+                    task_id=int(self._task_id),
                 )
                 rpc_sec = time.perf_counter() - rpc_start
                 potentials = _select_potentials(
@@ -769,48 +962,55 @@ class RemoteRewardRelabeler(BaseRewardRelabeler):
             steps = list(prepared["steps"])
             executed_steps = int(prepared["executed_steps"])
             start_state_idx = int(prepared["start_state_idx"])
-            env_rewards = [
-                float(value) for value in list(prepared["env_rewards"])
-            ]
+            end_state_idx = int(start_state_idx) + int(executed_steps)
+            env_rewards = [float(value) for value in list(prepared["env_rewards"])]
+            chunk_env_reward = _finite_float(
+                copied.get(
+                    "env_reward_sum",
+                    copied.get("reward_sum", float(sum(env_rewards))),
+                ),
+                field_name="chunk env reward",
+            )
 
-            relabeled_rewards: list[float] = []
-            reward_model_components: list[float] = []
-            potential_before_values: list[float] = []
-            potential_after_values: list[float] = []
-            for local_idx, env_reward in enumerate(env_rewards):
-                before_idx = int(start_state_idx) + int(local_idx)
-                after_idx = before_idx + 1
-                potential_before = float(
-                    self._potentials.get(before_idx, self._last_potential)
+            potential_before = float(
+                self._potentials.get(start_state_idx, self._last_potential)
+            )
+            potential_after = float(
+                self._potentials.get(end_state_idx, potential_before)
+            )
+            reward_terminal = _chunk_potential_boundary(
+                copied=copied,
+                executed_steps=int(executed_steps),
+            )
+            potential_discount = (
+                0.0
+                if bool(reward_terminal)
+                else float(self.cfg.discount) ** int(executed_steps)
+            )
+
+            if fallback_to_env:
+                chunk_reward = float(chunk_env_reward)
+                chunk_component = 0.0
+            else:
+                chunk_reward, chunk_component = _apply_reward_transform(
+                    transform=str(self.cfg.transform),
+                    potential_before=float(potential_before),
+                    potential_after=float(potential_after),
+                    env_reward=float(chunk_env_reward),
+                    discount=float(potential_discount),
+                    scale=float(self.cfg.scale),
+                    shift=float(self.cfg.shift),
+                    clip_min=self.cfg.clip_min,
+                    clip_max=self.cfg.clip_max,
                 )
-                potential_after = float(
-                    self._potentials.get(after_idx, potential_before)
-                )
-                potential_before_values.append(float(potential_before))
-                potential_after_values.append(float(potential_after))
+            self._last_potential = float(potential_after)
 
-                if fallback_to_env:
-                    reward = float(env_reward)
-                    component = 0.0
-                else:
-                    reward, component = _apply_reward_transform(
-                        transform=str(self.cfg.transform),
-                        potential_before=float(potential_before),
-                        potential_after=float(potential_after),
-                        env_reward=float(env_reward),
-                        discount=float(self.cfg.discount),
-                        scale=float(self.cfg.scale),
-                        shift=float(self.cfg.shift),
-                        clip_min=self.cfg.clip_min,
-                        clip_max=self.cfg.clip_max,
-                    )
-                relabeled_rewards.append(float(reward))
-                reward_model_components.append(float(component))
-            if potential_after_values:
-                self._last_potential = float(potential_after_values[-1])
-
-            relabeled_steps: list[dict[str, Any]] = []
+            relabeled_rewards = [float(chunk_reward)] + [0.0] * max(
+                0,
+                int(executed_steps) - 1,
+            )
             relabeled_infos: list[dict[str, Any]] = []
+            relabeled_steps: list[dict[str, Any]] = []
             for local_idx in range(executed_steps):
                 step = dict(steps[local_idx])
                 info = dict(copied["infos"][local_idx])
@@ -821,21 +1021,18 @@ class RemoteRewardRelabeler(BaseRewardRelabeler):
                         "env_reward": float(env_rewards[local_idx]),
                         "reward_source": str(self.cfg.name),
                         "reward_transform": str(self.cfg.transform),
-                        "reward_model_progress": float(
-                            potential_after_values[local_idx]
-                        ),
-                        "reward_model_previous_progress": float(
-                            potential_before_values[local_idx]
-                        ),
-                        "reward_model_potential_before": float(
-                            potential_before_values[local_idx]
-                        ),
-                        "reward_model_potential_after": float(
-                            potential_after_values[local_idx]
-                        ),
-                        "reward_model_component": float(
-                            reward_model_components[local_idx]
-                        ),
+                        "reward_relabel_granularity": "chunk",
+                        "reward_model_progress": float(potential_after),
+                        "reward_model_previous_progress": float(potential_before),
+                        "reward_model_potential_before": float(potential_before),
+                        "reward_model_potential_after": float(potential_after),
+                        "reward_model_component": float(chunk_component),
+                        "reward_potential_discount": float(potential_discount),
+                        "reward_model_terminal": bool(reward_terminal),
+                        "critic_terminal": bool(reward_terminal),
+                        "chunk_env_reward": float(chunk_env_reward),
+                        "chunk_relabeled_reward": float(chunk_reward),
+                        "chunk_executed_steps": int(executed_steps),
                         "relabeled_reward": float(relabeled_rewards[local_idx]),
                     }
                 )
@@ -845,27 +1042,60 @@ class RemoteRewardRelabeler(BaseRewardRelabeler):
                 relabeled_steps.append(step)
                 relabeled_infos.append(step_info)
 
+            self._write_progress_event(
+                episode_step_start=int(prepared["episode_step_start"]),
+                local_idx=int(executed_steps) - 1,
+                env_reward=float(chunk_env_reward),
+                relabeled_reward=float(chunk_reward),
+                component=float(chunk_component),
+                progress=float(potential_after),
+                previous_progress=float(potential_before),
+                potential_discount=float(potential_discount),
+                reward_terminal=bool(reward_terminal),
+                rpc_sec=float(rpc_sec),
+                rpc_trajectory_indices=rpc_trajectory_indices,
+                rpc_query_indices=rpc_query_indices_for_log,
+                rpc_absolute_query_indices=rpc_absolute_query_indices,
+                fallback_to_env=bool(fallback_to_env),
+                done=bool(copied.get("done", False)),
+                truncated=bool(copied.get("truncated", False)),
+            )
+
             copied["steps"] = relabeled_steps
             copied["rewards"] = relabeled_rewards
             copied["infos"] = relabeled_infos
-            copied["reward_sum"] = float(sum(relabeled_rewards))
+            copied["reward_sum"] = float(chunk_reward)
             copied["env_rewards"] = env_rewards
-            copied["env_reward_sum"] = float(sum(env_rewards))
+            copied["env_reward_sum"] = float(chunk_env_reward)
             copied["reward_source"] = str(self.cfg.name)
             copied["reward_transform"] = str(self.cfg.transform)
-            copied["reward_model_progress"] = potential_after_values
-            copied["reward_model_potential_before"] = potential_before_values
-            copied["reward_model_potential_after"] = potential_after_values
-            copied["reward_model_components"] = reward_model_components
+            copied["reward_relabel_granularity"] = "chunk"
+            copied["reward_model_progress"] = [float(potential_after)]
+            copied["reward_model_potential_before"] = [float(potential_before)]
+            copied["reward_model_potential_after"] = [float(potential_after)]
+            copied["reward_model_components"] = [float(chunk_component)]
+            copied["reward_potential_discounts"] = [float(potential_discount)]
+            copied["reward_model_terminals"] = [bool(reward_terminal)]
+            final_info = dict(copied.get("info", {}))
             if relabeled_infos:
-                final_info = dict(copied.get("info", {}))
                 final_info.update(relabeled_infos[-1])
-                final_info["env_reward_sum"] = float(sum(env_rewards))
-                final_info["relabeled_reward_sum"] = float(sum(relabeled_rewards))
-                copied["info"] = final_info
+            final_info.update(
+                {
+                    "env_reward_sum": float(chunk_env_reward),
+                    "relabeled_reward_sum": float(chunk_reward),
+                    "reward_model_component": float(chunk_component),
+                    "reward_model_progress": float(potential_after),
+                    "reward_model_previous_progress": float(potential_before),
+                    "reward_potential_discount": float(potential_discount),
+                    "reward_model_terminal": bool(reward_terminal),
+                    "critic_terminal": bool(reward_terminal),
+                    "reward_relabel_granularity": "chunk",
+                }
+            )
+            copied["info"] = final_info
 
-            last_env_reward_sum = float(sum(env_rewards))
-            last_model_reward_sum = float(sum(relabeled_rewards))
+            last_env_reward_sum = float(chunk_env_reward)
+            last_model_reward_sum = float(chunk_reward)
             relabeled_chunks.append(copied)
 
         self._stats["chunks_relabelled"] = int(self._stats["chunks_relabelled"]) + len(
@@ -888,6 +1118,68 @@ class RemoteRewardRelabeler(BaseRewardRelabeler):
             self._stats["last_error"] = None
         return relabeled_chunks
 
+    def _write_progress_event(
+        self,
+        *,
+        episode_step_start: int,
+        local_idx: int,
+        env_reward: float,
+        relabeled_reward: float,
+        component: float,
+        progress: float,
+        previous_progress: float,
+        potential_discount: float,
+        reward_terminal: bool,
+        rpc_sec: float,
+        rpc_trajectory_indices: Sequence[int],
+        rpc_query_indices: Sequence[int],
+        rpc_absolute_query_indices: Sequence[int],
+        fallback_to_env: bool,
+        done: bool,
+        truncated: bool,
+    ) -> None:
+        if self._progress_event_writer is None:
+            return
+        absolute_step = int(episode_step_start) + int(local_idx) + 1
+        event = {
+            "role": "reward_progress",
+            "source": "remote_progress",
+            "status": "fallback_env" if fallback_to_env else "ok",
+            "episode_id": self._episode_id,
+            "task": self._task_prompt,
+            "task_id": int(self._task_id),
+            "reward_name": str(self.cfg.name),
+            "reward_transform": str(self.cfg.transform),
+            "reward_relabel_granularity": "chunk",
+            "transport": str(getattr(self.cfg.remote, "transport", "grpc")),
+            "endpoint": str(self.cfg.remote.url or self.cfg.remote.address),
+            "episode_step": int(absolute_step),
+            "boundary_index": int(absolute_step),
+            "previous_boundary_index": int(episode_step_start),
+            "trajectory_indices": [int(index) for index in rpc_trajectory_indices],
+            "query_indices": [int(index) for index in rpc_query_indices],
+            "absolute_query_indices": [int(index) for index in rpc_absolute_query_indices],
+            "progress": float(progress),
+            "previous_progress": float(previous_progress),
+            "env_reward": float(env_reward),
+            "computed_reward": float(relabeled_reward),
+            "reward_model_component": float(component),
+            "scale": float(self.cfg.scale),
+            "discount": float(self.cfg.discount),
+            "potential_discount": float(potential_discount),
+            "reward_model_terminal": bool(reward_terminal),
+            "latency_sec": float(rpc_sec),
+            "done": bool(done),
+            "truncated": bool(truncated),
+        }
+        try:
+            self._progress_event_writer(event)
+        except Exception:
+            self._stats["progress_event_write_failed"] = int(
+                self._stats.get("progress_event_write_failed", 0)
+            ) + 1
+
+
     def finish_episode(self) -> None:
         self._states = []
         self._potentials = {}
@@ -902,24 +1194,279 @@ class RemoteRewardRelabeler(BaseRewardRelabeler):
         return dict(self._stats)
 
 
+@dataclass(frozen=True)
+class _PendingRewardChunk:
+    seq: int
+    raw: Any
+
+
+class AsyncRewardRelabelCoordinator:
+    """Background reward relabeler for chunk-level residual replay."""
+
+    def __init__(
+        self,
+        *,
+        relabeler: BaseRewardRelabeler,
+        batch_size: int,
+        max_pending_chunks: int,
+        max_wait_ms: int,
+        logger: logging.Logger | None = None,
+    ) -> None:
+        if not relabeler.enabled:
+            raise ValueError("AsyncRewardRelabelCoordinator requires an enabled relabeler")
+        self._relabeler = relabeler
+        self._batch_size = max(1, int(batch_size))
+        self._max_wait_sec = max(0.0, float(max_wait_ms) / 1000.0)
+        self._logger = logger or logging.getLogger(__name__)
+        self._queue: queue.Queue[_PendingRewardChunk | None] = queue.Queue(
+            maxsize=max(1, int(max_pending_chunks))
+        )
+        self._condition = threading.Condition()
+        self._ready: dict[int, Any] = {}
+        self._failed: BaseException | None = None
+        self._closed = False
+        self._next_submit_seq = 0
+        self._next_commit_seq = 0
+        self._last_submitted_seq: int | None = None
+        self._stats: dict[str, Any] = {
+            "async_enabled": True,
+            "async_submitted": 0,
+            "async_ready": 0,
+            "async_committed": 0,
+            "async_failed": 0,
+            "async_pending": 0,
+            "async_batch_size": int(self._batch_size),
+            "async_max_wait_ms": int(max_wait_ms),
+        }
+        self._thread = threading.Thread(
+            target=self._worker_main,
+            name="residual-sac-reward-relabel",
+            daemon=True,
+        )
+        self._thread.start()
+
+    def _pending_count_locked(self) -> int:
+        return int(self._queue.qsize() + len(self._ready))
+
+    @property
+    def pending_count(self) -> int:
+        with self._condition:
+            return self._pending_count_locked()
+
+    @property
+    def next_commit_seq(self) -> int:
+        with self._condition:
+            return int(self._next_commit_seq)
+
+    def start_episode(self, **kwargs: Any) -> None:
+        self._raise_if_failed()
+        with self._condition:
+            if self._queue.qsize() or self._ready:
+                raise RuntimeError(
+                    "cannot start a new reward episode with pending relabel work"
+                )
+            self._next_submit_seq = 0
+            self._next_commit_seq = 0
+            self._last_submitted_seq = None
+            self._stats["async_pending"] = 0
+            self._stats["async_ready"] = 0
+        self._relabeler.start_episode(**kwargs)
+
+    def submit_chunk(self, raw: Any) -> int:
+        self._raise_if_failed()
+        with self._condition:
+            if self._closed:
+                raise RuntimeError("async reward relabeler is closed")
+            seq = int(self._next_submit_seq)
+            self._next_submit_seq += 1
+            self._last_submitted_seq = seq
+        self._queue.put(_PendingRewardChunk(seq=seq, raw=raw))
+        with self._condition:
+            self._stats["async_submitted"] += 1
+            self._stats["async_pending"] = self._pending_count_locked()
+            self._condition.notify_all()
+        return seq
+
+    def pop_ready(self, *, block_until_seq: int | None = None) -> list[Any]:
+        with self._condition:
+            target_seq = None if block_until_seq is None else int(block_until_seq)
+            ready: list[Any] = []
+            while True:
+                self._raise_if_failed_locked()
+                while self._next_commit_seq in self._ready:
+                    raw = self._ready.pop(int(self._next_commit_seq))
+                    ready.append(raw)
+                    self._next_commit_seq += 1
+                if target_seq is None or self._next_commit_seq > int(target_seq):
+                    break
+                self._condition.wait(timeout=0.1)
+            self._stats["async_ready"] = len(self._ready)
+            self._stats["async_committed"] += len(ready)
+            self._stats["async_pending"] = self._pending_count_locked()
+            return ready
+
+    def finish_episode(self, *, block: bool = True) -> list[Any]:
+        last_submitted = self._last_submitted_seq
+        ready = self.pop_ready(
+            block_until_seq=(int(last_submitted) if block and last_submitted is not None else None)
+        )
+        self._relabeler.finish_episode()
+        return ready
+
+    def close(self, *, drain: bool = True) -> None:
+        if bool(drain):
+            self._queue.join()
+        with self._condition:
+            self._closed = True
+            self._condition.notify_all()
+        self._queue.put(None)
+        self._thread.join(timeout=30.0)
+        self._relabeler.close()
+        self._raise_if_failed()
+
+    def status_snapshot(self) -> dict[str, Any]:
+        status = dict(self._relabeler.status_snapshot())
+        with self._condition:
+            status.update(self._stats)
+            status["async_pending"] = self._pending_count_locked()
+            status["async_ready"] = len(self._ready)
+            status["async_next_submit_seq"] = int(self._next_submit_seq)
+            status["async_next_commit_seq"] = int(self._next_commit_seq)
+        return status
+
+    def _worker_main(self) -> None:
+        while True:
+            item = self._queue.get()
+            if item is None:
+                self._queue.task_done()
+                return
+            batch = [item]
+            deadline = time.perf_counter() + self._max_wait_sec
+            while len(batch) < self._batch_size:
+                timeout = 0.0
+                if self._max_wait_sec > 0.0:
+                    timeout = max(0.0, deadline - time.perf_counter())
+                    if timeout <= 0.0:
+                        break
+                try:
+                    if self._max_wait_sec > 0.0:
+                        next_item = self._queue.get(timeout=timeout)
+                    else:
+                        next_item = self._queue.get_nowait()
+                except queue.Empty:
+                    break
+                if next_item is None:
+                    self._queue.task_done()
+                    self._queue.put(None)
+                    break
+                batch.append(next_item)
+            try:
+                chunk_specs = [
+                    (_chunk_result_from_record(pending.raw), int(pending.raw.episode_step_start))
+                    for pending in batch
+                ]
+                relabeled = self._relabeler.relabel_chunk_batch(chunk_specs)
+                if len(relabeled) != len(batch):
+                    raise RewardRelabelError(
+                        "async reward relabel returned mismatched batch length: "
+                        f"got {len(relabeled)} expected {len(batch)}"
+                    )
+                with self._condition:
+                    for pending, chunk_result in zip(batch, relabeled, strict=True):
+                        self._ready[int(pending.seq)] = _record_with_chunk_result(
+                            pending.raw,
+                            chunk_result,
+                        )
+                    self._stats["async_ready"] = len(self._ready)
+                    self._stats["async_pending"] = self._pending_count_locked()
+                    self._condition.notify_all()
+            except BaseException as exc:  # noqa: BLE001
+                with self._condition:
+                    self._failed = exc
+                    self._stats["async_failed"] += len(batch)
+                    self._condition.notify_all()
+                self._logger.exception("async reward relabel failed")
+            finally:
+                for _pending in batch:
+                    self._queue.task_done()
+
+    def _raise_if_failed(self) -> None:
+        with self._condition:
+            self._raise_if_failed_locked()
+
+    def _raise_if_failed_locked(self) -> None:
+        if self._failed is not None:
+            raise RuntimeError("async reward relabel worker failed") from self._failed
+
+
+def _chunk_result_from_record(raw: Any) -> dict[str, Any]:
+    return {
+        "steps": [dict(step) for step in list(getattr(raw, "steps", ()))],
+        "observations": [dict(obs) for obs in list(raw.post_step_observations)],
+        "rewards": [float(value) for value in list(raw.rewards)],
+        "dones": [bool(value) for value in list(raw.dones)],
+        "infos": [dict(value) for value in list(raw.infos)],
+        "obs": dict(raw.final_obs),
+        "done": bool(raw.chunk_done),
+        "truncated": bool(raw.chunk_truncated),
+        "reward_sum": float(raw.reward_sum),
+        "info": dict(raw.chunk_info),
+        "num_steps": int(raw.executed_steps),
+    }
+
+
+def _record_with_chunk_result(raw: Any, chunk_result: Mapping[str, Any]) -> Any:
+    executed_steps = int(chunk_result.get("num_steps", raw.executed_steps))
+    return replace(
+        raw,
+        post_step_observations=[
+            dict(obs) for obs in list(chunk_result.get("observations", raw.post_step_observations))[:executed_steps]
+        ],
+        rewards=[float(value) for value in list(chunk_result.get("rewards", raw.rewards))[:executed_steps]],
+        dones=[bool(value) for value in list(chunk_result.get("dones", raw.dones))[:executed_steps]],
+        infos=[dict(value) for value in list(chunk_result.get("infos", raw.infos))[:executed_steps]],
+        final_obs=dict(chunk_result.get("obs", raw.final_obs)),
+        chunk_done=bool(chunk_result.get("done", raw.chunk_done)),
+        chunk_truncated=bool(chunk_result.get("truncated", raw.chunk_truncated)),
+        reward_sum=float(chunk_result.get("reward_sum", raw.reward_sum)),
+        chunk_info=dict(chunk_result.get("info", raw.chunk_info)),
+        executed_steps=executed_steps,
+        steps=[dict(step) for step in list(chunk_result.get("steps", raw.steps))[:executed_steps]],
+    )
+
+
 def build_reward_relabeler(
     cfg: RewardConfig,
     *,
     logger: logging.Logger | None = None,
+    progress_event_writer: MetricWriter | None = None,
 ) -> BaseRewardRelabeler:
     source = str(cfg.source)
     if source == "env":
         return BaseRewardRelabeler(cfg, logger=logger)
-    if source in {"progress_rpc", "remote", "robodopamine", "robodopamine_rpc"}:
-        return RemoteRewardRelabeler(cfg, logger=logger)
+    if source in {
+        "progress_rpc",
+        "remote",
+        "robodopamine",
+        "robodopamine_rpc",
+        "robometer",
+        "robometer_rpc",
+    }:
+        return RemoteRewardRelabeler(
+            cfg,
+            logger=logger,
+            progress_event_writer=progress_event_writer,
+        )
     raise ValueError(f"unsupported reward.source={source!r}")
 
 
 __all__ = [
+    "AsyncRewardRelabelCoordinator",
     "BaseRewardRelabeler",
     "RemoteRewardRelabeler",
     "RemoteRewardResult",
     "RewardRelabelError",
     "RewardRelabelGrpcClient",
+    "RewardRelabelHttpClient",
     "build_reward_relabeler",
 ]

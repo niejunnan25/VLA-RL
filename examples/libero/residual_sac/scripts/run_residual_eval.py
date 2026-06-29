@@ -66,6 +66,9 @@ class _EvalLoopStats:
     policy_requests: int = 0
     policy_batch_requests: int = 0
     policy_samples: int = 0
+    residual_abs_sum: float = 0.0
+    residual_sq_sum: float = 0.0
+    residual_count: int = 0
     active_lane_counts: list[int] | None = None
 
 
@@ -258,6 +261,15 @@ def _build_decision_obs_many(
             )
             base_action_chunks.append(np.asarray(base_actions, dtype=np.float32))
             residual_observations.append(residual_obs)
+    if (
+        len(base_action_chunks) != len(observations)
+        or len(residual_observations) != len(observations)
+    ):
+        raise RuntimeError(
+            "batched eval decision observations are not aligned with input observations: "
+            f"observations={len(observations)} base_actions={len(base_action_chunks)} "
+            f"residual_obs={len(residual_observations)}"
+        )
     return (
         base_action_chunks,
         residual_observations,
@@ -265,6 +277,22 @@ def _build_decision_obs_many(
         len(observations),
         bool(used_infer_many),
     )
+
+
+def _accumulate_residual_action_stats(
+    stats: _EvalLoopStats,
+    residual_actions: np.ndarray,
+    executed_steps: int,
+) -> None:
+    arr = np.asarray(residual_actions, dtype=np.float32).reshape(
+        int(residual_actions.shape[0]),
+        -1,
+    )[: int(executed_steps)]
+    if arr.size == 0:
+        return
+    stats.residual_abs_sum += float(np.abs(arr).sum())
+    stats.residual_sq_sum += float(np.square(arr).sum())
+    stats.residual_count += int(arr.size)
 
 
 def _normalize_chunk_result(chunk_result: dict[str, Any]) -> tuple[
@@ -364,6 +392,7 @@ def _run_serial_eval_loop(
     residual_action_spec: ResidualActionSpec,
     agent: Any,
     checkpoint_step: int | None,
+    force_zero_residual: bool,
     timer: Timer,
     episode_logger: JsonlWriter,
     logger: logging.Logger,
@@ -424,7 +453,7 @@ def _run_serial_eval_loop(
                         residual_obs = prefetched["residual_obs"]
                         prefetched = None
 
-                    if agent is None:
+                    if agent is None or force_zero_residual:
                         residual_actions = np.zeros(
                             (
                                 int(chunk_horizon),
@@ -460,6 +489,11 @@ def _run_serial_eval_loop(
                     env_episode_done,
                 ) = _normalize_chunk_result(chunk_result)
 
+                _accumulate_residual_action_stats(
+                    stats,
+                    np.asarray(residual_actions, dtype=np.float32),
+                    int(executed_steps),
+                )
                 episode_steps += int(executed_steps)
                 stats.total_env_steps += int(executed_steps)
                 episode_return += float(sum(rewards))
@@ -558,6 +592,7 @@ def _run_parallel_eval_loop(
     residual_action_spec: ResidualActionSpec,
     agent: Any,
     checkpoint_step: int | None,
+    force_zero_residual: bool,
     timer: Timer,
     episode_logger: JsonlWriter,
     logger: logging.Logger,
@@ -620,6 +655,7 @@ def _run_parallel_eval_loop(
             stats.active_lane_counts.append(len(active_lanes))
 
             lane_actions: dict[int, np.ndarray] = {}
+            lane_residual_actions: dict[int, np.ndarray] = {}
             for start_idx in range(0, len(active_lanes), policy_batch_size):
                 batch_lanes = active_lanes[start_idx : start_idx + policy_batch_size]
                 batch_observations = []
@@ -647,13 +683,22 @@ def _run_parallel_eval_loop(
                 stats.policy_samples += int(policy_samples)
                 if used_infer_many:
                     stats.policy_batch_requests += 1
+                if (
+                    len(base_action_chunks) != len(batch_lanes)
+                    or len(residual_observations) != len(batch_lanes)
+                ):
+                    raise RuntimeError(
+                        "batched eval outputs do not match active lanes: "
+                        f"lanes={len(batch_lanes)} base_actions={len(base_action_chunks)} "
+                        f"residual_obs={len(residual_observations)}"
+                    )
 
                 for lane, base_actions, residual_obs in zip(
                     batch_lanes,
                     base_action_chunks,
                     residual_observations,
                 ):
-                    if agent is None:
+                    if agent is None or force_zero_residual:
                         residual_actions = np.zeros(
                             (
                                 int(chunk_horizon),
@@ -687,6 +732,10 @@ def _run_parallel_eval_loop(
                         final_actions[:execute_horizon],
                         dtype=np.float32,
                     )
+                    lane_residual_actions[int(lane.lane_id)] = np.asarray(
+                        residual_actions,
+                        dtype=np.float32,
+                    )
 
             with timer.context("step_env"):
                 future_to_lane = {
@@ -709,6 +758,11 @@ def _run_parallel_eval_loop(
                     env_episode_done,
                 ) = _normalize_chunk_result(chunk_result)
                 lane.last_info = last_info
+                _accumulate_residual_action_stats(
+                    stats,
+                    lane_residual_actions[int(lane.lane_id)],
+                    int(executed_steps),
+                )
                 lane.episode_steps += int(executed_steps)
                 stats.total_env_steps += int(executed_steps)
                 lane.episode_return += float(sum(rewards))
@@ -782,6 +836,7 @@ def run_residual_eval(
     run_dir: Path,
     logger: logging.Logger,
     original_cwd: Path | None = None,
+    force_zero_residual: bool = False,
 ) -> dict[str, Any]:
     run_dir = Path(run_dir).resolve()
     run_dir.mkdir(parents=True, exist_ok=True)
@@ -859,6 +914,7 @@ def run_residual_eval(
     agent = None
     checkpoint_loaded = False
     checkpoint_step = None
+    effective_force_zero_residual = bool(force_zero_residual)
     summary: dict[str, Any] | None = None
 
     try:
@@ -890,9 +946,12 @@ def run_residual_eval(
                 None if checkpoint_input_path is None else str(checkpoint_input_path)
             ),
             "checkpoint_step": checkpoint_step,
+            "force_zero_residual": bool(effective_force_zero_residual),
             "base_policy_type": resolve_policy_backend_type(cfg),
             "base_policy_id": resolve_policy_backend_id(cfg),
             "base_policy_backend": policy_backend,
+            "residual_alpha": float(residual_action_spec.alpha),
+            "chunk_horizon": int(chunk_horizon),
             "start_episode_idx": int(start_episode_idx),
             "max_env_steps_per_episode": max_env_steps_per_episode,
             "parallel_envs": int(parallel_envs),
@@ -947,6 +1006,7 @@ def run_residual_eval(
                 "eval.checkpoint_path is not set; running base-policy-only evaluation "
                 "with zero residual actions"
             )
+            effective_force_zero_residual = True
 
         episode_logger = JsonlWriter(run_dir / episode_log_file)
         if parallel_envs == 1:
@@ -964,6 +1024,7 @@ def run_residual_eval(
                 residual_action_spec=residual_action_spec,
                 agent=agent,
                 checkpoint_step=checkpoint_step,
+                force_zero_residual=effective_force_zero_residual,
                 timer=timer,
                 episode_logger=episode_logger,
                 logger=logger,
@@ -983,6 +1044,7 @@ def run_residual_eval(
                 residual_action_spec=residual_action_spec,
                 agent=agent,
                 checkpoint_step=checkpoint_step,
+                force_zero_residual=effective_force_zero_residual,
                 timer=timer,
                 episode_logger=episode_logger,
                 logger=logger,
@@ -1044,7 +1106,19 @@ def run_residual_eval(
                             if stats.total_env_steps > 0
                             else 0.0
                         ),
+                        "residual_l1": (
+                            float(stats.residual_abs_sum / stats.residual_count)
+                            if stats.residual_count > 0
+                            else 0.0
+                        ),
+                        "residual_l2": (
+                            float((stats.residual_sq_sum / stats.residual_count) ** 0.5)
+                            if stats.residual_count > 0
+                            else 0.0
+                        ),
+                        "residual_count": int(stats.residual_count),
                         "mean_active_lanes": float(mean_active_lanes),
+                        "force_zero_residual": bool(effective_force_zero_residual),
                         "timer": to_jsonable(timer.get_average_times()),
                     }
                 )
@@ -1098,6 +1172,7 @@ def main(cfg: DictConfig) -> None:
         run_dir=run_dir,
         logger=logger,
         original_cwd=Path(get_original_cwd()).resolve(),
+        force_zero_residual=bool(typed_cfg.eval.force_zero_residual),
     )
     logger.info("evaluation done: %s", summary)
 

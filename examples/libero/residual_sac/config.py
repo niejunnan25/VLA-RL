@@ -227,13 +227,24 @@ class RecycleConfig:
 
 @dataclass(frozen=True, slots=True)
 class RewardRemoteConfig:
+    transport: str
     address: str
+    url: str | None
+    method: str
     timeout_sec: float
     max_message_mb: int
     max_retries: int
     retry_backoff_sec: float
     max_retry_backoff_sec: float
     compact_transitions: bool
+
+
+@dataclass(frozen=True, slots=True)
+class RewardAsyncConfig:
+    enabled: bool
+    max_pending_chunks: int
+    batch_size: int
+    max_wait_ms: int
 
 
 @dataclass(frozen=True, slots=True)
@@ -249,6 +260,7 @@ class RewardConfig:
     fail_on_error: bool
     trajectory_start_idx: int
     remote: RewardRemoteConfig
+    async_config: RewardAsyncConfig
 
 
 @dataclass(frozen=True, slots=True)
@@ -335,6 +347,7 @@ class EvalConfig:
     parallel_envs: int = 1
     policy_batch_size: int = 1
     allow_random_policy: bool = False
+    force_zero_residual: bool = False
 
 
 @dataclass(frozen=True, slots=True)
@@ -892,15 +905,29 @@ def _parse_recycle_cfg(
 
 def _parse_reward_remote_cfg(reward_cfg: Any) -> RewardRemoteConfig:
     remote_cfg = reward_cfg.get("remote", {}) or {}
+    transport = _parse_choice(
+        remote_cfg.get("transport", "grpc"),
+        "reward.remote.transport",
+        allowed=("grpc", "http"),
+    )
+    host = _required_str(remote_cfg.get("host", "127.0.0.1"), "reward.remote.host")
+    port = _positive_int(remote_cfg.get("port", 50052), "reward.remote.port")
     address = _optional_str(remote_cfg.get("address", None))
     if address is None:
-        host = _required_str(remote_cfg.get("host", "127.0.0.1"), "reward.remote.host")
-        port = _positive_int(remote_cfg.get("port", 50052), "reward.remote.port")
         address = f"{host}:{port}"
+    url = _optional_str(remote_cfg.get("url", None))
+    if transport == "http" and url is None:
+        url = f"http://{host}:{port}"
     return RewardRemoteConfig(
+        transport=transport,
         address=address,
+        url=url,
+        method=_required_str(
+            remote_cfg.get("method", "predict_progress"),
+            "reward.remote.method",
+        ),
         timeout_sec=_positive_float(
-            remote_cfg.get("timeout_sec", 60.0),
+            remote_cfg.get("timeout_sec", remote_cfg.get("timeout", 60.0)),
             "reward.remote.timeout_sec",
         ),
         max_message_mb=_positive_int(
@@ -908,11 +935,11 @@ def _parse_reward_remote_cfg(reward_cfg: Any) -> RewardRemoteConfig:
             "reward.remote.max_message_mb",
         ),
         max_retries=_nonnegative_int(
-            remote_cfg.get("max_retries", 2),
+            remote_cfg.get("max_retries", remote_cfg.get("retries", 2)),
             "reward.remote.max_retries",
         ),
         retry_backoff_sec=_nonnegative_float(
-            remote_cfg.get("retry_backoff_sec", 0.5),
+            remote_cfg.get("retry_backoff_sec", remote_cfg.get("retry_sleep", 0.5)),
             "reward.remote.retry_backoff_sec",
         ),
         max_retry_backoff_sec=_nonnegative_float(
@@ -923,12 +950,39 @@ def _parse_reward_remote_cfg(reward_cfg: Any) -> RewardRemoteConfig:
     )
 
 
+def _parse_reward_async_cfg(reward_cfg: Any) -> RewardAsyncConfig:
+    async_cfg = reward_cfg.get("async", {}) or {}
+    return RewardAsyncConfig(
+        enabled=bool(async_cfg.get("enabled", False)),
+        max_pending_chunks=_positive_int(
+            async_cfg.get("max_pending_chunks", 512),
+            "reward.async.max_pending_chunks",
+        ),
+        batch_size=_positive_int(
+            async_cfg.get("batch_size", async_cfg.get("max_batch_chunks", 1)),
+            "reward.async.batch_size",
+        ),
+        max_wait_ms=_nonnegative_int(
+            async_cfg.get("max_wait_ms", 5),
+            "reward.async.max_wait_ms",
+        ),
+    )
+
+
 def _parse_reward_cfg(cfg: DictConfig) -> RewardConfig:
     reward_cfg = cfg.get("reward", {}) or {}
     raw_source = _parse_choice(
         reward_cfg.get("source", "env"),
         "reward.source",
-        allowed=("env", "progress_rpc", "remote", "robodopamine", "robodopamine_rpc"),
+        allowed=(
+            "env",
+            "progress_rpc",
+            "remote",
+            "robodopamine",
+            "robodopamine_rpc",
+            "robometer",
+            "robometer_rpc",
+        ),
     )
     source = "env" if raw_source == "env" else "progress_rpc"
     default_transform = "env_only" if source == "env" else "env_plus_potential_delta"
@@ -962,8 +1016,10 @@ def _parse_reward_cfg(cfg: DictConfig) -> RewardConfig:
             f"got {clip_min} > {clip_max}"
         )
 
-    if raw_source == "robodopamine" or raw_source == "robodopamine_rpc":
+    if raw_source in {"robodopamine", "robodopamine_rpc"}:
         default_name = "robodopamine"
+    elif raw_source in {"robometer", "robometer_rpc"}:
+        default_name = "robometer"
     elif source == "env":
         default_name = "sparse"
     else:
@@ -986,6 +1042,7 @@ def _parse_reward_cfg(cfg: DictConfig) -> RewardConfig:
             "reward.trajectory_start_idx",
         ),
         remote=_parse_reward_remote_cfg(reward_cfg),
+        async_config=_parse_reward_async_cfg(reward_cfg),
     )
 
 
@@ -1693,6 +1750,7 @@ def _parse_eval_cfg_block(cfg: DictConfig) -> EvalConfig:
         parallel_envs=parallel_envs,
         policy_batch_size=policy_batch_size,
         allow_random_policy=bool(eval_cfg.get("allow_random_policy", False)),
+        force_zero_residual=bool(eval_cfg.get("force_zero_residual", False)),
     )
 
 
@@ -1867,6 +1925,7 @@ __all__ = [
     "PolicyConfig",
     "ProcessorBatchingConfig",
     "RecycleConfig",
+    "RewardAsyncConfig",
     "RewardConfig",
     "RewardRemoteConfig",
     "RewardSource",

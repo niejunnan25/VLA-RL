@@ -28,7 +28,10 @@ REWARD_MODEL_GPU=""
 REWARD_MODEL_CONDA_ENV="${REWARD_MODEL_CONDA_ENV:-/vla/users/niejunnan/envs/robo-dopamine}"
 REWARD_MODEL_REPO="${REWARD_MODEL_REPO:-/vla/users/niejunnan/codebase/Robo-Dopamine}"
 REWARD_MODEL_PATH="${REWARD_MODEL_PATH:-/vla/users/niejunnan/assets/Robo-Dopamine-GRM-2.0-4B-Preview}"
-REWARD_GOAL_DATASET="${REWARD_GOAL_DATASET:-/vla/users/niejunnan/datasets/libero}"
+ROBOMETER_ROOT="${ROBOMETER_ROOT:-/vla/users/niejunnan/workspace/robometer}"
+ROBOMETER_MODEL_PATH="${ROBOMETER_MODEL_PATH:-/vla/users/niejunnan/assets/Robometer-4B}"
+ROBOMETER_BACKEND="${ROBOMETER_BACKEND:-native}"
+REWARD_GOAL_DATASET="${REWARD_GOAL_DATASET:-/vla/users/niejunnan/datasets/libero_lerobot}"
 REWARD_BATCH_SIZE="${REWARD_BATCH_SIZE:-8}"
 REWARD_MODEL_WAIT_TIMEOUT_SEC="${REWARD_MODEL_WAIT_TIMEOUT_SEC:-900}"
 WITH_EVAL_ENV="auto"
@@ -121,7 +124,8 @@ Usage:
     [--policy-gpu N] [--backfill-gpu N] [--policy-server managed|external] \
     [--reward-model true|false] [--reward-model-gpu N] \
     [--reward-model-conda-env ENV] [--reward-model-repo DIR] \
-    [--reward-model-path DIR] [--reward-goal-dataset DIR] \
+    [--reward-model-path DIR] [--robometer-root DIR] [--robometer-model-path DIR] \
+    [--reward-goal-dataset DIR] \
     [--reward-batch-size N] \
     [--with-eval-env | --without-eval-env] \
     [--libero-root DIR] [--libero-datasets-root DIR] \
@@ -166,9 +170,10 @@ Notes:
     visible learner GPU's total memory after the learner starts. Use
       --learner-gpu-memory-guard-fraction 0.75
     to change it, or pass 0 to disable it.
-  - Use --reward-model true to launch the currently supported Robo-Dopamine
-    reward server from this launcher. Use --reward-model false for sparse
-    reward runs. Reward semantics still come from the selected YAML config.
+  - Use --reward-model true to launch the reward server selected by the
+    YAML config. Current managed reward servers support Robo-Dopamine and
+    RoboMeter. Use --reward-model false for sparse reward runs. Reward
+    semantics still come from the selected YAML config.
 EOF
 }
 
@@ -413,6 +418,33 @@ print(os.path.abspath(sys.argv[1]))
 PY
 }
 
+extract_launch_output_root_from_yaml() {
+    local config_file="$1"
+    python3 - "$config_file" <<'PY'
+from pathlib import Path
+import re
+import sys
+
+text = Path(sys.argv[1]).read_text()
+in_launch = False
+for line in text.splitlines():
+    if re.match(r"^launch:\s*$", line):
+        in_launch = True
+        continue
+    if not in_launch:
+        continue
+    if line and not line.startswith((" ", "\t")) and not line.lstrip().startswith("#"):
+        break
+    match = re.match(r"^\s+output_root:\s*(.*?)\s*(?:#.*)?$", line)
+    if match:
+        value = match.group(1).strip()
+        if (value.startswith("'") and value.endswith("'")) or (value.startswith('"') and value.endswith('"')):
+            value = value[1:-1]
+        print(value)
+        break
+PY
+}
+
 normalize_memory_guard_fraction() {
     local raw_value="$1"
     python3 - "$raw_value" <<'PY'
@@ -623,6 +655,14 @@ while [[ $# -gt 0 ]]; do
             REWARD_MODEL_PATH="$2"
             shift 2
             ;;
+        --robometer-root)
+            ROBOMETER_ROOT="$2"
+            shift 2
+            ;;
+        --robometer-model-path)
+            ROBOMETER_MODEL_PATH="$2"
+            shift 2
+            ;;
         --reward-goal-dataset)
             REWARD_GOAL_DATASET="$2"
             shift 2
@@ -766,11 +806,17 @@ if [[ "$CONFIG_FILE" == "$CONFIGS_ROOT/"* ]]; then
 fi
 
 if [[ -z "$OUTPUT_ROOT" ]]; then
-    if [[ -n "$CONFIG_OUTPUT_SUBDIR" ]]; then
+    CONFIG_LAUNCH_OUTPUT_ROOT="$(extract_launch_output_root_from_yaml "$CONFIG_FILE")"
+    if [[ -n "$CONFIG_LAUNCH_OUTPUT_ROOT" ]]; then
+        OUTPUT_ROOT="$CONFIG_LAUNCH_OUTPUT_ROOT"
+    elif [[ -n "$CONFIG_OUTPUT_SUBDIR" ]]; then
         OUTPUT_ROOT="$DEFAULT_OUTPUTS_ROOT/$CONFIG_OUTPUT_SUBDIR/$CONFIG_STEM"
     else
         OUTPUT_ROOT="$DEFAULT_OUTPUTS_ROOT/$CONFIG_STEM"
     fi
+fi
+if [[ "$OUTPUT_ROOT" != /* ]]; then
+    OUTPUT_ROOT="$REPO_ROOT/$OUTPUT_ROOT"
 fi
 OUTPUT_ROOT="$(resolve_path "$OUTPUT_ROOT")"
 
@@ -858,6 +904,9 @@ emit("CFG_BACKFILL_PORT", lookup("backfill_policy.port", "30002"))
 emit("CFG_REPLAY_TRANSITION_GRANULARITY", lookup("replay.transition_granularity", "chunk"))
 emit("CFG_REWARD_SOURCE", lookup("reward.source", "env"))
 emit("CFG_REWARD_NAME", lookup("reward.name", "sparse"))
+emit("CFG_REWARD_TRANSPORT", lookup("reward.remote.transport", "grpc"))
+emit("CFG_REWARD_URL", lookup("reward.remote.url", ""))
+emit("CFG_REWARD_METHOD", lookup("reward.remote.method", "predict_progress"))
 emit("CFG_REWARD_HOST", lookup("reward.remote.host", "127.0.0.1"))
 emit("CFG_REWARD_PORT", lookup("reward.remote.port", "50052"))
 emit("CFG_REWARD_MAX_MESSAGE_MB", lookup("reward.remote.max_message_mb", "256"))
@@ -924,15 +973,26 @@ if [[ "$CFG_POLICY_TYPE" != "openpi" ]]; then
 fi
 if [[ "$REWARD_MODEL" == "true" ]]; then
     [[ "$CFG_REWARD_SOURCE" != "env" ]] || die "--reward-model true requires a non-env reward config; use --reward-model false for sparse runs"
-    [[ "$CFG_REWARD_NAME" == "robodopamine" ]] || die "--reward-model true currently supports reward.name=robodopamine only; got $CFG_REWARD_NAME"
-    is_local_host "$CFG_REWARD_HOST" || die "reward model host must be local for launcher-managed Robo-Dopamine; got $CFG_REWARD_HOST"
+    case "$CFG_REWARD_NAME" in
+        robodopamine|robometer) ;;
+        *) die "--reward-model true supports reward.name=robodopamine or robometer; got $CFG_REWARD_NAME" ;;
+    esac
+    is_local_host "$CFG_REWARD_HOST" || die "reward model host must be local for launcher-managed reward model; got $CFG_REWARD_HOST"
     [[ -n "$REWARD_MODEL_GPU" ]] || die "--reward-model true requires --reward-model-gpu"
-    [[ -d "$REWARD_MODEL_REPO" ]] || die "Robo-Dopamine repo not found: $REWARD_MODEL_REPO"
-    [[ -f "$REWARD_MODEL_REPO/scripts/serve_grm_reward.py" ]] || die "Robo-Dopamine server script not found under $REWARD_MODEL_REPO/scripts/serve_grm_reward.py"
-    [[ -e "$REWARD_MODEL_PATH" ]] || die "Robo-Dopamine model path not found: $REWARD_MODEL_PATH"
-    [[ -d "$REWARD_GOAL_DATASET" ]] || die "reward goal dataset not found: $REWARD_GOAL_DATASET"
+    if [[ "$CFG_REWARD_NAME" == "robodopamine" ]]; then
+        [[ -d "$REWARD_MODEL_REPO" ]] || die "Robo-Dopamine repo not found: $REWARD_MODEL_REPO"
+        [[ -e "$REWARD_MODEL_PATH" ]] || die "Robo-Dopamine model path not found: $REWARD_MODEL_PATH"
+        [[ -d "$REWARD_GOAL_DATASET" ]] || die "reward goal dataset not found: $REWARD_GOAL_DATASET"
+        if [[ "$CFG_REWARD_TRANSPORT" == "grpc" ]]; then
+            [[ -f "$REWARD_MODEL_REPO/scripts/serve_grm_reward.py" ]] || die "Robo-Dopamine gRPC server script not found under $REWARD_MODEL_REPO/scripts/serve_grm_reward.py"
+        fi
+    else
+        [[ "$CFG_REWARD_TRANSPORT" == "http" ]] || die "RoboMeter reward requires reward.remote.transport=http; got $CFG_REWARD_TRANSPORT"
+        [[ -d "$ROBOMETER_ROOT" ]] || die "RoboMeter repo not found: $ROBOMETER_ROOT"
+        [[ -e "$ROBOMETER_MODEL_PATH" ]] || die "RoboMeter model path not found: $ROBOMETER_MODEL_PATH"
+    fi
 else
-    [[ "$CFG_REWARD_SOURCE" == "env" ]] || die "--reward-model false is for sparse/env reward configs; use --reward-model true for Robo-Dopamine configs"
+    [[ "$CFG_REWARD_SOURCE" == "env" ]] || die "--reward-model false is for sparse/env reward configs; use --reward-model true for reward-model configs"
 fi
 if [[ "$POLICY_SERVER" == "managed" && "$START_BACKFILL_POLICY" == "1" && "$TRAINING_MODE" == "processor" && -z "$BACKFILL_GPU" ]]; then
     die "backfill policy is enabled; provide --backfill-gpu (or --policy-gpu to reuse the same GPU)"
@@ -1015,11 +1075,17 @@ async_eval_ports=${CFG_ASYNC_EVAL_PORT_LIST[*]}
 reward_model_launch=$REWARD_MODEL
 reward_source=$CFG_REWARD_SOURCE
 reward_name=$CFG_REWARD_NAME
+reward_transport=$CFG_REWARD_TRANSPORT
+reward_url=$CFG_REWARD_URL
+reward_method=$CFG_REWARD_METHOD
 reward_host=$CFG_REWARD_HOST
 reward_port=$CFG_REWARD_PORT
 reward_model_gpu=$REWARD_MODEL_GPU
 reward_model_repo=$REWARD_MODEL_REPO
 reward_model_path=$REWARD_MODEL_PATH
+robometer_root=$ROBOMETER_ROOT
+robometer_model_path=$ROBOMETER_MODEL_PATH
+robometer_backend=$ROBOMETER_BACKEND
 reward_goal_dataset=$REWARD_GOAL_DATASET
 reward_batch_size=$REWARD_BATCH_SIZE
 reward_model_wait_timeout_sec=$REWARD_MODEL_WAIT_TIMEOUT_SEC
@@ -1105,25 +1171,58 @@ log_note "training script : $TRAINING_SCRIPT"
 if [[ "$REWARD_MODEL" == "true" ]]; then
     assert_port_unused "$CFG_REWARD_HOST" "$CFG_REWARD_PORT" "reward model"
     declare -a REWARD_MODEL_CMD
-    REWARD_MODEL_CMD=(
-        env "CUDA_VISIBLE_DEVICES=$REWARD_MODEL_GPU"
-        bash -lc "$(build_conda_env_shell_command \
-            "$REWARD_MODEL_CONDA_ENV" \
-            python "$REWARD_MODEL_REPO/scripts/serve_grm_reward.py" \
-            --model-path "$REWARD_MODEL_PATH" \
-            --host "$CFG_REWARD_HOST" \
-            --port "$CFG_REWARD_PORT" \
-            --max-message-mb "$CFG_REWARD_MAX_MESSAGE_MB" \
-            --goal-dataset "$REWARD_GOAL_DATASET" \
-            --goal-image-key image \
-            --image-keys agentview_image robot0_eye_in_hand_image \
-            --image-preprocess libero \
-            --goal-image-preprocess none \
-            --view-mode two_view_copy_main \
-            --eval-modes forward \
-            --batch-size "$REWARD_BATCH_SIZE" \
-            --out-root "$OUTPUT_ROOT/reward_rpc")"
-    )
+    if [[ "$CFG_REWARD_TRANSPORT" == "http" && "$CFG_REWARD_NAME" == "robodopamine" ]]; then
+        REWARD_MODEL_CMD=(
+            env
+            "GPU=$REWARD_MODEL_GPU"
+            "HOST=$CFG_REWARD_HOST"
+            "PORT=$CFG_REWARD_PORT"
+            "MODEL_PATH=$REWARD_MODEL_PATH"
+            "ROBODOPAMINE_ROOT=$REWARD_MODEL_REPO"
+            "GOAL_DATASET=$REWARD_GOAL_DATASET"
+            "FORWARD_BATCH_SIZE=$REWARD_BATCH_SIZE"
+            "OUT_ROOT=$OUTPUT_ROOT/reward_rpc"
+            bash "$LIBERO_DIR/tools/serve_robodopamine_progress.sh"
+        )
+    elif [[ "$CFG_REWARD_TRANSPORT" == "http" && "$CFG_REWARD_NAME" == "robometer" ]]; then
+        REWARD_MODEL_CMD=(
+            env
+            "GPU=$REWARD_MODEL_GPU"
+            "HOST=$CFG_REWARD_HOST"
+            "ADAPTER_PORT=$CFG_REWARD_PORT"
+            "MODEL_PATH=$ROBOMETER_MODEL_PATH"
+            "ROBOMETER_ROOT=$ROBOMETER_ROOT"
+            "BACKEND=$ROBOMETER_BACKEND"
+            "FORWARD_BATCH_SIZE=$REWARD_BATCH_SIZE"
+            "VIEW_MODE=first"
+            "QUERY_MODE=prefix_per_query"
+            "MAX_HISTORY_FRAMES=8"
+            "ROBOMETER_IMAGE_KEYS=image_rgb_0"
+            bash "$LIBERO_DIR/tools/serve_robometer_progress_stack.sh"
+        )
+    elif [[ "$CFG_REWARD_TRANSPORT" == "grpc" && "$CFG_REWARD_NAME" == "robodopamine" ]]; then
+        REWARD_MODEL_CMD=(
+            env "CUDA_VISIBLE_DEVICES=$REWARD_MODEL_GPU"
+            bash -lc "$(build_conda_env_shell_command \
+                "$REWARD_MODEL_CONDA_ENV" \
+                python "$REWARD_MODEL_REPO/scripts/serve_grm_reward.py" \
+                --model-path "$REWARD_MODEL_PATH" \
+                --host "$CFG_REWARD_HOST" \
+                --port "$CFG_REWARD_PORT" \
+                --max-message-mb "$CFG_REWARD_MAX_MESSAGE_MB" \
+                --goal-dataset "$REWARD_GOAL_DATASET" \
+                --goal-image-key image \
+                --image-keys agentview_image robot0_eye_in_hand_image \
+                --image-preprocess libero \
+                --goal-image-preprocess none \
+                --view-mode two_view_copy_main \
+                --eval-modes forward \
+                --batch-size "$REWARD_BATCH_SIZE" \
+                --out-root "$OUTPUT_ROOT/reward_rpc")"
+        )
+    else
+        die "unsupported launcher-managed reward combination: name=$CFG_REWARD_NAME transport=$CFG_REWARD_TRANSPORT"
+    fi
     start_logged_process "reward_model" "$SERVICES_DIR/reward_model.log" "${REWARD_MODEL_CMD[@]}"
     wait_for_port "$CFG_REWARD_HOST" "$CFG_REWARD_PORT" "reward model" "$REWARD_MODEL_WAIT_TIMEOUT_SEC"
 fi

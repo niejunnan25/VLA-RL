@@ -135,6 +135,11 @@ def eval_metric_aliases(
     if eval_queue_backlog is not None:
         metrics["eval/queue_backlog"] = int(eval_queue_backlog)
 
+    if "force_zero_residual" in payload or "force_zero_residual" in summary:
+        metrics["eval/force_zero_residual"] = bool(
+            payload.get("force_zero_residual", summary.get("force_zero_residual", False))
+        )
+
     for source_key, metric_key in (
         ("success_rate", "eval/success_rate"),
         ("mean_return", "eval/mean_return"),

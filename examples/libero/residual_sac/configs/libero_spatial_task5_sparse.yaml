@@ -39,8 +39,8 @@ processor_batching:
 wandb:
   project: RoboReward
   entity: null
-  exp_name: residual_sac_libero_spatial_t05_sparse_serl_aligned_s0
-  group: libero_spatial_residual_sac_serl_aligned_sparse
+  exp_name: libero_spatial_t05_sparse_s0
+  group: libero_spatial_sparse
   mode: online
   debug: false
 
@@ -155,7 +155,7 @@ training:
   random_steps: 0
   steps_per_update: 30
   critic_actor_ratio: 2
-  max_env_steps: 600000
+  max_env_steps: 300000
   log_period: 100
   mixed_precision:
     enabled: true
@@ -197,7 +197,7 @@ logging:
   episode_log_file: null
 
 launch:
-  output_root: examples/libero/residual_sac/outputs/libero_spatial_residual_sac_sparse_serl_aligned/task05
+  output_root: examples/libero/residual_sac/outputs/libero_spatial_sparse_300k/task05
 
 hydra:
   run:

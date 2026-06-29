@@ -108,9 +108,9 @@ class WandBLogger(object):
         tags = getattr(self.config, "tag", None)
         if tags:
             init_kwargs["tags"] = tags
-        if self.experiment_id:
-            init_kwargs["id"] = self.experiment_id
-
+        # SwanLab rejects an explicit id unless resume mode is enabled.
+        # Let SwanLab create the run id; experiment_name/group/tags still
+        # carry the YAML-defined experiment identity.
         self._swanlab = swanlab
         self.run = swanlab.init(**init_kwargs)
 

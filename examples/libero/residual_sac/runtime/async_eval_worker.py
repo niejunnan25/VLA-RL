@@ -73,6 +73,7 @@ def _process_one_request(
     train_update_step = int(request["train_update_step"])
     train_env_step = int(request["train_env_step"])
     checkpoint_path = str(request["checkpoint_path"])
+    force_zero_residual = bool(request.get("force_zero_residual", False))
     eval_dir_name = format_async_eval_run_dir_name(
         eval_index=int(eval_index),
         checkpoint_step=int(checkpoint_step),
@@ -94,6 +95,7 @@ def _process_one_request(
             run_dir=eval_run_dir,
             logger=eval_logger,
             original_cwd=train_run_dir,
+            force_zero_residual=force_zero_residual,
         )
     except Exception as exc:  # noqa: BLE001
         status = "failed"
@@ -111,6 +113,7 @@ def _process_one_request(
         "checkpoint_step": int(checkpoint_step),
         "checkpoint_path": str(checkpoint_path),
         "eval_run_dir": str(eval_run_dir),
+        "force_zero_residual": bool(force_zero_residual),
         "duration_sec": float(completed_at - started_at),
         "completed_timestamp": time.strftime(
             "%Y-%m-%d %H:%M:%S",

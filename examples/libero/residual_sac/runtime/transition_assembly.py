@@ -43,6 +43,7 @@ class ChunkExecutionRecord:
     reward_sum: float
     chunk_info: dict[str, Any]
     executed_steps: int
+    steps: list[dict[str, Any]]
     residual_obs_after_chunk: dict[str, np.ndarray] | None = None
     start_obs: dict[str, Any] | None = None
 
@@ -58,6 +59,7 @@ class ChunkExecutionRecord:
         residual_obs_after_chunk: dict[str, np.ndarray] | None = None,
     ) -> "ChunkExecutionRecord":
         post_step_observations = list(chunk_result["observations"])
+        steps = [dict(step) for step in list(chunk_result.get("steps", ()))]
         rewards = [float(value) for value in chunk_result["rewards"]]
         dones = [bool(value) for value in chunk_result["dones"]]
         infos = [dict(value) for value in chunk_result["infos"]]
@@ -110,6 +112,7 @@ class ChunkExecutionRecord:
             reward_sum=float(chunk_result["reward_sum"]),
             chunk_info=dict(chunk_result["info"]),
             executed_steps=executed_steps,
+            steps=steps[:executed_steps],
             residual_obs_after_chunk=residual_obs_after_chunk,
         )
 
@@ -202,7 +205,11 @@ def assemble_chunk_level_transition(
     boundary = (
         any(bool(done) for done in dones)
         or bool(chunk_truncated)
-        or any(bool(dict(info).get("env_done", False)) for info in infos)
+        or any(
+            bool(dict(info).get("critic_terminal", False))
+            or bool(dict(info).get("env_done", False))
+            for info in infos
+        )
     )
     bootstrap_mask = 0.0 if boundary else 1.0
     bootstrap_mask *= discount_value ** max(0, int(executed_steps) - 1)

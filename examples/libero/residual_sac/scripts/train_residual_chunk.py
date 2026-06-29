@@ -80,6 +80,9 @@ from examples.libero.residual_sac.metrics import eval_metric_aliases
 from examples.libero.residual_sac.metrics import learner_metric_aliases
 from examples.libero.residual_sac.metrics import rollout_metric_aliases
 from examples.libero.residual_sac.runtime.raw_rollout_recorder import RawRolloutRecorder
+from examples.libero.residual_sac.runtime.reward_relabel import (
+    AsyncRewardRelabelCoordinator,
+)
 from examples.libero.residual_sac.runtime.reward_relabel import build_reward_relabeler
 from examples.libero.residual_sac.runtime.async_eval_runtime import (
     append_async_eval_request,
@@ -145,7 +148,41 @@ def actor(
         policy_client=policy_client,
         logger=logger,
     )
-    reward_relabeler = build_reward_relabeler(cfg.reward, logger=logger)
+    reward_progress_log_path = run_dir / "reward_progress_events.jsonl"
+
+    def _write_reward_progress_event(event: dict[str, Any]) -> None:
+        append_jsonl(reward_progress_log_path, event)
+
+    reward_relabeler = build_reward_relabeler(
+        cfg.reward,
+        logger=logger,
+        progress_event_writer=(
+            _write_reward_progress_event if str(cfg.reward.source) != "env" else None
+        ),
+    )
+    async_reward_relabeler: AsyncRewardRelabelCoordinator | None = None
+    if reward_relabeler.enabled and bool(cfg.reward.async_config.enabled):
+        if str(cfg.replay.transition_granularity) != "chunk":
+            logger.warning(
+                "reward.async.enabled=true is currently supported only for chunk replay; "
+                "falling back to synchronous reward relabeling for transition_granularity=%s",
+                str(cfg.replay.transition_granularity),
+            )
+        else:
+            async_reward_relabeler = AsyncRewardRelabelCoordinator(
+                relabeler=reward_relabeler,
+                batch_size=int(cfg.reward.async_config.batch_size),
+                max_pending_chunks=int(cfg.reward.async_config.max_pending_chunks),
+                max_wait_ms=int(cfg.reward.async_config.max_wait_ms),
+                logger=logger,
+            )
+            logger.info(
+                "async reward relabel enabled: name=%s transport=%s batch_size=%s max_pending_chunks=%s",
+                str(cfg.reward.name),
+                str(cfg.reward.remote.transport),
+                int(cfg.reward.async_config.batch_size),
+                int(cfg.reward.async_config.max_pending_chunks),
+            )
     # Optimized actor dataflow:
     # chunk execute -> post-hoc transition assembly. Standard residual_sac
     # configs store one chunk-level transition per executed action chunk.
@@ -224,7 +261,12 @@ def actor(
         "successes": 0,
         "timer_log_path": str(actor_timer_log_path),
         "episode_log_path": str(rollout_log_path),
-        "reward": reward_relabeler.status_snapshot(),
+        "reward_progress_log_path": str(reward_progress_log_path),
+        "reward": (
+            async_reward_relabeler.status_snapshot()
+            if async_reward_relabeler is not None
+            else reward_relabeler.status_snapshot()
+        ),
     }
     recycle_output_root = Path(cfg.recycle.output_root)
     if not recycle_output_root.is_absolute():
@@ -314,19 +356,41 @@ def actor(
                     )
             committed_env_steps += int(assembled_chunk.env_steps_delta)
 
+    def _commit_raw_chunks(raw_chunks: list[ChunkExecutionRecord]) -> float:
+        train_return_delta = 0.0
+        for raw_chunk_to_commit in raw_chunks:
+            assembled_chunks = transition_assembler.handle_chunk(
+                raw=raw_chunk_to_commit,
+                task_prompt=task_prompt,
+            )
+            train_return_delta += float(
+                sum(float(chunk.episode_return_delta) for chunk in assembled_chunks)
+            )
+            _commit_assembled_chunks(assembled_chunks)
+        return float(train_return_delta)
+
+    def _reward_status_snapshot() -> dict[str, Any]:
+        if async_reward_relabeler is not None:
+            return async_reward_relabeler.status_snapshot()
+        return reward_relabeler.status_snapshot()
+
     try:
         while env_steps < max_env_steps:
             episode_id += 1
             reset_seed = env_seed
             init_episode_idx = episode_id - 1
             obs = env.reset(seed=reset_seed, init_episode_idx=init_episode_idx)
-            reward_relabeler.start_episode(
-                episode_id=int(episode_id),
-                task_prompt=str(task_prompt),
-                initial_obs=obs,
-                init_episode_idx=int(init_episode_idx),
-                task_id=int(cfg.task.task_id),
-            )
+            reward_episode_kwargs = {
+                "episode_id": int(episode_id),
+                "task_prompt": str(task_prompt),
+                "initial_obs": obs,
+                "init_episode_idx": int(init_episode_idx),
+                "task_id": int(cfg.task.task_id),
+            }
+            if async_reward_relabeler is not None:
+                async_reward_relabeler.start_episode(**reward_episode_kwargs)
+            else:
+                reward_relabeler.start_episode(**reward_episode_kwargs)
             current_task_prompt = str(task_prompt)
             prefetched = None
             episode_return = 0.0
@@ -338,6 +402,11 @@ def actor(
             episode_residual_stats = ResidualActionStatsAccumulator()
 
             while env_steps < max_env_steps:
+                if async_reward_relabeler is not None:
+                    with timer.context("reward_commit"):
+                        episode_return += _commit_raw_chunks(
+                            async_reward_relabeler.pop_ready()
+                        )
                 if transition_assembler.async_transition_assembly_enabled:
                     with timer.context("commit_replay"):
                         _commit_assembled_chunks(transition_assembler.drain_ready())
@@ -393,11 +462,12 @@ def actor(
                 with timer.context("step_env"):
                     chunk_result = env.step_chunk(action_chunk)
 
-                with timer.context("reward_relabel"):
-                    chunk_result = reward_relabeler.relabel_chunk(
-                        chunk_result,
-                        episode_step_start=int(episode_steps),
-                    )
+                if async_reward_relabeler is None:
+                    with timer.context("reward_relabel"):
+                        chunk_result = reward_relabeler.relabel_chunk(
+                            chunk_result,
+                            episode_step_start=int(episode_steps),
+                        )
 
                 next_chunk_prefetched = None
                 residual_obs_after_chunk = None
@@ -449,17 +519,27 @@ def actor(
                         )
                 episode_chunk_seq += 1
                 previous_env_steps = int(env_steps)
-                with timer.context("assemble_transitions"):
-                    assembled_chunks = transition_assembler.handle_chunk(
-                        raw=raw_chunk,
-                        task_prompt=task_prompt,
-                    )
-                if transition_assembler.async_transition_assembly_enabled:
-                    prefetched = None
-                elif assembled_chunks:
-                    prefetched = assembled_chunks[-1].prefetched
-                    if prefetched is None and next_chunk_prefetched is not None:
-                        prefetched = next_chunk_prefetched
+                assembled_chunks: list[AssemblyResult] = []
+                if async_reward_relabeler is None:
+                    with timer.context("assemble_transitions"):
+                        assembled_chunks = transition_assembler.handle_chunk(
+                            raw=raw_chunk,
+                            task_prompt=task_prompt,
+                        )
+                    if transition_assembler.async_transition_assembly_enabled:
+                        prefetched = None
+                    elif assembled_chunks:
+                        prefetched = assembled_chunks[-1].prefetched
+                        if prefetched is None and next_chunk_prefetched is not None:
+                            prefetched = next_chunk_prefetched
+                else:
+                    with timer.context("reward_submit"):
+                        async_reward_relabeler.submit_chunk(raw_chunk)
+                    prefetched = next_chunk_prefetched
+                    with timer.context("reward_commit"):
+                        episode_return += _commit_raw_chunks(
+                            async_reward_relabeler.pop_ready()
+                        )
 
                 env_steps += int(raw_chunk.executed_steps)
                 residual_chunk = np.asarray(residual_actions, dtype=np.float32).reshape(
@@ -478,7 +558,8 @@ def actor(
                     )
                 progress_bar.update(int(raw_chunk.executed_steps))
                 episode_steps += int(raw_chunk.executed_steps)
-                episode_return += float(raw_chunk.reward_sum)
+                if async_reward_relabeler is None:
+                    episode_return += float(raw_chunk.reward_sum)
                 episode_env_return += float(
                     chunk_result.get("env_reward_sum", raw_chunk.reward_sum)
                 )
@@ -497,11 +578,12 @@ def actor(
                     if next_env_step % log_period == 0:
                         should_log_timer = True
 
-                if transition_assembler.async_transition_assembly_enabled:
-                    with timer.context("commit_replay"):
+                if async_reward_relabeler is None:
+                    if transition_assembler.async_transition_assembly_enabled:
+                        with timer.context("commit_replay"):
+                            _commit_assembled_chunks(assembled_chunks)
+                    else:
                         _commit_assembled_chunks(assembled_chunks)
-                else:
-                    _commit_assembled_chunks(assembled_chunks)
 
                 timer.tock("total")
 
@@ -521,6 +603,11 @@ def actor(
                 if episode_done:
                     break
 
+            if async_reward_relabeler is not None:
+                with timer.context("reward_commit"):
+                    episode_return += _commit_raw_chunks(
+                        async_reward_relabeler.finish_episode(block=True)
+                    )
             if transition_assembler.async_transition_assembly_enabled:
                 with timer.context("commit_replay"):
                     _commit_assembled_chunks(
@@ -549,7 +636,7 @@ def actor(
                 residual=episode_residual_stats.summary(),
             )
             episode_stats["reward"] = {
-                **reward_relabeler.status_snapshot(),
+                **_reward_status_snapshot(),
                 "episode_env_return": float(episode_env_return),
                 "episode_train_return": float(episode_return),
             }
@@ -593,11 +680,15 @@ def actor(
                 int(env_steps),
                 str(cfg.reward.name),
             )
-            reward_relabeler.finish_episode()
+            if async_reward_relabeler is None:
+                reward_relabeler.finish_episode()
 
     finally:
         try:
             if current_task_prompt is not None:
+                if async_reward_relabeler is not None:
+                    with timer.context("reward_commit"):
+                        _commit_raw_chunks(async_reward_relabeler.pop_ready())
                 assembled_chunks = transition_assembler.finish_episode(
                     block=True,
                 )
@@ -654,7 +745,8 @@ def actor(
                 "recycle_append_errors": int(recycle_status.get("append_errors", 0)),
                 "recycle_write_errors": int(recycle_status.get("write_errors", 0)),
                 "recycle": recycle_status,
-                "reward": reward_relabeler.status_snapshot(),
+                "reward_progress_log_path": str(reward_progress_log_path),
+                "reward": _reward_status_snapshot(),
             }
         )
         with open(run_dir / cfg.logging.summary_file, "w", encoding="utf-8") as fp:
@@ -679,7 +771,10 @@ def actor(
             except Exception:  # noqa: BLE001
                 pass
         transition_assembler.close()
-        reward_relabeler.close()
+        if async_reward_relabeler is not None:
+            async_reward_relabeler.close(drain=True)
+        else:
+            reward_relabeler.close()
 
 
 def learner(
@@ -834,12 +929,22 @@ def learner(
             )
             if not eval_metrics:
                 continue
-            _write_metric_record({"role": "eval", **eval_metrics})
+            summary_payload = eval_record.get("summary", None)
+            local_eval_metrics = dict(eval_metrics)
+            if isinstance(summary_payload, dict):
+                for source_key, metric_key in (
+                    ("residual_l1", "eval/residual_l1"),
+                    ("residual_l2", "eval/residual_l2"),
+                    ("residual_count", "eval/residual_count"),
+                ):
+                    value = summary_payload.get(source_key, None)
+                    if isinstance(value, (int, float)):
+                        local_eval_metrics[metric_key] = float(value)
+            _write_metric_record({"role": "eval", **local_eval_metrics})
             wandb_logger.log(
                 to_jsonable(eval_metrics),
                 step=int(eval_metrics["eval/train_episode"]),
             )
-            summary_payload = eval_record.get("summary", None)
             if str(eval_record.get("status", "")).lower() == "ok":
                 logger.info(
                     "eval done: eval_index=%s episode=%s update_steps=%s env_steps=%s success_rate=%s",
@@ -1069,6 +1174,56 @@ def learner(
         update_profile_accumulator.record(update_profile)
         return update_info, train_batch_mix
 
+    def _queue_async_eval(
+        *,
+        target_episode: int,
+        target_env_step: int,
+        force_zero_residual: bool = False,
+    ) -> None:
+        async_eval_checkpoint_payload = snapshot_agent_checkpoint_payload(
+            agent,
+            step=int(update_steps),
+        )
+        async_eval_checkpoint_path = save_async_eval_checkpoint_payload(
+            async_eval.eval_checkpoint_dir,
+            async_eval_checkpoint_payload,
+            episode_id=int(target_episode),
+        )
+        append_async_eval_checkpoint_index(
+            async_eval.eval_checkpoint_dir,
+            episode_id=int(target_episode),
+            checkpoint_step=int(update_steps),
+            checkpoint_path=async_eval_checkpoint_path,
+        )
+        append_async_eval_request(
+            async_eval,
+            {
+                "eval_index": int(async_eval.triggered_count),
+                "train_episode_id": int(target_episode),
+                "train_update_step": int(update_steps),
+                "train_env_step": int(target_env_step),
+                "checkpoint_step": int(update_steps),
+                "checkpoint_path": str(async_eval_checkpoint_path),
+                "force_zero_residual": bool(force_zero_residual),
+            },
+        )
+        logger.info(
+            "queued eval: eval_index=%s episode=%s update_steps=%s env_steps=%s checkpoint=%s force_zero_residual=%s",
+            int(max(0, async_eval.triggered_count - 1)),
+            int(target_episode),
+            int(update_steps),
+            int(target_env_step),
+            async_eval_checkpoint_path,
+            bool(force_zero_residual),
+        )
+
+    def _maybe_queue_initial_async_eval() -> None:
+        if (not async_eval.enabled) or async_eval.eval_checkpoint_dir is None:
+            return
+        if int(update_steps) != 0 or int(last_queued_async_eval_episode) != 0:
+            return
+        _queue_async_eval(target_episode=0, target_env_step=0, force_zero_residual=True)
+
     def _maybe_queue_async_eval() -> None:
         nonlocal last_queued_async_eval_episode
         if (not async_eval.enabled) or async_eval.eval_checkpoint_dir is None:
@@ -1087,31 +1242,9 @@ def learner(
                 target_env_step = int(
                     completed_episode_env_steps.get(target_episode, env_steps)
                 )
-            async_eval_checkpoint_payload = snapshot_agent_checkpoint_payload(
-                agent,
-                step=int(update_steps),
-            )
-            async_eval_checkpoint_path = save_async_eval_checkpoint_payload(
-                async_eval.eval_checkpoint_dir,
-                async_eval_checkpoint_payload,
-                episode_id=int(target_episode),
-            )
-            append_async_eval_checkpoint_index(
-                async_eval.eval_checkpoint_dir,
-                episode_id=int(target_episode),
-                checkpoint_step=int(update_steps),
-                checkpoint_path=async_eval_checkpoint_path,
-            )
-            append_async_eval_request(
-                async_eval,
-                {
-                    "eval_index": int(async_eval.triggered_count),
-                    "train_episode_id": int(target_episode),
-                    "train_update_step": int(update_steps),
-                    "train_env_step": int(target_env_step),
-                    "checkpoint_step": int(update_steps),
-                    "checkpoint_path": str(async_eval_checkpoint_path),
-                },
+            _queue_async_eval(
+                target_episode=target_episode,
+                target_env_step=target_env_step,
             )
             with progress_state_lock:
                 last_queued_async_eval_episode = max(
@@ -1125,14 +1258,6 @@ def learner(
                 ]
                 for stale_episode_id in stale_episode_ids:
                     completed_episode_env_steps.pop(int(stale_episode_id), None)
-            logger.info(
-                "queued eval: eval_index=%s episode=%s update_steps=%s env_steps=%s checkpoint=%s",
-                int(max(0, async_eval.triggered_count - 1)),
-                int(target_episode),
-                int(update_steps),
-                int(target_env_step),
-                async_eval_checkpoint_path,
-            )
 
     def _publish_actor_network(*, step: int, reason: str) -> None:
         with timer.context("publish_snapshot"):
@@ -1145,6 +1270,8 @@ def learner(
             int(env_steps),
             str(reason),
         )
+
+    _maybe_queue_initial_async_eval()
 
     if offline_replay_buffer is not None and int(cfg.offline.pretrain_steps) > 0:
         logger.info(
