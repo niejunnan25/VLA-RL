@@ -806,7 +806,7 @@ def learner(
         "timer_log_path": str(learner_timer_log_path),
         "stop_reason": None,
     }
-    stop_reason = "max_update_steps"
+    stop_reason = ACTOR_DONE_DATA_COMMITTED_STOP_REASON
 
     def _transport_status() -> dict[str, Any]:
         try:
@@ -1008,7 +1008,6 @@ def learner(
     checkpoint_dir.mkdir(parents=True, exist_ok=True)
 
     log_period = cfg.training.log_period
-    max_update_steps = cfg.training.max_update_steps
     critic_actor_ratio = max(1, cfg.training.critic_actor_ratio)
     steps_per_update = cfg.training.steps_per_update
     replay_warmup_poll_interval_sec = 1.0
@@ -1147,27 +1146,21 @@ def learner(
             str(reason),
         )
 
-    if (
-        offline_replay_buffer is not None
-        and int(cfg.offline.pretrain_steps) > 0
-        and int(update_steps) < int(max_update_steps)
-    ):
+    if offline_replay_buffer is not None and int(cfg.offline.pretrain_steps) > 0:
         logger.info(
             "starting offline pretrain: steps=%s offline_replay_size=%s",
             int(cfg.offline.pretrain_steps),
             int(len(offline_replay_buffer)),
         )
         pretrain_bar = tqdm(
-            total=min(int(cfg.offline.pretrain_steps), int(max_update_steps)),
+            total=int(cfg.offline.pretrain_steps),
             desc="learner offline pretrain",
             dynamic_ncols=True,
             leave=True,
         )
         last_pretrain_info: dict[str, Any] | None = None
         try:
-            while int(update_steps) < int(max_update_steps) and int(
-                offline_pretrain_steps_done
-            ) < int(cfg.offline.pretrain_steps):
+            while int(offline_pretrain_steps_done) < int(cfg.offline.pretrain_steps):
                 check_async_eval_worker(async_eval, logger=logger)
                 last_pretrain_info, _ = _run_training_update(offline_ratio=1.0)
                 update_steps += 1
@@ -1200,7 +1193,8 @@ def learner(
         )
         initial_network_published = True
 
-    if int(update_steps) < int(max_update_steps) and int(training_starts) > 0:
+    warmup_stopped_for_actor_done = False
+    if int(training_starts) > 0:
         warmup_bar = tqdm(
             total=int(training_starts),
             initial=min(int(len(replay_buffer)), int(training_starts)),
@@ -1221,6 +1215,17 @@ def learner(
                     env_steps=int(env_steps),
                     refresh=False,
                 )
+                if _should_stop_after_actor_done():
+                    warmup_stopped_for_actor_done = True
+                    stop_reason = ACTOR_DONE_DATA_COMMITTED_STOP_REASON
+                    logger.info(
+                        "stopping replay warmup: reason=%s replay=%s training_starts=%s env_steps=%s",
+                        stop_reason,
+                        int(len(replay_buffer)),
+                        int(training_starts),
+                        int(env_steps),
+                    )
+                    break
                 time.sleep(replay_warmup_poll_interval_sec)
             current_replay_size = min(int(len(replay_buffer)), int(training_starts))
             if current_replay_size > warmup_replay_size:
@@ -1228,10 +1233,11 @@ def learner(
         finally:
             warmup_bar.close()
         logger.info(
-            "replay warmup complete: replay=%s training_starts=%s env_steps=%s",
+            "replay warmup complete: replay=%s training_starts=%s env_steps=%s actor_done=%s",
             int(len(replay_buffer)),
             int(training_starts),
             int(env_steps),
+            bool(warmup_stopped_for_actor_done),
         )
 
     if not initial_network_published:
@@ -1239,7 +1245,7 @@ def learner(
 
     interrupted = False
     try:
-        while update_steps < max_update_steps:
+        while True:
             check_async_eval_worker(async_eval, logger=logger)
             _maybe_queue_async_eval()
             online_update_steps = max(

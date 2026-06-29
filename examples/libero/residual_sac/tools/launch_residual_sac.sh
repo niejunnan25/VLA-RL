@@ -44,6 +44,7 @@ REUSE_OUTPUT_DIR=0
 CONDA_SH="${CONDA_SH:-$DEFAULT_CONDA_SH}"
 LEARNER_GPU_MEMORY_GUARD_FRACTION="${LEARNER_GPU_MEMORY_GUARD_FRACTION:-0.70}"
 LEARNER_GPU_MEMORY_GUARD_START_DELAY_SEC="${LEARNER_GPU_MEMORY_GUARD_START_DELAY_SEC:-10}"
+LEARNER_FINAL_DRAIN_GRACE_SEC="${LEARNER_FINAL_DRAIN_GRACE_SEC:-300}"
 
 declare -a EXTRA_HYDRA_ARGS=()
 declare -a STARTED_PROCESS_NAMES=()
@@ -53,6 +54,7 @@ declare -a COMPLETED_PROCESS_STATUS_NAMES=()
 declare -a COMPLETED_PROCESS_STATUS_VALUES=()
 CLEANUP_IN_PROGRESS=0
 TRAINING_DRAINING=0
+TRAINING_DRAINING_STARTED_AT=0
 LEARNER_INTERRUPT_SENT=0
 PROCESS_EXIT_STATUS=0
 
@@ -267,15 +269,25 @@ signal_managed_process() {
 
 maybe_interrupt_learner_for_final_drain() {
     local learner_pid=""
+    local now_ts=0
+    local elapsed_sec=0
     (( TRAINING_DRAINING )) || return 0
     (( LEARNER_INTERRUPT_SENT )) && return 0
     process_completed "learner" && return 0
     if (( START_PROCESSOR )) && ! process_completed "processor"; then
         return 0
     fi
+    if (( TRAINING_DRAINING_STARTED_AT <= 0 )); then
+        TRAINING_DRAINING_STARTED_AT="$(date +%s)"
+    fi
+    now_ts="$(date +%s)"
+    elapsed_sec=$(( now_ts - TRAINING_DRAINING_STARTED_AT ))
+    if (( elapsed_sec < LEARNER_FINAL_DRAIN_GRACE_SEC )); then
+        return 0
+    fi
     learner_pid="$(get_started_process_pid learner)"
     if pid_is_running "$learner_pid"; then
-        log_note "actor finished and processor drained; sending SIGTERM to learner for final eval/summary drain"
+        log_note "actor finished and learner did not exit after ${LEARNER_FINAL_DRAIN_GRACE_SEC}s; sending SIGTERM for final eval/summary drain"
         # Signal only the learner process so its async eval worker can keep draining
         # and be joined from the learner's graceful shutdown path.
         kill -s TERM "$learner_pid" >/dev/null 2>&1 || true
@@ -697,6 +709,9 @@ fi
 if [[ ! "$LEARNER_GPU_MEMORY_GUARD_START_DELAY_SEC" =~ ^[0-9]+$ ]]; then
     die "LEARNER_GPU_MEMORY_GUARD_START_DELAY_SEC must be a non-negative integer, got $LEARNER_GPU_MEMORY_GUARD_START_DELAY_SEC"
 fi
+if [[ ! "$LEARNER_FINAL_DRAIN_GRACE_SEC" =~ ^[0-9]+$ ]]; then
+    die "LEARNER_FINAL_DRAIN_GRACE_SEC must be a non-negative integer, got $LEARNER_FINAL_DRAIN_GRACE_SEC"
+fi
 
 [[ -n "$TRAINING_MODE" ]] || die "--mode is required"
 case "$TRAINING_MODE" in
@@ -1009,6 +1024,7 @@ reward_goal_dataset=$REWARD_GOAL_DATASET
 reward_batch_size=$REWARD_BATCH_SIZE
 reward_model_wait_timeout_sec=$REWARD_MODEL_WAIT_TIMEOUT_SEC
 learner_gpu_memory_guard_fraction=$LEARNER_GPU_MEMORY_GUARD_FRACTION
+learner_final_drain_grace_sec=$LEARNER_FINAL_DRAIN_GRACE_SEC
 EOF
 cp "$CONFIG_FILE" "$OUTPUT_ROOT/config_source.yaml"
 
@@ -1339,7 +1355,8 @@ while true; do
                     actor)
                         if (( PROCESS_EXIT_STATUS == 0 )); then
                             TRAINING_DRAINING=1
-                            log_note "actor exited cleanly; waiting for processor drain, then learner final eval/summary"
+                            TRAINING_DRAINING_STARTED_AT="$(date +%s)"
+                            log_note "actor exited cleanly; waiting for learner final eval/summary drain (grace=${LEARNER_FINAL_DRAIN_GRACE_SEC}s)"
                         else
                             die "actor exited with status=$PROCESS_EXIT_STATUS; launcher is shutting down the remaining managed processes"
                         fi

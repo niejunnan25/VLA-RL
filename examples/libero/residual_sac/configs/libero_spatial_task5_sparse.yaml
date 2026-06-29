@@ -156,7 +156,6 @@ training:
   steps_per_update: 30
   critic_actor_ratio: 2
   max_env_steps: 600000
-  max_update_steps: 600000
   log_period: 100
   mixed_precision:
     enabled: true
@@ -169,7 +168,7 @@ training:
     fullgraph: true
     dynamic: false
   checkpoint:
-    every_steps: 2500
+    every_steps: 5000
     keep: 0
     dir: checkpoints
   async_eval:

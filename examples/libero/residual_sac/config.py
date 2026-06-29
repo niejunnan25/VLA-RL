@@ -311,7 +311,6 @@ class TrainingConfig:
     steps_per_update: int
     critic_actor_ratio: int
     max_env_steps: int
-    max_update_steps: int
     log_period: int
     mixed_precision: MixedPrecisionConfig
     torch_compile: TorchCompileConfig
@@ -1582,6 +1581,11 @@ def _parse_async_eval_cfg(cfg: DictConfig) -> AsyncEvalConfig:
 
 def _parse_training_cfg(cfg: DictConfig) -> TrainingConfig:
     training_cfg = cfg.get("training", {})
+    if "max_update_steps" in training_cfg:
+        raise ValueError(
+            "training.max_update_steps has been removed; "
+            "learner lifetime follows training.max_env_steps"
+        )
     mixed_precision_cfg = training_cfg.get("mixed_precision", {})
     torch_compile_cfg = training_cfg.get("torch_compile", {})
     checkpoint_cfg = training_cfg.get("checkpoint", {})
@@ -1605,10 +1609,6 @@ def _parse_training_cfg(cfg: DictConfig) -> TrainingConfig:
         max_env_steps=_positive_int(
             training_cfg.get("max_env_steps", 1),
             "training.max_env_steps",
-        ),
-        max_update_steps=_positive_int(
-            training_cfg.get("max_update_steps", 1),
-            "training.max_update_steps",
         ),
         log_period=_positive_int(
             training_cfg.get("log_period", 1),
