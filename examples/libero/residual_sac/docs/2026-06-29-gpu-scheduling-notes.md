@@ -88,7 +88,7 @@ learner/async_eval_results.jsonl
 Useful signals:
 
 - `actor/actor_timers.jsonl`: latest `env_steps` should advance; `timer.total` around `0.23-0.29s` per chunk was normal in this run.
-- `actor/episode_logs.jsonl`: `recent_success_rate_20` confirms rollout is progressing.
+- `actor/episode_logs.jsonl`: `recent_success_rate_50` confirms rollout is progressing.
 - `learner/train_residual_chunk.log`: look for `replay warmup complete` and `learner heartbeat`.
 
 ## 239 RoboMeter PBRS / PLD Stack

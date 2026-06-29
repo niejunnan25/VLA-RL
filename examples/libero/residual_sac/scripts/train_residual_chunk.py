@@ -34,18 +34,10 @@ from residual_sac.common.trainer_transport import build_actor_trainer_transport
 from residual_sac.common.trainer_transport import build_learner_trainer_transport
 from residual_sac.async_eval import append_async_eval_checkpoint_index
 from residual_sac.async_eval import save_async_eval_checkpoint_payload
-from residual_sac.common.training_observability import configure_eval_wandb_metrics
-from residual_sac.common.training_observability import configure_learner_wandb_metrics
-from residual_sac.common.training_observability import configure_rollout_wandb_metrics
-from residual_sac.common.training_observability import build_learner_runtime_wandb_metrics
-from residual_sac.common.training_observability import build_rollout_env_step_wandb_metrics
-from residual_sac.common.training_observability import extract_learner_wandb_metrics
-from residual_sac.common.training_observability import extract_rollout_wandb_metrics
 from residual_sac.common.training_payloads import build_rollout_payload
 from residual_sac.common.training_payloads import build_rollout_stats_payload
 from residual_sac.common.training_payloads import parse_rollout_stats_payload
 from residual_sac.common.training_reporting import format_learner_heartbeat
-from residual_sac.common.training_reporting import sync_eval_results_to_wandb
 from residual_sac.common.wandb import WandBLogger
 from residual_sac.policy.typed_factory import build_policy_client
 from residual_sac.policy.typed_factory import describe_policy_backend
@@ -84,6 +76,9 @@ from examples.libero.residual_sac.env.offline_data import load_prepared_offline_
 from examples.libero.residual_sac.env.offline_data import (
     resolve_and_validate_prepared_paths,
 )
+from examples.libero.residual_sac.metrics import eval_metric_aliases
+from examples.libero.residual_sac.metrics import learner_metric_aliases
+from examples.libero.residual_sac.metrics import rollout_metric_aliases
 from examples.libero.residual_sac.runtime.raw_rollout_recorder import RawRolloutRecorder
 from examples.libero.residual_sac.runtime.reward_relabel import build_reward_relabeler
 from examples.libero.residual_sac.runtime.async_eval_runtime import (
@@ -215,7 +210,7 @@ def actor(
     episode_id = 0
     success_count = 0
     current_task_prompt: str | None = None
-    recent_episode_successes: deque[int] = deque(maxlen=20)
+    recent_episode_successes_50: deque[int] = deque(maxlen=50)
     actor_timer_log_path = run_dir / "actor_timers.jsonl"
     rollout_log_path = run_dir / str(
         cfg.logging.episode_log_file or "episode_logs.jsonl"
@@ -535,9 +530,9 @@ def actor(
                     )
             _update_trainer_transport(context="episode_end")
             success_count += int(episode_success)
-            recent_episode_successes.append(int(episode_success))
-            recent_success_rate_20 = float(sum(recent_episode_successes)) / float(
-                max(1, len(recent_episode_successes))
+            recent_episode_successes_50.append(int(episode_success))
+            recent_success_rate_50 = float(sum(recent_episode_successes_50)) / float(
+                max(1, len(recent_episode_successes_50))
             )
             episode_stats = build_rollout_stats_payload(
                 env_steps=int(env_steps),
@@ -548,7 +543,7 @@ def actor(
                     init_episode_idx=int(init_episode_idx),
                     success=bool(episode_success),
                     cumulative_success_rate=float(success_count / max(1, episode_id)),
-                    recent_success_rate_20=float(recent_success_rate_20),
+                    recent_success_rate_50=float(recent_success_rate_50),
                 ),
                 env_info=last_info,
                 residual=episode_residual_stats.summary(),
@@ -776,17 +771,14 @@ def learner(
         }
     )
     wandb_variant = cfg_to_log_payload(cfg)
-    wandb_dir = run_dir / "wandb"
-    wandb_dir.mkdir(parents=True, exist_ok=True)
+    swanlab_dir = run_dir / "swanlab"
+    swanlab_dir.mkdir(parents=True, exist_ok=True)
     wandb_logger = WandBLogger(
         wandb_config=wandb_cfg,
         variant=wandb_variant,
-        wandb_output_dir=str(wandb_dir),
+        wandb_output_dir=str(swanlab_dir),
         mode=cfg.wandb.mode,
     )
-    configure_rollout_wandb_metrics(wandb_logger=wandb_logger)
-    configure_eval_wandb_metrics(wandb_logger=wandb_logger)
-    configure_learner_wandb_metrics(wandb_logger=wandb_logger)
     async_eval = start_async_eval_worker(
         cfg,
         run_dir=run_dir,
@@ -801,6 +793,8 @@ def learner(
     last_rollout_wall_time: float | None = None
     last_rollout_env_steps = 0
     learner_timer_log_path = run_dir / "learner_timers.jsonl"
+    metrics_log_path = run_dir / "metrics.jsonl"
+    metrics_log_path.write_text("", encoding="utf-8")
     progress_state_lock = Lock()
     summary: dict[str, Any] = {
         "role": "learner",
@@ -828,6 +822,43 @@ def learner(
             0,
             int(async_eval.triggered_count) - int(async_eval.processed_summary_lines),
         )
+
+    def _write_metric_record(record: dict[str, Any]) -> None:
+        append_jsonl(metrics_log_path, to_jsonable(record))
+
+    def _log_eval_records(records: list[dict[str, Any]]) -> None:
+        for eval_record in records:
+            eval_metrics = eval_metric_aliases(
+                eval_record,
+                eval_queue_backlog=_async_eval_backlog(),
+            )
+            if not eval_metrics:
+                continue
+            _write_metric_record({"role": "eval", **eval_metrics})
+            wandb_logger.log(
+                to_jsonable(eval_metrics),
+                step=int(eval_metrics["eval/train_episode"]),
+            )
+            summary_payload = eval_record.get("summary", None)
+            if str(eval_record.get("status", "")).lower() == "ok":
+                logger.info(
+                    "eval done: eval_index=%s episode=%s update_steps=%s env_steps=%s success_rate=%s",
+                    eval_record.get("eval_index", None),
+                    eval_record.get("train_episode_id", None),
+                    eval_record.get("train_update_step", None),
+                    eval_record.get("train_env_step", None),
+                    summary_payload.get("success_rate", None)
+                    if isinstance(summary_payload, dict)
+                    else None,
+                )
+            else:
+                logger.warning(
+                    "eval failed: eval_index=%s episode=%s update_steps=%s error=%s",
+                    eval_record.get("eval_index", None),
+                    eval_record.get("train_episode_id", None),
+                    eval_record.get("train_update_step", None),
+                    eval_record.get("error", None),
+                )
 
     def _should_stop_after_actor_done() -> bool:
         target_env_steps = int(cfg.training.max_env_steps)
@@ -872,22 +903,14 @@ def learner(
                     int(episode_id),
                 )
                 completed_episode_env_steps[int(episode_id)] = int(env_steps)
-        rollout_metrics = extract_rollout_wandb_metrics(rollout_stats)
-        if actor_env_steps_per_sec is not None:
-            rollout_metrics["speed/actor_env_steps_per_sec"] = float(
-                actor_env_steps_per_sec
-            )
+        rollout_metrics = rollout_metric_aliases(
+            rollout_stats,
+            actor_env_steps_per_sec=actor_env_steps_per_sec,
+        )
         if rollout_metrics:
-            rollout_step = int(rollout_stats["rollout"]["episode_id"])
+            rollout_step = int(rollout_metrics["rollout/episode_id"])
+            _write_metric_record({"role": "actor", **rollout_metrics})
             wandb_logger.log(to_jsonable(rollout_metrics), step=rollout_step)
-            rollout_env_step_metrics = build_rollout_env_step_wandb_metrics(
-                rollout_metrics
-            )
-            if rollout_env_step_metrics:
-                wandb_logger.log(
-                    to_jsonable(rollout_env_step_metrics),
-                    step=int(rollout_env_steps),
-                )
         return {}
 
     server = build_learner_trainer_transport(
@@ -1155,8 +1178,15 @@ def learner(
             pretrain_bar.close()
 
         if last_pretrain_info is not None:
-            pretrain_metrics = extract_learner_wandb_metrics(last_pretrain_info)
+            pretrain_metrics = learner_metric_aliases(
+                last_pretrain_info,
+                update_steps=int(update_steps),
+                env_steps=int(env_steps),
+                replay_size=int(len(replay_buffer)),
+                eval_queue_backlog=_async_eval_backlog(),
+            )
             if pretrain_metrics:
+                _write_metric_record({"role": "learner", **pretrain_metrics})
                 wandb_logger.log(to_jsonable(pretrain_metrics), step=update_steps)
         logger.info(
             "offline pretrain complete: completed=%s update_steps=%s offline_replay_size=%s",
@@ -1248,12 +1278,7 @@ def learner(
             if update_steps % log_period == 0:
                 check_async_eval_worker(async_eval, logger=logger)
                 eval_records = load_new_async_eval_results(async_eval)
-                sync_eval_results_to_wandb(
-                    records=eval_records,
-                    wandb_logger=wandb_logger,
-                    logger=logger,
-                    eval_queue_backlog=_async_eval_backlog(),
-                )
+                _log_eval_records(eval_records)
                 update_metrics = to_jsonable(update_info)
                 now = time.time()
                 elapsed_sec = max(now - last_log_time, 1e-6)
@@ -1268,40 +1293,17 @@ def learner(
                     batch_sampler.drain_sample_profile()
                 )
                 update_profile_metrics = to_jsonable(update_profile_accumulator.drain())
-                learner_metrics = extract_learner_wandb_metrics(update_metrics)
-                learner_metrics.update(
-                    build_learner_runtime_wandb_metrics(
-                        update_steps=int(update_steps),
-                        env_steps=int(env_steps),
-                        replay_size=int(len(replay_buffer)),
-                        updates_per_sec=float(updates_per_sec),
-                        eval_queue_backlog=_async_eval_backlog(),
-                        offline_replay_size=(
-                            0
-                            if offline_replay_buffer is None
-                            else int(len(offline_replay_buffer))
-                        ),
-                        batch_mix=batch_mix,
-                        timer_metrics=timer_metrics,
-                        sample_profile_metrics=sample_profile_metrics,
-                        update_profile_metrics=update_profile_metrics,
-                    )
+                learner_metrics = learner_metric_aliases(
+                    update_metrics,
+                    update_steps=int(update_steps),
+                    env_steps=int(env_steps),
+                    replay_size=int(len(replay_buffer)),
+                    updates_per_sec=float(updates_per_sec),
+                    eval_queue_backlog=_async_eval_backlog(),
+                    batch_mix=batch_mix,
                 )
-                if offline_prepared_chunk_profile is not None:
-                    learner_metrics[
-                        "replay/offline_prepared_chunk/enabled"
-                    ] = 1.0
-                    learner_metrics[
-                        "replay/offline_prepared_chunk/prepared_windows"
-                    ] = float(
-                        offline_prepared_chunk_profile.get("prepared_windows", 0.0)
-                    )
-                    for key, value in offline_prepared_chunk_profile.items():
-                        if isinstance(value, (int, float)):
-                            learner_metrics[
-                                f"learner_time/offline_prepared_chunk/{key}"
-                            ] = float(value)
                 if learner_metrics:
+                    _write_metric_record({"role": "learner", **learner_metrics})
                     wandb_logger.log(to_jsonable(learner_metrics), step=update_steps)
                 append_jsonl(
                     learner_timer_log_path,
@@ -1379,12 +1381,7 @@ def learner(
                 async_eval,
                 logger=logger,
             )
-            sync_eval_results_to_wandb(
-                records=load_new_async_eval_results(async_eval),
-                wandb_logger=wandb_logger,
-                logger=logger,
-                eval_queue_backlog=_async_eval_backlog(),
-            )
+            _log_eval_records(load_new_async_eval_results(async_eval))
             if async_eval_return_code not in (None, 0):
                 logger.warning(
                     "eval worker exited with returncode=%s; see %s",
@@ -1490,8 +1487,7 @@ def learner(
         with open(run_dir / cfg.logging.summary_file, "w", encoding="utf-8") as fp:
             json.dump(summary, fp, indent=2, ensure_ascii=False)
         try:
-            if getattr(wandb_logger, "run", None) is not None:
-                wandb_logger.run.finish()
+            wandb_logger.finish()
         except Exception:  # noqa: BLE001
             pass
         try:

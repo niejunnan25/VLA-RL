@@ -1,20 +1,15 @@
 import datetime
-import logging
 import tempfile
 from copy import copy
+from pathlib import Path
 from socket import gethostname
 
-import absl.flags as flags
 import ml_collections
-import wandb
 
 try:
     import swanlab
-except ModuleNotFoundError:  # pragma: no cover - depends on local extras
+except ModuleNotFoundError:  # pragma: no cover - depends on training env
     swanlab = None
-
-
-LOGGER = logging.getLogger(__name__)
 
 
 def _recursive_flatten_dict(d: dict):
@@ -30,33 +25,24 @@ def _recursive_flatten_dict(d: dict):
     return keys, values
 
 
-def _resolve_sync_modes(mode: str, *, use_swanlab: bool) -> tuple[str | None, str]:
+def _resolve_swanlab_mode(mode: str) -> str | None:
     resolved_mode = str(mode).lower()
-    if resolved_mode == "online":
-        return ("cloud", "offline") if use_swanlab else (None, "online")
-    if resolved_mode == "offline":
-        return ("local", "offline") if use_swanlab else (None, "offline")
     if resolved_mode == "disabled":
-        return (None, "disabled")
-    if resolved_mode == "shared":
-        return ("cloud", "offline") if use_swanlab else (None, "online")
-    if resolved_mode == "cloud":
-        return ("cloud", "offline") if use_swanlab else (None, "online")
-    if resolved_mode == "local":
-        return ("local", "offline") if use_swanlab else (None, "offline")
-    raise ValueError(f"Unsupported W&B mode: {resolved_mode!r}")
+        return None
+    if resolved_mode == "online":
+        return "cloud"
+    if resolved_mode == "offline":
+        return "local"
+    raise ValueError(f"Unsupported logging mode: {resolved_mode!r}")
 
 
 class WandBLogger(object):
     @staticmethod
     def get_default_config():
         config = ml_collections.ConfigDict()
-        config.project = "residual_sac"  # WandB Project Name
+        config.project = "residual_sac"
         config.entity = ml_collections.config_dict.FieldReference(None, field_type=str)
-        # Which entity to log as (default: your own user)
-        config.exp_descriptor = ""  # Run name (doesn't have to be unique)
-        # Unique identifier for run (will be automatically generated unless
-        # provided)
+        config.exp_descriptor = ""
         config.unique_identifier = ""
         config.group = None
         config.mode = None
@@ -78,15 +64,12 @@ class WandBLogger(object):
 
         self.config.experiment_id = (
             self.experiment_id
-        ) = f"{self.config.exp_descriptor}_{self.config.unique_identifier}"  # NOQA
-
-        print(self.config)
+        ) = f"{self.config.exp_descriptor}_{self.config.unique_identifier}"
 
         if wandb_output_dir is None:
             wandb_output_dir = tempfile.mkdtemp()
 
         self._variant = copy(variant)
-
         if "hostname" not in self._variant:
             self._variant["hostname"] = gethostname()
 
@@ -98,49 +81,47 @@ class WandBLogger(object):
         elif debug:
             resolved_mode = "disabled"
 
-        use_swanlab = swanlab is not None
-        swanlab_mode, wandb_mode = _resolve_sync_modes(
-            str(resolved_mode).lower(),
-            use_swanlab=use_swanlab,
-        )
-        if swanlab_mode is not None:
-            sync_kwargs = {
-                "mode": swanlab_mode,
-                "wandb_run": False,
-                "logdir": wandb_output_dir,
-            }
-            if self.config.entity not in (None, ""):
-                sync_kwargs["workspace"] = self.config.entity
-            swanlab.sync_wandb(**sync_kwargs)
-        elif str(resolved_mode).lower() != "disabled" and not use_swanlab:
-            LOGGER.warning(
-                "swanlab is not installed; falling back to native wandb mode=%s",
-                str(resolved_mode).lower(),
+        self.run = None
+        self._swanlab = None
+        swanlab_mode = _resolve_swanlab_mode(str(resolved_mode).lower())
+        if swanlab_mode is None:
+            return
+        if swanlab is None:
+            raise ImportError(
+                "SwanLab logging is enabled, but swanlab is not installed. "
+                "Install swanlab or set wandb.mode=disabled."
             )
 
-        self.run = wandb.init(
-            config=self._variant,
-            project=self.config.project,
-            entity=self.config.entity,
-            name=self.config.exp_descriptor,
-            group=self.config.group,
-            tags=getattr(self.config, "tag", None),
-            dir=wandb_output_dir,
-            id=self.config.experiment_id,
-            save_code=True,
-            mode=wandb_mode,
-        )
+        output_dir = Path(wandb_output_dir)
+        output_dir.mkdir(parents=True, exist_ok=True)
+        init_kwargs = {
+            "project": self.config.project,
+            "experiment_name": self.config.exp_descriptor,
+            "config": self._variant,
+            "logdir": str(output_dir),
+            "mode": swanlab_mode,
+        }
+        if self.config.entity not in (None, ""):
+            init_kwargs["workspace"] = self.config.entity
+        if self.config.group not in (None, ""):
+            init_kwargs["group"] = self.config.group
+        tags = getattr(self.config, "tag", None)
+        if tags:
+            init_kwargs["tags"] = tags
+        if self.experiment_id:
+            init_kwargs["id"] = self.experiment_id
 
-        if flags.FLAGS.is_parsed():
-            flag_dict = {k: getattr(flags.FLAGS, k) for k in flags.FLAGS}
-        else:
-            flag_dict = {}
-        for k in flag_dict:
-            if isinstance(flag_dict[k], ml_collections.ConfigDict):
-                flag_dict[k] = flag_dict[k].to_dict()
-        wandb.config.update(flag_dict)
+        self._swanlab = swanlab
+        self.run = swanlab.init(**init_kwargs)
 
     def log(self, data: dict, step: int = None):
+        if self._swanlab is None:
+            return
         data_flat = _recursive_flatten_dict(data)
         data = {k: v for k, v in zip(*data_flat)}
-        wandb.log(data, step=step)
+        if data:
+            self._swanlab.log(data, step=step)
+
+    def finish(self):
+        if self._swanlab is not None:
+            self._swanlab.finish()

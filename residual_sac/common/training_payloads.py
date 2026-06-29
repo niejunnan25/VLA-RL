@@ -15,7 +15,7 @@ class _RequiredRolloutPayload(TypedDict):
     episode_return: float
     success: bool
     cumulative_success_rate: float
-    recent_success_rate_20: float
+    recent_success_rate_50: float
 
 
 class RolloutPayload(_RequiredRolloutPayload, total=False):
@@ -44,7 +44,7 @@ def build_rollout_payload(
     init_episode_idx: int | None = None,
     success: bool,
     cumulative_success_rate: float,
-    recent_success_rate_20: float,
+    recent_success_rate_50: float,
 ) -> RolloutPayload:
     """Build a normalized rollout summary payload."""
 
@@ -54,7 +54,7 @@ def build_rollout_payload(
         "episode_return": float(episode_return),
         "success": bool(success),
         "cumulative_success_rate": float(cumulative_success_rate),
-        "recent_success_rate_20": float(recent_success_rate_20),
+        "recent_success_rate_50": float(recent_success_rate_50),
     }
     if init_episode_idx is not None:
         payload["init_episode_idx"] = int(init_episode_idx)
@@ -177,7 +177,7 @@ def _parse_rollout_payload(payload: Mapping[str, Any]) -> RolloutPayload | None:
     cumulative_success_rate = _maybe_float(
         payload.get("cumulative_success_rate", None)
     )
-    recent_success_rate_20 = _maybe_float(payload.get("recent_success_rate_20", None))
+    recent_success_rate_50 = _maybe_float(payload.get("recent_success_rate_50", None))
 
     if (
         episode_id is None
@@ -185,7 +185,7 @@ def _parse_rollout_payload(payload: Mapping[str, Any]) -> RolloutPayload | None:
         or episode_return is None
         or success is None
         or cumulative_success_rate is None
-        or recent_success_rate_20 is None
+        or recent_success_rate_50 is None
     ):
         return None
 
@@ -195,7 +195,7 @@ def _parse_rollout_payload(payload: Mapping[str, Any]) -> RolloutPayload | None:
         "episode_return": float(episode_return),
         "success": bool(success),
         "cumulative_success_rate": float(cumulative_success_rate),
-        "recent_success_rate_20": float(recent_success_rate_20),
+        "recent_success_rate_50": float(recent_success_rate_50),
     }
     if init_episode_idx is not None:
         rollout["init_episode_idx"] = int(init_episode_idx)
