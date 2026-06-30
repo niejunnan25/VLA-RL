@@ -12,6 +12,34 @@ except ModuleNotFoundError:  # pragma: no cover - depends on training env
     swanlab = None
 
 
+_CLOUD_METRIC_KEYS = {
+    "rollout/episode_id",
+    "rollout/episode_return",
+    "rollout/episode_steps",
+    "rollout/success",
+    "rollout/recent_success_rate_50",
+    "rollout/env_steps",
+    "learner/update_steps",
+    "learner/env_steps",
+    "learner/replay_size",
+    "learner/loss_critic",
+    "learner/loss_actor",
+    "learner/q_target_mean",
+    "learner/q_predicted_mean",
+    "learner/temperature",
+    "learner/entropy",
+    "learner/updates_per_sec",
+    "learner/q_predicted_gap",
+    "learner/q_actor_predicted_mean",
+    "eval/train_episode",
+    "eval/success_rate",
+    "eval/mean_return",
+    "eval/mean_steps",
+    "eval/train_env_step",
+    "eval/train_update_step",
+}
+
+
 def _recursive_flatten_dict(d: dict):
     keys, values = [], []
     for key, value in d.items():
@@ -34,6 +62,10 @@ def _resolve_swanlab_mode(mode: str) -> str | None:
     if resolved_mode == "offline":
         return "local"
     raise ValueError(f"Unsupported logging mode: {resolved_mode!r}")
+
+
+def _select_cloud_metrics(data: dict):
+    return {key: value for key, value in data.items() if key in _CLOUD_METRIC_KEYS}
 
 
 class WandBLogger(object):
@@ -119,6 +151,7 @@ class WandBLogger(object):
             return
         data_flat = _recursive_flatten_dict(data)
         data = {k: v for k, v in zip(*data_flat)}
+        data = _select_cloud_metrics(data)
         if data:
             self._swanlab.log(data, step=step)
 
