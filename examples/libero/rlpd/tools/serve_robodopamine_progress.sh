@@ -15,6 +15,7 @@ if [[ ! -d "/dev/shm" ]]; then
 fi
 OUT_ROOT="${OUT_ROOT:-$DEFAULT_OUT_ROOT}"
 FORWARD_BATCH_SIZE="${FORWARD_BATCH_SIZE:-8}"
+IMAGE_TRANSPORT="${IMAGE_TRANSPORT:-memory}"
 VLLM_ATTENTION_BACKEND="${VLLM_ATTENTION_BACKEND:-TORCH_SDPA}"
 
 export PYTHONUNBUFFERED=1
@@ -34,6 +35,7 @@ CUDA_VISIBLE_DEVICES="$GPU" "$PYTHON_BIN" "$ROOT/scripts/serve_robodopamine_prog
   --view-mode two_view_copy_main \
   --image-preprocess none \
   --goal-image-preprocess none \
+  --image-transport "$IMAGE_TRANSPORT" \
   --eval-modes forward \
   --batch-size "$FORWARD_BATCH_SIZE" \
   --goal-dataset "$GOAL_DATASET" \

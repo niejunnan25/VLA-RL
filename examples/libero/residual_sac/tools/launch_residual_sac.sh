@@ -27,12 +27,15 @@ REWARD_MODEL="false"
 REWARD_MODEL_GPU=""
 REWARD_MODEL_CONDA_ENV="${REWARD_MODEL_CONDA_ENV:-/vla/users/niejunnan/envs/robo-dopamine}"
 REWARD_MODEL_REPO="${REWARD_MODEL_REPO:-/vla/users/niejunnan/codebase/Robo-Dopamine}"
+REWARD_MODEL_PATH_WAS_SET="${REWARD_MODEL_PATH+x}"
 REWARD_MODEL_PATH="${REWARD_MODEL_PATH:-/vla/users/niejunnan/assets/Robo-Dopamine-GRM-2.0-4B-Preview}"
 ROBOMETER_ROOT="${ROBOMETER_ROOT:-/vla/users/niejunnan/workspace/robometer}"
+ROBOMETER_MODEL_PATH_WAS_SET="${ROBOMETER_MODEL_PATH+x}"
 ROBOMETER_MODEL_PATH="${ROBOMETER_MODEL_PATH:-/vla/users/niejunnan/assets/Robometer-4B}"
 ROBOMETER_BACKEND="${ROBOMETER_BACKEND:-native}"
 REWARD_GOAL_DATASET="${REWARD_GOAL_DATASET:-/vla/users/niejunnan/datasets/libero_lerobot}"
 REWARD_BATCH_SIZE="${REWARD_BATCH_SIZE:-8}"
+REWARD_IMAGE_TRANSPORT="${REWARD_IMAGE_TRANSPORT:-memory}"
 REWARD_MODEL_WAIT_TIMEOUT_SEC="${REWARD_MODEL_WAIT_TIMEOUT_SEC:-900}"
 WITH_EVAL_ENV="auto"
 LIBERO_ROOT_OVERRIDE=""
@@ -653,6 +656,7 @@ while [[ $# -gt 0 ]]; do
             ;;
         --reward-model-path)
             REWARD_MODEL_PATH="$2"
+            REWARD_MODEL_PATH_WAS_SET=1
             shift 2
             ;;
         --robometer-root)
@@ -661,6 +665,7 @@ while [[ $# -gt 0 ]]; do
             ;;
         --robometer-model-path)
             ROBOMETER_MODEL_PATH="$2"
+            ROBOMETER_MODEL_PATH_WAS_SET=1
             shift 2
             ;;
         --reward-goal-dataset)
@@ -743,6 +748,10 @@ fi
 if [[ ! "$REWARD_BATCH_SIZE" =~ ^[0-9]+$ || "$REWARD_BATCH_SIZE" == "0" ]]; then
     die "--reward-batch-size must be a positive integer, got $REWARD_BATCH_SIZE"
 fi
+case "$REWARD_IMAGE_TRANSPORT" in
+    memory|path) ;;
+    *) die "REWARD_IMAGE_TRANSPORT must be memory or path, got $REWARD_IMAGE_TRANSPORT" ;;
+esac
 if [[ ! "$REWARD_MODEL_WAIT_TIMEOUT_SEC" =~ ^[0-9]+$ || "$REWARD_MODEL_WAIT_TIMEOUT_SEC" == "0" ]]; then
     die "REWARD_MODEL_WAIT_TIMEOUT_SEC must be a positive integer, got $REWARD_MODEL_WAIT_TIMEOUT_SEC"
 fi
@@ -910,6 +919,7 @@ emit("CFG_REWARD_METHOD", lookup("reward.remote.method", "predict_progress"))
 emit("CFG_REWARD_HOST", lookup("reward.remote.host", "127.0.0.1"))
 emit("CFG_REWARD_PORT", lookup("reward.remote.port", "50052"))
 emit("CFG_REWARD_MAX_MESSAGE_MB", lookup("reward.remote.max_message_mb", "256"))
+emit("CFG_REWARD_MODEL_PATH", lookup("reward.model_path", ""))
 emit("CFG_RECYCLE_ENABLED", lookup("recycle.enabled", False))
 PY
 CONFIG_EXPORTS="$(
@@ -921,6 +931,12 @@ while IFS= read -r line; do
 done <<< "$CONFIG_EXPORTS"
 
 [[ -n "$CFG_POLICY_TYPE" ]] || die "failed to parse policy.type from config"
+if [[ "$CFG_REWARD_NAME" == "robodopamine" && -n "${CFG_REWARD_MODEL_PATH:-}" && -z "$REWARD_MODEL_PATH_WAS_SET" ]]; then
+    REWARD_MODEL_PATH="$CFG_REWARD_MODEL_PATH"
+fi
+if [[ "$CFG_REWARD_NAME" == "robometer" && -n "${CFG_REWARD_MODEL_PATH:-}" && -z "$ROBOMETER_MODEL_PATH_WAS_SET" ]]; then
+    ROBOMETER_MODEL_PATH="$CFG_REWARD_MODEL_PATH"
+fi
 if [[ ! "${CFG_ASYNC_EVAL_PARALLEL_ENVS:-1}" =~ ^[0-9]+$ ]]; then
     die "training.async_eval.parallel_envs must be a positive integer, got ${CFG_ASYNC_EVAL_PARALLEL_ENVS:-}"
 fi
@@ -1088,6 +1104,7 @@ robometer_model_path=$ROBOMETER_MODEL_PATH
 robometer_backend=$ROBOMETER_BACKEND
 reward_goal_dataset=$REWARD_GOAL_DATASET
 reward_batch_size=$REWARD_BATCH_SIZE
+reward_image_transport=$REWARD_IMAGE_TRANSPORT
 reward_model_wait_timeout_sec=$REWARD_MODEL_WAIT_TIMEOUT_SEC
 learner_gpu_memory_guard_fraction=$LEARNER_GPU_MEMORY_GUARD_FRACTION
 learner_final_drain_grace_sec=$LEARNER_FINAL_DRAIN_GRACE_SEC
@@ -1181,6 +1198,7 @@ if [[ "$REWARD_MODEL" == "true" ]]; then
             "ROBODOPAMINE_ROOT=$REWARD_MODEL_REPO"
             "GOAL_DATASET=$REWARD_GOAL_DATASET"
             "FORWARD_BATCH_SIZE=$REWARD_BATCH_SIZE"
+            "IMAGE_TRANSPORT=$REWARD_IMAGE_TRANSPORT"
             "OUT_ROOT=$OUTPUT_ROOT/reward_rpc"
             bash "$LIBERO_DIR/tools/serve_robodopamine_progress.sh"
         )
@@ -1215,6 +1233,7 @@ if [[ "$REWARD_MODEL" == "true" ]]; then
                 --image-keys agentview_image robot0_eye_in_hand_image \
                 --image-preprocess libero \
                 --goal-image-preprocess none \
+                --image-transport "$REWARD_IMAGE_TRANSPORT" \
                 --view-mode two_view_copy_main \
                 --eval-modes forward \
                 --batch-size "$REWARD_BATCH_SIZE" \

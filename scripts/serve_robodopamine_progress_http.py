@@ -529,6 +529,12 @@ def parse_args(argv: Sequence[str] | None = None) -> argparse.Namespace:
     parser.add_argument("--view-mode", choices=["two_view_copy_main", "three_view"], default="two_view_copy_main")
     parser.add_argument("--image-preprocess", choices=["libero", "none"], default="none")
     parser.add_argument("--goal-image-preprocess", choices=["none", "libero"], default="none")
+    parser.add_argument(
+        "--image-transport",
+        choices=["path", "memory"],
+        default="memory",
+        help="Use memory to pass PIL images directly to Robo-Dopamine, or path for the original PNG path interface.",
+    )
     parser.add_argument("--eval-modes", nargs="+", choices=["forward", "incremental", "backward"], default=["forward"])
     parser.add_argument("--batch-size", type=int, default=1)
     parser.add_argument("--goal-dataset", default="/vla/users/niejunnan/datasets/libero_lerobot")
@@ -571,18 +577,26 @@ def main(argv: Sequence[str] | None = None) -> int:
             normalize_task_fn=normalize_task,
             goal_result_cls=GoalLookupResult,
         )
-    engine = GrmProgressEngine(
-        model_path=str(args.model_path),
-        eval_modes=list(args.eval_modes),
-        batch_size=int(args.batch_size),
-        image_keys=list(args.image_keys),
-        view_mode=str(args.view_mode),
-        image_preprocess=str(args.image_preprocess),
-        goal_image_preprocess=str(args.goal_image_preprocess),
-        out_root=str(args.out_root),
-        keep_runs=bool(args.keep_runs),
-        clip=not bool(args.no_clip_progress),
-    )
+    engine_kwargs = {
+        "model_path": str(args.model_path),
+        "eval_modes": list(args.eval_modes),
+        "batch_size": int(args.batch_size),
+        "image_keys": list(args.image_keys),
+        "view_mode": str(args.view_mode),
+        "image_preprocess": str(args.image_preprocess),
+        "goal_image_preprocess": str(args.goal_image_preprocess),
+        "out_root": str(args.out_root),
+        "keep_runs": bool(args.keep_runs),
+        "clip": not bool(args.no_clip_progress),
+    }
+    if "image_transport" in inspect.signature(GrmProgressEngine).parameters:
+        engine_kwargs["image_transport"] = str(args.image_transport)
+    elif str(args.image_transport) != "path":
+        raise RuntimeError(
+            "Robo-Dopamine GrmProgressEngine does not support image_transport=memory. "
+            "Update Robo-Dopamine or pass --image-transport path."
+        )
+    engine = GrmProgressEngine(**engine_kwargs)
     service = RoboDopamineProgressHttpService(
         engine=engine,
         goal_provider=goal_provider,
