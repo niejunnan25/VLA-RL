@@ -9,6 +9,43 @@ actor/critic training loops, replay, checkpoints, and example recipes. RLT is
 the first clean SERL-style training line; PLD and residual SAC are separate
 example lines rather than variants hidden behind a universal runner.
 
+
+## Start Here
+
+Use these documents in order when setting up a fresh checkout:
+
+1. `docs/setup.md`: Python environment, editable install, external service
+   repositories, and sanity checks.
+2. `docs/assets.md`: checkpoint and dataset layout, including the environment
+   variables used to override machine-local paths.
+3. `.env.example`: copy this to `.env` or source the same variables in your
+   shell before launching experiments.
+4. `examples/libero/residual_sac/README.md`: the current recommended LIBERO
+   residual SAC training path, including sparse, Robo-Dopamine PBRS, and
+   RoboMeter PBRS recipes.
+5. `examples/libero/residual_sac/docs/smoke_test.md`: a short connectivity run
+   before starting a formal 300k-step experiment.
+
+The current recommended mainline is:
+
+```text
+examples/libero/residual_sac
+```
+
+It mirrors the validated SERL Torch LIBERO residual SAC stack while keeping the
+training code inside this repository. The older `examples/libero/rlt` and
+`examples/libero/pld` examples remain useful references, but new LIBERO residual
+reward-model experiments should start from `examples/libero/residual_sac`.
+
+Run a local environment check after installation:
+
+```bash
+python scripts/check_env.py --strict
+```
+
+The strict mode checks local Python imports and the asset paths supplied through
+environment variables. It does not download models or start GPU services.
+
 ## v0 Targets
 
 - Policies: OpenPI, StarVLA
@@ -28,6 +65,10 @@ example lines rather than variants hidden behind a universal runner.
 - `vla_rl.algorithms.pld`: PLD Stage 1 residual action policy, residual
   observation processing, SAC updates, Cal-QL-style critic pretraining, and
   offline/online replay mixing.
+- `residual_sac`: standalone SERL-style residual SAC package used by
+  `examples/libero/residual_sac`. This package intentionally does not depend on
+  the older `vla_rl.algorithms.pld` implementation because the residual SAC
+  example is a strict alignment path for LIBERO chunk-level residual training.
 - `vla_rl.runtime`: thin transport helpers, checkpointing, and HTTP/RPC utilities. Algorithm training loops live in examples.
 - `examples/*/configs`: example-owned configuration files.
 
@@ -137,3 +178,28 @@ python examples/libero/pld/scripts/eval.py --config <config> --checkpoint <check
 ```
 
 PLD formal runs can use `examples/libero/pld/tools/launch_pld_after_collect.sh` to collect base-success replay before starting actor/learner training.
+
+
+## Residual SAC Mainline
+
+The LIBERO residual SAC example starts a full actor/learner/service stack from
+one launcher:
+
+```bash
+bash examples/libero/residual_sac/tools/launch_residual_sac.sh \
+  --mode chunk \
+  --config-name libero_spatial_task4_sparse \
+  --learner-gpu 1 \
+  --actor-gpu 0 \
+  --env-gpu 0 \
+  --eval-env-gpu 0 \
+  --policy-gpu 0 \
+  --policy-server managed \
+  --reward-model false \
+  --with-eval-env
+```
+
+See `examples/libero/residual_sac/README.md` for the reward-model variants,
+seeded YAML matrix, log locations, SwanLab metrics, and GPU placement rules.
+Use `examples/libero/residual_sac/tools/smoke_residual_sac.sh` before launching
+a formal run on a new machine.
