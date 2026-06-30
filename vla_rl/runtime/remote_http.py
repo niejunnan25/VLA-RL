@@ -1,6 +1,10 @@
 from __future__ import annotations
 
+from http.client import CannotSendRequest
 from http.client import HTTPConnection
+from http.client import HTTPException
+from http.client import RemoteDisconnected
+from http.client import ResponseNotReady
 from http.server import BaseHTTPRequestHandler
 import pickle
 import time
@@ -8,6 +12,19 @@ from typing import Any, Callable
 from urllib.parse import urlparse
 
 import numpy as np
+
+
+_TRANSIENT_HTTP_ERRORS = (
+    BrokenPipeError,
+    CannotSendRequest,
+    ConnectionAbortedError,
+    ConnectionResetError,
+    HTTPException,
+    OSError,
+    RemoteDisconnected,
+    ResponseNotReady,
+    TimeoutError,
+)
 
 
 def sanitize_pickle_value(value: Any) -> Any:
@@ -29,6 +46,7 @@ class RemoteHttpRpcClient:
         timeout: float = 30.0,
         retries: int = 3,
         retry_sleep: float = 1.0,
+        max_retry_sleep: float | None = None,
         keep_alive: bool = True,
     ) -> None:
         parsed = urlparse(url)
@@ -39,14 +57,18 @@ class RemoteHttpRpcClient:
         self.port = parsed.port
         self.timeout = float(timeout)
         self.retries = int(retries)
-        self.retry_sleep = float(retry_sleep)
+        self.retry_sleep = max(0.0, float(retry_sleep))
+        self.max_retry_sleep = (
+            max(0.0, float(max_retry_sleep)) if max_retry_sleep is not None else self.retry_sleep
+        )
         self.keep_alive = bool(keep_alive)
         self._conn: HTTPConnection | None = None
 
     def call(self, method: str, **kwargs) -> Any:
         payload = pickle.dumps({"method": method, "kwargs": sanitize_pickle_value(kwargs)}, protocol=pickle.HIGHEST_PROTOCOL)
-        last_error: Exception | None = None
-        for attempt in range(max(1, self.retries)):
+        max_attempts = 1 + max(0, int(self.retries))
+        last_error: BaseException | None = None
+        for attempt in range(max_attempts):
             try:
                 conn = self._connection()
                 headers = {
@@ -62,12 +84,20 @@ class RemoteHttpRpcClient:
                 if isinstance(result, dict) and "error" in result:
                     raise RuntimeError(f"RPC {method} failed: {result['error']}")
                 return result.get("result") if isinstance(result, dict) else result
-            except Exception as exc:  # pragma: no cover - retry path is timing dependent.
+            except _TRANSIENT_HTTP_ERRORS as exc:  # pragma: no cover - timing dependent.
                 last_error = exc
                 self.close()
-                if attempt + 1 < max(1, self.retries):
-                    time.sleep(self.retry_sleep)
-        raise RuntimeError(f"RPC {method} failed after {self.retries} attempt(s): {last_error}") from last_error
+                if attempt + 1 >= max_attempts:
+                    break
+                time.sleep(self._retry_sleep_for_attempt(attempt))
+
+        raise RuntimeError(f"RPC {method} failed after {max_attempts} attempt(s): {last_error}") from last_error
+
+    def _retry_sleep_for_attempt(self, attempt: int) -> float:
+        if self.retry_sleep <= 0.0:
+            return 0.0
+        sleep_sec = self.retry_sleep * (2.0 ** max(0, int(attempt)))
+        return min(float(sleep_sec), float(self.max_retry_sleep))
 
     def close(self) -> None:
         if self._conn is not None:

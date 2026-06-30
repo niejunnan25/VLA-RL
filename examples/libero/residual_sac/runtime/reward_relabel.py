@@ -204,6 +204,7 @@ class RewardRelabelHttpClient:
         timeout_sec: float,
         max_retries: int,
         retry_backoff_sec: float,
+        max_retry_backoff_sec: float,
     ) -> None:
         self.url = str(url)
         self.method = str(method)
@@ -213,6 +214,7 @@ class RewardRelabelHttpClient:
             timeout=float(timeout_sec),
             retries=int(max_retries),
             retry_sleep=float(retry_backoff_sec),
+            max_retry_sleep=float(max_retry_backoff_sec),
         )
 
     def close(self) -> None:
@@ -682,6 +684,7 @@ class RemoteRewardRelabeler(BaseRewardRelabeler):
                 timeout_sec=float(cfg.remote.timeout_sec),
                 max_retries=int(cfg.remote.max_retries),
                 retry_backoff_sec=float(cfg.remote.retry_backoff_sec),
+                max_retry_backoff_sec=float(cfg.remote.max_retry_backoff_sec),
             )
         else:
             self._client = RewardRelabelGrpcClient(

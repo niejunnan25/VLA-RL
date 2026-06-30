@@ -34,6 +34,7 @@ class RemoteProgressClient:
         timeout: float = 120.0,
         retries: int = 1,
         retry_sleep: float = 0.5,
+        max_retry_sleep: float | None = None,
     ) -> None:
         self.method = str(method)
         self.client = RemoteHttpRpcClient(
@@ -41,6 +42,7 @@ class RemoteProgressClient:
             timeout=float(timeout),
             retries=int(retries),
             retry_sleep=float(retry_sleep),
+            max_retry_sleep=max_retry_sleep,
             keep_alive=True,
         )
 

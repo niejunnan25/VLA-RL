@@ -97,9 +97,9 @@ reward:
     method: predict_progress
     timeout_sec: 120.0
     max_message_mb: 256
-    max_retries: 1
-    retry_backoff_sec: 0.5
-    max_retry_backoff_sec: 5.0
+    max_retries: 3
+    retry_backoff_sec: 0.2
+    max_retry_backoff_sec: 2.0
     compact_transitions: true
   async:
     enabled: true
