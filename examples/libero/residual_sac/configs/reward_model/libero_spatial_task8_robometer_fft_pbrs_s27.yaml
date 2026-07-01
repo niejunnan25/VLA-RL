@@ -58,7 +58,7 @@ backfill_policy:
   mode: thread
 
 recycle:
-  enabled: true
+  enabled: false
   output_root: rollout
 
 env:

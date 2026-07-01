@@ -5,18 +5,18 @@ libero_config_dir: null
 libero_datasets_root: null
 
 task:
-  suite_name: libero_spatial
+  suite_name: libero_goal
   task_id: 9
 
 runtime:
   role: actor
   trainer_host: 127.0.0.1
-  trainer_port: 62344
-  broadcast_port: 62345
+  trainer_port: 65044
+  broadcast_port: 65045
   data_store_queue_size: 2000
   trainer_transport:
     mode: sync_commit
-    data_port: 62346
+    data_port: 65046
     control_timeout_ms: 2000
     data_queue_capacity: 8
     data_socket_hwm: 8
@@ -26,7 +26,7 @@ runtime:
 
 processor_transport:
   host: 127.0.0.1
-  port: 62347
+  port: 65047
   timeout_ms: 800
   queue_capacity: 4
 
@@ -39,21 +39,21 @@ processor_batching:
 wandb:
   project: RoboReward
   entity: null
-  exp_name: libero_spatial_t09_robodopamine_pbrs_s0
-  group: libero_spatial_robodopamine_pbrs
+  exp_name: libero_goal_t09_sparse_s0
+  group: libero_goal_sparse
   mode: online
   debug: false
 
 policy:
   type: openpi
   host: localhost
-  port: 62341
+  port: 65041
   id: null
 
 backfill_policy:
   enabled: false
   host: ${policy.host}
-  port: 62342
+  port: 65042
   max_pending_chunks: 2
   mode: thread
 
@@ -70,42 +70,13 @@ env:
   seed: 7
   remote:
     host: 127.0.0.1
-    port: 62340
+    port: 65040
     timeout_sec: 180.0
 
 obs:
   image_keys: [image, wrist_image]
   vector_obs_keys: [robot_proprio, base_action_chunk, alpha]
   stack_horizon: 1
-
-reward:
-  source: robodopamine
-  name: robodopamine
-  transform: env_plus_potential_delta
-  discount: ${sac.discount}
-  scale: 1.0
-  shift: 0.0
-  clip_min: null
-  clip_max: null
-  fail_on_error: true
-  trajectory_start_idx: 0
-  remote:
-    transport: http
-    host: 127.0.0.1
-    port: 62348
-    url: http://${reward.remote.host}:${reward.remote.port}
-    method: predict_progress
-    timeout_sec: 120.0
-    max_message_mb: 256
-    max_retries: 1
-    retry_backoff_sec: 0.5
-    max_retry_backoff_sec: 5.0
-    compact_transitions: true
-  async:
-    enabled: true
-    max_pending_chunks: 512
-    batch_size: 1
-    max_wait_ms: 5
 
 residual:
   alpha: 0.2
@@ -218,7 +189,7 @@ training:
       backend: remote
       remote:
         host: 127.0.0.1
-        port: 62343
+        port: 65043
         timeout_sec: 180.0
 
 logging:
@@ -226,7 +197,7 @@ logging:
   episode_log_file: null
 
 launch:
-  output_root: examples/libero/residual_sac/outputs/reward_model/libero_spatial_robodopamine_pbrs_300k/task09
+  output_root: examples/libero/residual_sac/outputs/libero_goal_sparse_300k/task09
 
 hydra:
   run:
