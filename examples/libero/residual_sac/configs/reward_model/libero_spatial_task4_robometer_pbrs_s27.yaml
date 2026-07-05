@@ -11,12 +11,12 @@ task:
 runtime:
   role: actor
   trainer_host: 127.0.0.1
-  trainer_port: 64044
-  broadcast_port: 64045
+  trainer_port: 42044
+  broadcast_port: 42045
   data_store_queue_size: 2000
   trainer_transport:
     mode: sync_commit
-    data_port: 64046
+    data_port: 42046
     control_timeout_ms: 2000
     data_queue_capacity: 8
     data_socket_hwm: 8
@@ -26,7 +26,7 @@ runtime:
 
 processor_transport:
   host: 127.0.0.1
-  port: 64047
+  port: 42047
   timeout_ms: 800
   queue_capacity: 4
 
@@ -47,13 +47,13 @@ wandb:
 policy:
   type: openpi
   host: localhost
-  port: 64041
+  port: 42041
   id: null
 
 backfill_policy:
   enabled: false
   host: ${policy.host}
-  port: 64042
+  port: 42042
   max_pending_chunks: 2
   mode: thread
 
@@ -70,7 +70,7 @@ env:
   seed: 27
   remote:
     host: 127.0.0.1
-    port: 64040
+    port: 42040
     timeout_sec: 180.0
 
 obs:
@@ -92,7 +92,7 @@ reward:
   remote:
     transport: http
     host: 127.0.0.1
-    port: 64049
+    port: 42049
     url: http://${reward.remote.host}:${reward.remote.port}
     method: predict_progress
     timeout_sec: 120.0
@@ -218,7 +218,7 @@ training:
       backend: remote
       remote:
         host: 127.0.0.1
-        port: 64043
+        port: 42043
         timeout_sec: 180.0
 
 logging:

@@ -257,6 +257,8 @@ class RewardConfig:
     shift: float
     clip_min: float | None
     clip_max: float | None
+    component_clip_min: float | None
+    component_clip_max: float | None
     fail_on_error: bool
     trajectory_start_idx: int
     remote: RewardRemoteConfig
@@ -1015,6 +1017,23 @@ def _parse_reward_cfg(cfg: DictConfig) -> RewardConfig:
             "reward.clip_min must be <= reward.clip_max: "
             f"got {clip_min} > {clip_max}"
         )
+    component_clip_min = _optional_float_value(
+        reward_cfg.get("component_clip_min", None),
+        "reward.component_clip_min",
+    )
+    component_clip_max = _optional_float_value(
+        reward_cfg.get("component_clip_max", None),
+        "reward.component_clip_max",
+    )
+    if (
+        component_clip_min is not None
+        and component_clip_max is not None
+        and component_clip_min > component_clip_max
+    ):
+        raise ValueError(
+            "reward.component_clip_min must be <= reward.component_clip_max: "
+            f"got {component_clip_min} > {component_clip_max}"
+        )
 
     if raw_source in {"robodopamine", "robodopamine_rpc"}:
         default_name = "robodopamine"
@@ -1036,6 +1055,8 @@ def _parse_reward_cfg(cfg: DictConfig) -> RewardConfig:
         shift=_float_value(reward_cfg.get("shift", 0.0), "reward.shift"),
         clip_min=clip_min,
         clip_max=clip_max,
+        component_clip_min=component_clip_min,
+        component_clip_max=component_clip_max,
         fail_on_error=bool(reward_cfg.get("fail_on_error", True)),
         trajectory_start_idx=_nonnegative_int(
             reward_cfg.get("trajectory_start_idx", 0),

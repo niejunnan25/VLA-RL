@@ -485,6 +485,8 @@ def _apply_reward_transform(
     shift: float,
     clip_min: float | None,
     clip_max: float | None,
+    component_clip_min: float | None,
+    component_clip_max: float | None,
 ) -> tuple[float, float]:
     if transform not in _VALID_TRANSFORMS:
         raise RewardRelabelError(f"unsupported reward transform: {transform!r}")
@@ -495,6 +497,10 @@ def _apply_reward_transform(
         potential_after=float(potential_after),
         discount=float(discount),
     )
+    if component_clip_min is not None:
+        component = max(float(component_clip_min), float(component))
+    if component_clip_max is not None:
+        component = min(float(component_clip_max), float(component))
     if transform == "env_only":
         reward = float(env_reward)
     elif transform.startswith("env_plus_"):
@@ -1005,6 +1011,8 @@ class RemoteRewardRelabeler(BaseRewardRelabeler):
                     shift=float(self.cfg.shift),
                     clip_min=self.cfg.clip_min,
                     clip_max=self.cfg.clip_max,
+                    component_clip_min=self.cfg.component_clip_min,
+                    component_clip_max=self.cfg.component_clip_max,
                 )
             self._last_potential = float(potential_after)
 

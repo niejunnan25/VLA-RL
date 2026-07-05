@@ -5,7 +5,7 @@ ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 cd "$ROOT_DIR"
 
 HOST="127.0.0.1"
-PORT="30000"
+PORT="40000"
 GPU_ID="${LIBERO_ENV_GPU_ID:-}"
 EXTRA_ARGS=()
 
