@@ -104,10 +104,10 @@ from examples.libero.residual_sac.runtime.async_eval_runtime import (
     wait_for_async_eval_worker,
 )
 from examples.libero.residual_sac.runtime.learner_shutdown import (
-    ACTOR_DONE_DATA_COMMITTED_STOP_REASON,
+    ACTOR_DONE_ASYNC_EVAL_DRAINED_STOP_REASON,
 )
 from examples.libero.residual_sac.runtime.learner_shutdown import (
-    actor_done_data_committed,
+    actor_done_ready_for_async_eval_shutdown,
 )
 from examples.libero.residual_sac.runtime.transition_assembly import (
     AssemblyResult,
@@ -901,7 +901,7 @@ def learner(
         "timer_log_path": str(learner_timer_log_path),
         "stop_reason": None,
     }
-    stop_reason = ACTOR_DONE_DATA_COMMITTED_STOP_REASON
+    stop_reason = ACTOR_DONE_ASYNC_EVAL_DRAINED_STOP_REASON
 
     def _transport_status() -> dict[str, Any]:
         try:
@@ -967,12 +967,9 @@ def learner(
 
     def _should_stop_after_actor_done() -> bool:
         target_env_steps = int(cfg.training.max_env_steps)
-        return actor_done_data_committed(
+        return actor_done_ready_for_async_eval_shutdown(
             actor_done=int(env_steps) >= target_env_steps,
             target_env_steps=target_env_steps,
-            latest_data_id=int(_committed_online_steps()),
-            transport_status=_transport_status(),
-            require_transport_commit=True,
         )
 
     def stats_callback(request_type: str, payload: dict[str, Any]) -> dict[str, Any]:
@@ -1344,7 +1341,7 @@ def learner(
                 )
                 if _should_stop_after_actor_done():
                     warmup_stopped_for_actor_done = True
-                    stop_reason = ACTOR_DONE_DATA_COMMITTED_STOP_REASON
+                    stop_reason = ACTOR_DONE_ASYNC_EVAL_DRAINED_STOP_REASON
                     logger.info(
                         "stopping replay warmup: reason=%s replay=%s training_starts=%s env_steps=%s",
                         stop_reason,
@@ -1379,11 +1376,12 @@ def learner(
                 0, int(update_steps - offline_pretrain_steps_done)
             )
             if _should_stop_after_actor_done():
-                stop_reason = ACTOR_DONE_DATA_COMMITTED_STOP_REASON
+                stop_reason = ACTOR_DONE_ASYNC_EVAL_DRAINED_STOP_REASON
                 _maybe_queue_async_eval()
                 logger.info(
                     "stopping learner: reason=%s update_steps=%s env_steps=%s "
                     "target_env_steps=%s replay_latest_data_id=%s replay_size=%s "
+                    "last_completed_episode=%s last_queued_async_eval_episode=%s "
                     "transport=%s",
                     stop_reason,
                     int(update_steps),
@@ -1391,6 +1389,8 @@ def learner(
                     int(cfg.training.max_env_steps),
                     int(_committed_online_steps()),
                     int(len(replay_buffer)),
+                    int(latest_completed_episode_id),
+                    int(last_queued_async_eval_episode),
                     _transport_status(),
                 )
                 break

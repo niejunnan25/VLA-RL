@@ -6,7 +6,20 @@ from typing import Any
 from typing import Mapping
 
 
-ACTOR_DONE_DATA_COMMITTED_STOP_REASON = "actor_done_data_committed"
+ACTOR_DONE_ASYNC_EVAL_DRAINED_STOP_REASON = "actor_done_async_eval_drained"
+ACTOR_DONE_DATA_COMMITTED_STOP_REASON = ACTOR_DONE_ASYNC_EVAL_DRAINED_STOP_REASON
+
+
+def actor_done_ready_for_async_eval_shutdown(
+    *,
+    actor_done: bool,
+    target_env_steps: int,
+) -> bool:
+    """Return True once actor rollout is done and learner should drain eval."""
+
+    if int(target_env_steps) <= 0:
+        return False
+    return bool(actor_done)
 
 
 def actor_done_data_committed(
@@ -17,33 +30,24 @@ def actor_done_data_committed(
     transport_status: Mapping[str, Any] | None = None,
     require_transport_commit: bool = True,
 ) -> bool:
-    """Return True when actor rollout is done and all actor data is visible."""
+    """Compatibility wrapper for the old shutdown predicate name.
 
-    if not bool(actor_done):
-        return False
+    Replay data ids and trainer transport update ids are not env-step counters,
+    so they must not gate learner shutdown after the actor has finished.
+    """
 
-    target_env_steps = int(target_env_steps)
-    if target_env_steps <= 0:
-        return False
-
-    if int(latest_data_id) < target_env_steps:
-        return False
-
-    if not bool(require_transport_commit):
-        return True
-
-    status = {} if transport_status is None else dict(transport_status)
-    accepted = int(status.get("accepted_update_id", -1))
-    committed = int(status.get("committed_update_id", -1))
-    target_last_data_id = max(0, target_env_steps - 1)
-    if accepted < target_last_data_id or committed < target_last_data_id:
-        return False
-    if accepted >= 0 and committed >= 0 and accepted > committed:
-        return False
-    return True
+    _ = latest_data_id
+    _ = transport_status
+    _ = require_transport_commit
+    return actor_done_ready_for_async_eval_shutdown(
+        actor_done=actor_done,
+        target_env_steps=target_env_steps,
+    )
 
 
 __all__ = [
+    "ACTOR_DONE_ASYNC_EVAL_DRAINED_STOP_REASON",
     "ACTOR_DONE_DATA_COMMITTED_STOP_REASON",
+    "actor_done_ready_for_async_eval_shutdown",
     "actor_done_data_committed",
 ]
