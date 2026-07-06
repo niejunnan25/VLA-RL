@@ -11,12 +11,12 @@ task:
 runtime:
   role: actor
   trainer_host: 127.0.0.1
-  trainer_port: 40344
-  broadcast_port: 40345
+  trainer_port: 49344
+  broadcast_port: 49345
   data_store_queue_size: 2000
   trainer_transport:
     mode: sync_commit
-    data_port: 40346
+    data_port: 49346
     control_timeout_ms: 2000
     data_queue_capacity: 8
     data_socket_hwm: 8
@@ -26,7 +26,7 @@ runtime:
 
 processor_transport:
   host: 127.0.0.1
-  port: 40347
+  port: 49347
   timeout_ms: 800
   queue_capacity: 4
 
@@ -47,13 +47,13 @@ wandb:
 policy:
   type: openpi
   host: localhost
-  port: 40341
+  port: 49341
   id: null
 
 backfill_policy:
   enabled: false
   host: ${policy.host}
-  port: 40342
+  port: 49342
   max_pending_chunks: 2
   mode: thread
 
@@ -70,7 +70,7 @@ env:
   seed: 7
   remote:
     host: 127.0.0.1
-    port: 40340
+    port: 49340
     timeout_sec: 180.0
 
 obs:
@@ -89,10 +89,11 @@ reward:
   clip_max: null
   fail_on_error: true
   trajectory_start_idx: 0
+  model_path: /vla/users/niejunnan/assets/Robometer-4B
   remote:
     transport: http
     host: 127.0.0.1
-    port: 40349
+    port: 49349
     url: http://${reward.remote.host}:${reward.remote.port}
     method: predict_progress
     timeout_sec: 120.0
@@ -218,7 +219,7 @@ training:
       backend: remote
       remote:
         host: 127.0.0.1
-        port: 40343
+        port: 49343
         timeout_sec: 180.0
 
 logging:

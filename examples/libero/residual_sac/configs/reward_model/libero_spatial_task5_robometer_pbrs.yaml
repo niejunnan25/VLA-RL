@@ -89,6 +89,7 @@ reward:
   clip_max: null
   fail_on_error: true
   trajectory_start_idx: 0
+  model_path: /vla/users/niejunnan/assets/Robometer-4B
   remote:
     transport: http
     host: 127.0.0.1

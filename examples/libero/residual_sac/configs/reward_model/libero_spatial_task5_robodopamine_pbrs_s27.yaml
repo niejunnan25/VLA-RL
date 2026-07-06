@@ -11,12 +11,12 @@ task:
 runtime:
   role: actor
   trainer_host: 127.0.0.1
-  trainer_port: 42144
-  broadcast_port: 42145
+  trainer_port: 30294
+  broadcast_port: 30295
   data_store_queue_size: 2000
   trainer_transport:
     mode: sync_commit
-    data_port: 42146
+    data_port: 30296
     control_timeout_ms: 2000
     data_queue_capacity: 8
     data_socket_hwm: 8
@@ -26,7 +26,7 @@ runtime:
 
 processor_transport:
   host: 127.0.0.1
-  port: 42147
+  port: 30297
   timeout_ms: 800
   queue_capacity: 4
 
@@ -47,13 +47,13 @@ wandb:
 policy:
   type: openpi
   host: localhost
-  port: 42141
+  port: 30291
   id: null
 
 backfill_policy:
   enabled: false
   host: ${policy.host}
-  port: 42142
+  port: 30292
   max_pending_chunks: 2
   mode: thread
 
@@ -70,7 +70,7 @@ env:
   seed: 27
   remote:
     host: 127.0.0.1
-    port: 42140
+    port: 30290
     timeout_sec: 180.0
 
 obs:
@@ -89,10 +89,11 @@ reward:
   clip_max: null
   fail_on_error: true
   trajectory_start_idx: 0
+  model_path: /vla/users/niejunnan/assets/Robo-Dopamine-GRM-2.0-4B-Preview
   remote:
     transport: http
     host: 127.0.0.1
-    port: 42148
+    port: 30298
     url: http://${reward.remote.host}:${reward.remote.port}
     method: predict_progress
     timeout_sec: 120.0
@@ -218,7 +219,7 @@ training:
       backend: remote
       remote:
         host: 127.0.0.1
-        port: 42143
+        port: 30293
         timeout_sec: 180.0
 
 logging:

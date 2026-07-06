@@ -14,6 +14,8 @@ TRAINING_MODE=""
 CONFIG_NAME=""
 CONFIG_FILE=""
 OUTPUT_ROOT=""
+OUTPUT_SUFFIX=""
+TIMESTAMP_OUTPUT_DIR=0
 CONFIG_TRAINING_MODE=""
 SERL_CONDA_ENV="${SERL_CONDA_ENV:-$DEFAULT_SERL_CONDA_ENV}"
 LEARNER_GPU=""
@@ -122,7 +124,7 @@ Usage:
   bash examples/libero/residual_sac/tools/launch_residual_sac.sh \
     --mode chunk \
     [--config-name NAME | --config-file /abs/path/to/config.yaml] \
-    [--output-root DIR] \
+    [--output-root DIR] [--output-suffix SUFFIX] [--timestamp-output-dir] \
     [--learner-gpu N] [--actor-gpu N] [--env-gpu N] [--eval-env-gpu N] \
     [--policy-gpu N] [--backfill-gpu N] [--policy-server managed|external] \
     [--reward-model true|false] [--reward-model-gpu N] \
@@ -602,6 +604,14 @@ while [[ $# -gt 0 ]]; do
             OUTPUT_ROOT="$2"
             shift 2
             ;;
+        --output-suffix)
+            OUTPUT_SUFFIX="$2"
+            shift 2
+            ;;
+        --timestamp-output-dir)
+            TIMESTAMP_OUTPUT_DIR=1
+            shift
+            ;;
         --serl-conda-env)
             SERL_CONDA_ENV="$2"
             shift 2
@@ -828,6 +838,19 @@ if [[ "$OUTPUT_ROOT" != /* ]]; then
     OUTPUT_ROOT="$REPO_ROOT/$OUTPUT_ROOT"
 fi
 OUTPUT_ROOT="$(resolve_path "$OUTPUT_ROOT")"
+
+if (( TIMESTAMP_OUTPUT_DIR )); then
+    TIMESTAMP_SUFFIX="$(date +%Y%m%d_%H%M%S)"
+    if [[ -n "$OUTPUT_SUFFIX" ]]; then
+        OUTPUT_SUFFIX="${OUTPUT_SUFFIX}_${TIMESTAMP_SUFFIX}"
+    else
+        OUTPUT_SUFFIX="$TIMESTAMP_SUFFIX"
+    fi
+fi
+if [[ -n "$OUTPUT_SUFFIX" ]]; then
+    [[ "$OUTPUT_SUFFIX" != */* ]] || die "--output-suffix must not contain /"
+    OUTPUT_ROOT="${OUTPUT_ROOT}_${OUTPUT_SUFFIX}"
+fi
 
 if (( CLEAN_OUTPUT_DIR )) && (( REUSE_OUTPUT_DIR )); then
     die "--clean-output-dir and --reuse-output-dir cannot be used together"

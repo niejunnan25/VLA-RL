@@ -17,9 +17,11 @@ OUT_ROOT="${OUT_ROOT:-$DEFAULT_OUT_ROOT}"
 FORWARD_BATCH_SIZE="${FORWARD_BATCH_SIZE:-8}"
 IMAGE_TRANSPORT="${IMAGE_TRANSPORT:-memory}"
 VLLM_ATTENTION_BACKEND="${VLLM_ATTENTION_BACKEND:-TORCH_SDPA}"
+ROBO_DOPAMINE_VLLM_GPU_MEMORY_UTILIZATION="${ROBO_DOPAMINE_VLLM_GPU_MEMORY_UTILIZATION:-0.4}"
 
 export PYTHONUNBUFFERED=1
 export VLLM_ATTENTION_BACKEND
+export ROBO_DOPAMINE_VLLM_GPU_MEMORY_UTILIZATION
 
 if [[ -d "/vla/users/niejunnan/envs/robo-dopamine/lib/python3.10/site-packages/nvidia" ]]; then
   NVIDIA_LIBS="$(find /vla/users/niejunnan/envs/robo-dopamine/lib/python3.10/site-packages/nvidia -mindepth 2 -maxdepth 2 -type d -name lib | paste -sd: -)"
