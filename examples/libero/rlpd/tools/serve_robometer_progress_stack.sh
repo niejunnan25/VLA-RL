@@ -4,6 +4,9 @@ set -euo pipefail
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../../../.." && pwd)"
 PYTHON_BIN="${PYTHON_BIN:-/vla/users/niejunnan/envs/serl_torch/bin/python}"
 ROBOMETER_ROOT="${ROBOMETER_ROOT:-/vla/users/niejunnan/workspace/robometer}"
+ROBOMETER_SHARED_RUNTIME_ROOT="${ROBOMETER_SHARED_RUNTIME_ROOT:-/vla/users/niejunnan/runtime/robometer}"
+ROBOMETER_VENV="${ROBOMETER_VENV:-$ROBOMETER_ROOT/.venv-shared}"
+source "$(dirname "${BASH_SOURCE[0]}")/robometer_shared_runtime_env.sh"
 
 unset http_proxy https_proxy HTTP_PROXY HTTPS_PROXY ALL_PROXY all_proxy
 export CUDA_DEVICE_ORDER="${CUDA_DEVICE_ORDER:-PCI_BUS_ID}"
@@ -19,19 +22,38 @@ export TOKENIZERS_PARALLELISM="${TOKENIZERS_PARALLELISM:-false}"
 export TRANSFORMERS_NO_TF="${TRANSFORMERS_NO_TF:-1}"
 export USE_TF="${USE_TF:-0}"
 export USE_FLAX="${USE_FLAX:-0}"
-if [[ -z "${ROBOMETER_PYTHON_CMD:-}" ]]; then
-  ROBOMETER_VENV_PYTHON="$ROBOMETER_ROOT/.venv/bin/python"
-  if [[ -x "$ROBOMETER_VENV_PYTHON" ]] && "$ROBOMETER_VENV_PYTHON" - <<'PY_CHECK' >/dev/null 2>&1
+
+if ! "$ROBOMETER_PYTHON" - <<'PY_CHECK' >/dev/null
+import ctypes
+import os
+from pathlib import Path
+
+import decord
 import fastapi
 import omegaconf
 import torch
 import uvicorn
+
+ctypes.CDLL("libcudnn_graph.so.9")
+torch.backends.cudnn.version()
+site_packages = Path(os.environ["ROBOMETER_SITE_PACKAGES"]).resolve()
+expected_cudnn_root = (site_packages / "nvidia" / "cudnn" / "lib").resolve()
+cudnn_paths = {
+    Path(line.rsplit(maxsplit=1)[-1]).resolve()
+    for line in Path("/proc/self/maps").read_text().splitlines()
+    if "libcudnn" in line and line.rsplit(maxsplit=1)[-1].startswith("/")
+}
+if not cudnn_paths:
+    raise RuntimeError("No cuDNN library was loaded during validation")
+for path in cudnn_paths:
+    try:
+        path.relative_to(expected_cudnn_root)
+    except ValueError as exc:
+        raise RuntimeError(f"Host cuDNN leaked into RoboMeter: {path}") from exc
 PY_CHECK
-  then
-    ROBOMETER_PYTHON_CMD="$ROBOMETER_VENV_PYTHON"
-  else
-    ROBOMETER_PYTHON_CMD="uv run python"
-  fi
+then
+  echo "RoboMeter shared runtime validation failed: $ROBOMETER_PYTHON" >&2
+  exit 1
 fi
 MODEL_PATH="${MODEL_PATH:-/vla/users/niejunnan/assets/Robometer-4B}"
 HOST="${HOST:-127.0.0.1}"
@@ -91,7 +113,7 @@ if [[ "$BACKEND" == "http" ]]; then
     if [[ "$ROBOMETER_DISABLE_IMPORT_STUBS" != "1" ]]; then
       export PYTHONPATH="$ROBOMETER_IMPORT_STUB_DIR${PYTHONPATH:+:$PYTHONPATH}"
     fi
-    $ROBOMETER_PYTHON_CMD robometer/evals/eval_server.py \
+    "$ROBOMETER_PYTHON" robometer/evals/eval_server.py \
       model_path="$MODEL_PATH_FOR_SERVER" \
       num_gpus=1 \
       max_workers=1 \
@@ -130,7 +152,7 @@ else
     fi
     # Intentionally leave ROBOMETER_IMAGE_KEYS unquoted so users can pass
     # multiple space-separated keys when running non-LIBERO multi-view ablations.
-    $ROBOMETER_PYTHON_CMD "$ROOT/scripts/serve_robometer_progress_http.py" \
+    "$ROBOMETER_PYTHON" "$ROOT/scripts/serve_robometer_progress_http.py" \
       --backend native \
       --model-path "$MODEL_PATH_FOR_SERVER" \
       --device cuda \
